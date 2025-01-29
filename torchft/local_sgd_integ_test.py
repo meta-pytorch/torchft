@@ -8,11 +8,11 @@ from unittest import TestCase
 import torch
 from torch import nn, optim
 
+from torchft._torchft import LighthouseServer
 from torchft.local_sgd import DiLoCo, LocalSGD
 from torchft.manager import Manager
 from torchft.manager_integ_test import FailureInjector, MyModel, Runner
 from torchft.process_group import ProcessGroupGloo
-from torchft.torchft import Lighthouse
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ def diloco_train_loop(
 
 class ManagerIntegTest(TestCase):
     def test_local_sgd_recovery(self) -> None:
-        lighthouse = Lighthouse(
+        lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=2,
         )
@@ -214,7 +214,7 @@ class ManagerIntegTest(TestCase):
         self.assertEqual(failure_injectors[1].count, 1)
 
     def test_diloco_healthy(self) -> None:
-        lighthouse = Lighthouse(
+        lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=2,
         )
@@ -258,7 +258,7 @@ class ManagerIntegTest(TestCase):
                 )
 
     def test_diloco_recovery(self) -> None:
-        lighthouse = Lighthouse(
+        lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=2,
         )
