@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import concurrent
 from datetime import timedelta
 from typing import Optional
 from unittest import TestCase
@@ -521,10 +522,16 @@ class TestManager(TestCase):
     def test_manager_numerics(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
-        manager._quorum_future = MagicMock()
+        manager._quorum_future = quorum_future = MagicMock(
+            spec=concurrent.futures.Future
+        )
         manager._participating_rank = 1
         manager._participating_world_size = 5
         self.assertEqual(manager.num_participants(), 5)
+        self.assertEqual(quorum_future.result.call_count, 1)
+        self.assertEqual(manager.participating_rank(), 1)
+        self.assertEqual(quorum_future.result.call_count, 2)
+
         # pyre-ignore[16]: _pg is mocked
         manager._pg.allreduce.return_value = _DummyWork(None)
 

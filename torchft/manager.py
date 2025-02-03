@@ -652,15 +652,35 @@ class Manager:
         """
         return self._batches_committed
 
+    def participating_rank(self) -> Optional[int]:
+        """
+        Get the replica group rank of the current quorum. This will be the same on all
+        ranks within the replica group.
+
+        If this replica group is not participating in the current quorum, this will be None.
+
+        This will block on the async quorum if it is not yet ready.
+
+        Returns:
+            the rank of the current quorum
+        """
+        self.wait_quorum()
+
+        return self._participating_rank
+
     def num_participants(self) -> int:
         """
         Get the number of participants in the current quorum.
 
         This is the number of replicas participating in the current step.
 
+        This will block on the async quorum if it is not yet ready.
+
         Returns:
             the number of participants in the current quorum
         """
+        self.wait_quorum()
+
         assert self._participating_world_size >= 0, "internal error"
         return self._participating_world_size
 
