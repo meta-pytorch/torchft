@@ -664,6 +664,9 @@ class Manager:
         Returns:
             the rank of the current quorum
         """
+        if self._quorum_future is None:
+            return None
+
         self.wait_quorum()
 
         return self._participating_rank
@@ -679,6 +682,9 @@ class Manager:
         Returns:
             the number of participants in the current quorum
         """
+        if self._quorum_future is None:
+            return 0
+
         self.wait_quorum()
 
         assert self._participating_world_size >= 0, "internal error"

@@ -196,6 +196,9 @@ class TestManager(TestCase):
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
 
+        self.assertEqual(manager.num_participants(), 0)
+        self.assertEqual(manager.participating_rank(), None)
+
         manager.start_quorum()
         manager.allreduce(torch.tensor([1.0])).wait()
         self.assertFalse(manager._healing)
