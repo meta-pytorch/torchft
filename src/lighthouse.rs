@@ -26,7 +26,7 @@ use structopt::StructOpt;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tokio::time::sleep;
+use tokio::time::interval;
 use tonic::service::Routes;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
@@ -301,13 +301,11 @@ impl Lighthouse {
     }
 
     async fn _run_quorum(self: Arc<Self>) -> Result<()> {
+        let mut interval = interval(Duration::from_millis(self.opt.quorum_tick_ms));
         loop {
-            {
-                let mut state = self.state.lock().await;
-                self.clone()._quorum_tick(&mut state)?;
-            }
-
-            sleep(Duration::from_millis(self.opt.quorum_tick_ms)).await;
+            interval.tick().await; // Wait for the next tick
+            let mut state = self.state.lock().await;
+            self.clone()._quorum_tick(&mut state)?;
         }
     }
 
