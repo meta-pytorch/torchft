@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ab57f551-7a66-4e5f-a3e6-c4d033a5863d">
-    <img width="55%" src="https://github.com/user-attachments/assets/9cd7fef9-cfff-409f-a033-d53811f3a99c" alt="torchft">
+    <source media="(prefers-color-scheme: dark)" srcset="./media/torchft_logo_dark.svg">
+    <img width="55%" src="./media/torchft_logo.svg" alt="torchft">
   </picture>
 </p>
 
