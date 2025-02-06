@@ -185,7 +185,7 @@ class ProcessGroup(BaseProcessGroup):
     def reduce_scatter(
         self,
         output_tensors: List[torch.Tensor],
-        input_tensors: List[torch.Tensor],
+        input_tensors: List[List[torch.Tensor]],
         opts: ReduceScatterOptions,
     ) -> Work:
         """
@@ -306,7 +306,7 @@ class ProcessGroupWrapper(ProcessGroup):
     def reduce_scatter(
         self,
         output_tensors: List[torch.Tensor],
-        input_tensors: List[torch.Tensor],
+        input_tensors: List[List[torch.Tensor]],
         opts: object,
     ) -> Work:
         return self.parent.reduce_scatter(output_tensors, input_tensors, opts)
@@ -424,10 +424,10 @@ class ProcessGroupDummy(ProcessGroup):
     def reduce_scatter(
         self,
         output_tensors: List[torch.Tensor],
-        input_tensors: List[torch.Tensor],
+        input_tensors: List[List[torch.Tensor]],
         opts: object,
     ) -> Work:
-        for o, i in zip(output_tensors, input_tensors):
+        for o, i in zip(output_tensors, input_tensors[0]):
             o.copy_(i)
 
         res = _DummyWork(output_tensors)
@@ -1013,7 +1013,6 @@ class ProcessGroupBaby(ProcessGroup):
             for tensor in tensor_list:
                 if not tensor.is_shared():
                     tensor.share_memory_()
-
         return self._run_func("reduce_scatter", output_tensors, input_tensors, opts)
 
     def size(self) -> int:
