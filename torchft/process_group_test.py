@@ -23,6 +23,7 @@ from torch._C._distributed_c10d import (
     AllreduceOptions,
     BroadcastOptions,
     ReduceOp,
+    ReduceScatterOptions,
     _resolve_process_group,
 )
 from torch.distributed import (
@@ -94,6 +95,7 @@ def _test_pg(
         ("allgather", (output_tensors, [input_tensor], AllgatherOptions())),
         ("broadcast", (tensor_list, BroadcastOptions())),
         ("broadcast_one", (input_tensor, 0)),
+        ("reduce_scatter", (output_tensors, [input_tensor], ReduceScatterOptions())),
     ]
     works: Dict[str, dist._Work] = {}
     for coll_str, args in collectives:
