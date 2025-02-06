@@ -1037,7 +1037,15 @@ class _PickleSafeOptions:
             return tuple(cls.safe_args(arg) for arg in args)
         elif isinstance(args, list):
             return [cls.safe_args(arg) for arg in args]
-        elif isinstance(args, (AllreduceOptions, AllgatherOptions, BroadcastOptions)):
+        elif isinstance(
+            args,
+            (
+                AllreduceOptions,
+                AllgatherOptions,
+                BroadcastOptions,
+                ReduceScatterOptions,
+            ),
+        ):
             return cls.from_torch(args)
         else:
             return args
