@@ -64,7 +64,7 @@ def run_collectives(
     pg: ProcessGroup,
     collectives: List[str],
     example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
-) -> List[Work]:
+) -> List[dist._Work]:
     """Run a single collective."""
     shape: torch.Size = example_tensor.shape
     dtype: torch.dtype = example_tensor.dtype
@@ -109,6 +109,7 @@ def run_collectives(
             for item in tensors_to_check:
                 check_tensors(item)
 
+    assert len(works) == len(tensors_to_check_list)
     for work, tensors_to_check in zip(works, tensors_to_check_list):
         work.wait()
         fut = work.get_future()
