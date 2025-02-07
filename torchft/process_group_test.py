@@ -11,13 +11,12 @@ import os
 import unittest
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Tuple, Union, cast
 from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
-from parameterized import parameterized
 from torch import nn
 from torch._C._distributed_c10d import (
     AllgatherOptions,
@@ -75,39 +74,45 @@ def run_collectives(
         [torch.empty_like(input_tensor) for _ in range(get_world_size(pg))]
     ]
     tensor_list = [torch.empty_like(input_tensor)]
+
     works = []
+    input_tensors = []
 
     if "allreduce" in collectives:
         works += [
             pg.allreduce([input_tensor], AllreduceOptions()),
             pg.allreduce([input_tensor], ReduceOp.SUM),
         ]
-        input_tensors = input_tensor
+        input_tensors += [input_tensor, input_tensor]
     elif "allgather" in collectives:
         works += [pg.allgather(output_tensors, [input_tensor], AllgatherOptions())]
-        input_tensors = (output_tensors, input_tensor)
+        input_tensors += [(output_tensors, input_tensor)]
     elif "broadcast" in collectives:
         works += [pg.broadcast(tensor_list, BroadcastOptions())]
-        input_tensors = tensor_list
+        input_tensors += [tensor_list]
     elif "broadcast_one" in collectives:
         works += [pg.broadcast_one(input_tensor, 0)]
-        input_tensors = input_tensor
+        input_tensors += [input_tensor]
 
-    def check_tensors(input_tensors: Any) -> None:  # pyre-ignore[2]
+    def check_tensors(input_tensors: Union[torch.Tensor, List[torch.Tensor]]) -> None:
         """Recursively check tensors for input_tensors shape and dtype."""
         if isinstance(input_tensors, torch.Tensor):
-            assert input_tensors.dtype == dtype, f"Output dtype mismatch: {input_tensors.dtype} != {dtype}"
-            assert input_tensors.shape == shape, f"Output shape mismatch: {input_tensors.shape} != {shape}"
+            assert (
+                input_tensors.dtype == dtype
+            ), f"Output dtype mismatch: {input_tensors.dtype} != {dtype}"
+            assert (
+                input_tensors.shape == shape
+            ), f"Output shape mismatch: {input_tensors.shape} != {shape}"
         elif isinstance(input_tensors, (list, tuple)):
             for item in input_tensors:
                 check_tensors(item)
 
-    for work in works:
+    for work, input_tensor in zip(works, input_tensors):
         work.wait()
         fut = work.get_future()
         fut.wait()
         # Check that all tensor arguments have the input_tensors shapes and dtypes
-        check_tensors(input_tensors)
+        check_tensors(input_tensor)
 
     print(works)
     return works
@@ -128,8 +133,7 @@ class NCCLTests(TestCase):
         )
         self.store_addr = f"localhost:{self.store.port}/prefix"
 
-    @parameterized.expand(collectives)
-    def test_nccl(self, collective: str) -> None:
+    def test_nccl(self) -> None:
         device = "cuda"
 
         pg = ProcessGroupNCCL()
@@ -139,7 +143,7 @@ class NCCLTests(TestCase):
 
         run_collectives(
             pg=pg,
-            collectives=[collective],
+            collectives=self.collectives,
             example_tensor=torch.tensor([2], device=device),
         )
 
@@ -153,7 +157,7 @@ class NCCLTests(TestCase):
 
         run_collectives(
             pg=pg,
-            collectives=[collective],
+            collectives=self.collectives,
             example_tensor=torch.tensor([2], device=device),
         )
 
@@ -233,23 +237,21 @@ class GlooTests(TestCase):
         )
         self.store_addr = f"localhost:{self.store.port}/prefix"
 
-    @parameterized.expand(collectives)
-    def test_gloo(self, collective: str) -> None:
+    def test_gloo(self) -> None:
         pg = ProcessGroupGloo()
         pg.configure(self.store_addr, 0, 1)
 
         self.assertEqual(pg.size(), 1)
-        run_collectives(pg=pg, collectives=[collective])
+        run_collectives(pg=pg, collectives=self.collectives)
         m = nn.Linear(3, 4)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
-    @parameterized.expand(collectives)
-    def test_baby_gloo_apis(self, collective: str) -> None:
+    def test_baby_gloo_apis(self) -> None:
         pg = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         pg.configure(self.store_addr, 0, 1)
 
-        run_collectives(pg=pg, collectives=[collective])
+        run_collectives(pg=pg, collectives=self.collectives)
 
         # force collection to ensure no BabyWork objects remain
         gc.collect()
