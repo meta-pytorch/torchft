@@ -76,43 +76,45 @@ def run_collectives(
     tensor_list = [torch.empty_like(input_tensor)]
 
     works = []
-    input_tensors = []
+    tensors_to_check_list = []
 
     if "allreduce" in collectives:
         works += [
             pg.allreduce([input_tensor], AllreduceOptions()),
             pg.allreduce([input_tensor], ReduceOp.SUM),
         ]
-        input_tensors += [input_tensor, input_tensor]
+        tensors_to_check_list += [input_tensor, input_tensor]
     elif "allgather" in collectives:
         works += [pg.allgather(output_tensors, [input_tensor], AllgatherOptions())]
-        input_tensors += [(output_tensors, input_tensor)]
+        tensors_to_check_list += [(output_tensors, input_tensor)]
     elif "broadcast" in collectives:
         works += [pg.broadcast(tensor_list, BroadcastOptions())]
-        input_tensors += [tensor_list]
+        tensors_to_check_list += [tensor_list]
     elif "broadcast_one" in collectives:
         works += [pg.broadcast_one(input_tensor, 0)]
-        input_tensors += [input_tensor]
+        tensors_to_check_list += [input_tensor]
 
-    def check_tensors(input_tensors: Union[torch.Tensor, List[torch.Tensor]]) -> None:
-        """Recursively check tensors for input_tensors shape and dtype."""
-        if isinstance(input_tensors, torch.Tensor):
+    def check_tensors(
+        tensors_to_check: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> None:
+        """Recursively check tensors for tensors_to_check shape and dtype."""
+        if isinstance(tensors_to_check, torch.Tensor):
             assert (
-                input_tensors.dtype == dtype
-            ), f"Output dtype mismatch: {input_tensors.dtype} != {dtype}"
+                tensors_to_check.dtype == dtype
+            ), f"Output dtype mismatch: {tensors_to_check.dtype} != {dtype}"
             assert (
-                input_tensors.shape == shape
-            ), f"Output shape mismatch: {input_tensors.shape} != {shape}"
-        elif isinstance(input_tensors, (list, tuple)):
-            for item in input_tensors:
+                tensors_to_check.shape == shape
+            ), f"Output shape mismatch: {tensors_to_check.shape} != {shape}"
+        elif isinstance(tensors_to_check, (list, tuple)):
+            for item in tensors_to_check:
                 check_tensors(item)
 
-    for work, input_tensor in zip(works, input_tensors):
+    for work, tensors_to_check in zip(works, tensors_to_check_list):
         work.wait()
         fut = work.get_future()
         fut.wait()
-        # Check that all tensor arguments have the input_tensors shapes and dtypes
-        check_tensors(input_tensor)
+        # Check that all tensor arguments have the tensors_to_check_list shapes and dtypes
+        check_tensors(tensors_to_check)
 
     print(works)
     return works
