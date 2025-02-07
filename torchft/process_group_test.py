@@ -61,9 +61,9 @@ def dummy_init_pg() -> None:
         )
 
 
-def run_collective(
+def run_collectives(
     pg: ProcessGroup,
-    collective: str,
+    collectives: List[str],
     example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
 ) -> List[Work]:
     """Run a single collective."""
@@ -75,25 +75,23 @@ def run_collective(
         [torch.empty_like(input_tensor) for _ in range(get_world_size(pg))]
     ]
     tensor_list = [torch.empty_like(input_tensor)]
+    works = []
 
-    if collective == "allreduce":
-        works = [
+    if "allreduce" in collectives:
+        works += [
             pg.allreduce([input_tensor], AllreduceOptions()),
             pg.allreduce([input_tensor], ReduceOp.SUM),
         ]
         input_tensors = input_tensor
-    elif collective == "allgather":
-        works = [pg.allgather(output_tensors, [input_tensor], AllgatherOptions())]
+    elif "allgather" in collectives:
+        works += [pg.allgather(output_tensors, [input_tensor], AllgatherOptions())]
         input_tensors = (output_tensors, input_tensor)
-    elif collective == "broadcast":
-        print("tensor_list: ", tensor_list, " and type: ", type(tensor_list))
-        works = [pg.broadcast(tensor_list, BroadcastOptions())]
+    elif "broadcast" in collectives:
+        works += [pg.broadcast(tensor_list, BroadcastOptions())]
         input_tensors = tensor_list
-    elif collective  == "broadcast_one":
-        works = [pg.broadcast_one(input_tensor, 0)]
+    elif "broadcast_one" in collectives:
+        works += [pg.broadcast_one(input_tensor, 0)]
         input_tensors = input_tensor
-    else:
-        raise ValueError(f"Unsupported collective: {collective}.")
 
     def check_tensors(input_tensors: Any) -> None:  # pyre-ignore[2]
         """Recursively check tensors for input_tensors shape and dtype."""
@@ -139,9 +137,9 @@ class NCCLTests(TestCase):
 
         self.assertEqual(pg.size(), 1)
 
-        run_collective(
+        run_collectives(
             pg=pg,
-            collective=collective,
+            collectives=[collective],
             example_tensor=torch.tensor([2], device=device),
         )
 
@@ -153,16 +151,15 @@ class NCCLTests(TestCase):
         store_addr = f"localhost:{self.store.port}/prefix2"
         pg.configure(store_addr, 0, 1)
 
-        run_collective(
+        run_collectives(
             pg=pg,
-            collective=collective,
+            collectives=[collective],
             example_tensor=torch.tensor([2], device=device),
         )
 
         torch.cuda.synchronize()
 
-    @parameterized.expand(collectives)
-    def test_baby_nccl_apis(self, collective: str) -> None:
+    def test_baby_nccl_apis(self) -> None:
         # set to 1 if more than >=2 gpus
         device_id = 1 % torch.cuda.device_count()
         torch.cuda.set_device(device_id)
@@ -171,9 +168,9 @@ class NCCLTests(TestCase):
         try:
             pg.configure(self.store_addr, 0, 1)
 
-            run_collective(
+            run_collectives(
                 pg=pg,
-                collective=collective,
+                collectives=self.collectives,
                 example_tensor=torch.randn((2, 3), device="cuda"),
             )
 
@@ -242,7 +239,7 @@ class GlooTests(TestCase):
         pg.configure(self.store_addr, 0, 1)
 
         self.assertEqual(pg.size(), 1)
-        run_collective(pg=pg, collective=collective)
+        run_collectives(pg=pg, collectives=[collective])
         m = nn.Linear(3, 4)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
@@ -252,7 +249,7 @@ class GlooTests(TestCase):
         pg = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         pg.configure(self.store_addr, 0, 1)
 
-        run_collective(pg=pg, collective=collective)
+        run_collectives(pg=pg, collectives=[collective])
 
         # force collection to ensure no BabyWork objects remain
         gc.collect()
@@ -388,14 +385,14 @@ class DummyTests(TestCase):
         wrapper = ErrorSwallowingProcessGroupWrapper(pg)
         self.assertIs(wrapper.parent, pg)
 
-        works = run_collective(pg=wrapper, collective="allreduce")
+        works = run_collectives(pg=wrapper, collectives=self.collectives)
         self.assertIsInstance(works[0], _ErrorSwallowingWork)
 
         err = RuntimeError("test")
         wrapper.report_error(err)
         self.assertEqual(wrapper.error(), err)
 
-        works = run_collective(pg=wrapper, collective="allreduce")
+        works = run_collectives(pg=wrapper, collectives=self.collectives)
         for work in works:
             self.assertIsInstance(work, _DummyWork)
 
@@ -409,7 +406,7 @@ class DummyTests(TestCase):
 
         self.assertEqual(pg.size(), 123)
 
-        works = run_collective(pg=pg, collective="allreduce")
+        works = run_collectives(pg=pg, collectives=self.collectives)
         self.assertIsInstance(works[0], _ManagedWork)
 
         # No errors occurred during collective
