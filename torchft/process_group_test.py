@@ -11,12 +11,13 @@ import os
 import unittest
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, Dict, Tuple, cast
+from typing import Any, Dict, List, Tuple, cast
 from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
+from parameterized import parameterized
 from torch import nn
 from torch._C._distributed_c10d import (
     AllgatherOptions,
@@ -60,125 +61,227 @@ def dummy_init_pg() -> None:
         )
 
 
-def _test_pg(
-    pg: ProcessGroup,
-    example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
-) -> Dict[str, dist._Work]:
+# pyre-fixme[3]: Return type must be annotated.
+def _build_args(
+    pg: ProcessGroup, collective: str, example_tensor: torch.Tensor
+) -> List[Tuple[Any, ...]]:
     """
-    Helper function to test a set of collective operations on a given process group.
+    Helper function to build required args for a given collective.
     """
-
-    shape: torch.Size = example_tensor.shape
-    dtype: torch.dtype = example_tensor.dtype
-
-    # Create some dummy tensors for testing
     input_tensor = example_tensor.clone()
     output_tensors = [
         [torch.empty_like(input_tensor) for _ in range(get_world_size(pg))]
     ]
     tensor_list = [torch.empty_like(input_tensor)]
 
-    def check_tensors(arg: Any) -> None:  # pyre-ignore[2]
-        """Recursively check tensors for expected shape and dtype."""
-        if isinstance(arg, torch.Tensor):
-            assert arg.dtype == dtype, f"Output dtype mismatch: {arg.dtype} != {dtype}"
-            assert arg.shape == shape, f"Output shape mismatch: {arg.shape} != {shape}"
-        elif isinstance(arg, (list, tuple)):
-            for item in arg:
-                check_tensors(item)
+    if collective == "allreduce":
+        return [
+            ([input_tensor], AllreduceOptions()),
+            ([input_tensor], ReduceOp.SUM),
+        ]
+    elif collective == "allgather":
+        return [(output_tensors, [input_tensor], AllgatherOptions())]
+    elif collective == "broadcast":
+        return [(tensor_list, BroadcastOptions())]
+    elif collective == "broadcast_one":
+        return [(input_tensor, 0)]
+    else:
+        raise ValueError(f"Unsupported collective: {collective}")
 
-    # Test collectives
-    collectives = [
-        ("allreduce", ([input_tensor], AllreduceOptions())),
-        ("allreduce", ([input_tensor], ReduceOp.SUM)),
-        ("allgather", (output_tensors, [input_tensor], AllgatherOptions())),
-        ("broadcast", (tensor_list, BroadcastOptions())),
-        ("broadcast_one", (input_tensor, 0)),
-    ]
+
+def run_collective(
+    pg: ProcessGroup,
+    collective: str,
+    example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
+) -> Dict[str, dist._Work]:
+    """Run a single collective."""
+    shape: torch.Size = example_tensor.shape
+    dtype: torch.dtype = example_tensor.dtype
+    coll = getattr(pg, collective)
+    args_list = _build_args(pg=pg, collective=collective, example_tensor=example_tensor)
     works: Dict[str, dist._Work] = {}
-    for coll_str, args in collectives:
-        coll = getattr(pg, coll_str)
+
+    for args in args_list:
         work = coll(*args)
-        works[coll_str] = work
+        works[collective] = work
         work.wait()
         fut = work.get_future()
         fut.wait()
 
-        # Check that all tensor arguments have the expected shapes and dtypes
-        check_tensors(args)
+        def check_tensors(arg: Any) -> None:  # pyre-ignore[2]
+            """Recursively check tensors for expected shape and dtype."""
+            if isinstance(arg, torch.Tensor):
+                assert (
+                    arg.dtype == dtype
+                ), f"Output dtype mismatch: {arg.dtype} != {dtype}"
+                assert (
+                    arg.shape == shape
+                ), f"Output shape mismatch: {arg.shape} != {shape}"
+            elif isinstance(arg, (list, tuple)):
+                for item in arg:
+                    check_tensors(item)
 
+        check_tensors(args)
     print(works)
     return works
 
 
-class ProcessGroupTest(TestCase):
-    def test_gloo(self) -> None:
-        store = TCPStore(
+@skipUnless(torch.cuda.is_available(), "needs CUDA")
+class NCCLTests(TestCase):
+    collectives = [
+        "allreduce",
+        "allgather",
+        "broadcast",
+        "broadcast_one",
+    ]
+
+    def setUp(self) -> None:
+        self.store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
+        self.store_addr = f"localhost:{self.store.port}/prefix"
 
-        store_addr = f"localhost:{store.port}/prefix"
-        pg = ProcessGroupGloo()
-        pg.configure(store_addr, 0, 1)
-
-        self.assertEqual(pg.size(), 1)
-
-        _test_pg(pg)
-
-        m = nn.Linear(3, 4)
-        m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
-        m(torch.rand(2, 3))
-
-    def test_gloo_timeout(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr = f"localhost:{store.port}/prefix"
-        pg = ProcessGroupGloo(timeout=timedelta(seconds=0.01))
-        with self.assertRaisesRegex(
-            RuntimeError, "(timeout after 10ms|Socket Timeout)"
-        ):
-            pg.configure(store_addr, 0, 2)
-
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    @skipUnless(torch.cuda.is_available(), "needs CUDA")
-    def test_nccl(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
+    @parameterized.expand(collectives)
+    def test_nccl(self, collective: str) -> None:
         device = "cuda"
 
-        store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupNCCL()
-        pg.configure(store_addr, 0, 1)
+        pg.configure(self.store_addr, 0, 1)
 
         self.assertEqual(pg.size(), 1)
 
-        _test_pg(pg, torch.tensor([2], device=device))
+        run_collective(
+            pg=pg,
+            collective=collective,
+            example_tensor=torch.tensor([2], device=device),
+        )
 
         m = nn.Linear(3, 4).to(device)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3, device=device))
 
         # reconfigure
-        store_addr = f"localhost:{store.port}/prefix2"
+        store_addr = f"localhost:{self.store.port}/prefix2"
         pg.configure(store_addr, 0, 1)
 
-        _test_pg(pg, torch.tensor([2], device=device))
+        run_collective(
+            pg=pg,
+            collective=collective,
+            example_tensor=torch.tensor([2], device=device),
+        )
 
         torch.cuda.synchronize()
 
-    def test_baby_gloo(self) -> None:
-        store = TCPStore(
+    @parameterized.expand(collectives)
+    def test_baby_nccl_apis(self, collective: str) -> None:
+        # set to 1 if more than >=2 gpus
+        device_id = 1 % torch.cuda.device_count()
+        torch.cuda.set_device(device_id)
+
+        pg = ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
+        try:
+            pg.configure(self.store_addr, 0, 1)
+
+            run_collective(
+                pg=pg,
+                collective=collective,
+                example_tensor=torch.randn((2, 3), device="cuda"),
+            )
+
+            torch.cuda.synchronize()
+
+            # force collection to ensure no BabyWork objects remain
+            gc.collect()
+
+            self.assertEqual(pg.num_active_work(), 0)
+        finally:
+            pg.shutdown()
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
+    def test_baby_nccl_2gpu(self) -> None:
+        def run(rank: int) -> Tuple[ProcessGroupBabyNCCL, torch.Tensor, Work]:
+            a = ProcessGroupBabyNCCL(
+                timeout=timedelta(seconds=10.0),
+            )
+            a.configure(self.store_addr, rank, 2)
+            self.assertEqual(a.size(), 2)
+
+            # We test using set_device to ensure stream device is correct.
+            torch.cuda.set_device(rank)
+            at = torch.tensor([rank + 1], device="cuda")
+
+            a_work = a.allreduce([at], ReduceOp.SUM)
+            return a, at, a_work
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            a_fut = executor.submit(run, 0)
+            b_fut = executor.submit(run, 1)
+
+        a, at, a_work = a_fut.result()
+        b, bt, b_work = b_fut.result()
+
+        try:
+            a_work.wait()
+            b_work.get_future().wait()
+            torch.testing.assert_close(at.cpu(), bt.cpu())
+            torch.cuda.synchronize()
+        finally:
+            # cleanup - first ensure that babywork is deleted before shutting down PGs
+            # note futures must be deleted as they hold references to babywork
+            del a_fut
+            del b_fut
+            del a_work
+            del b_work
+            gc.collect()
+            b.shutdown()
+            a.shutdown()
+
+
+class GlooTests(TestCase):
+    collectives = ["allreduce", "allgather", "broadcast", "broadcast_one"]
+
+    def setUp(self) -> None:
+        self.store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
+        self.store_addr = f"localhost:{self.store.port}/prefix"
 
-        store_addr: str = f"localhost:{store.port}/prefix"
+    @parameterized.expand(collectives)
+    def test_gloo(self, collective: str) -> None:
+        pg = ProcessGroupGloo()
+        pg.configure(self.store_addr, 0, 1)
 
+        self.assertEqual(pg.size(), 1)
+        run_collective(pg=pg, collective=collective)
+        m = nn.Linear(3, 4)
+        m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
+        m(torch.rand(2, 3))
+
+    @parameterized.expand(collectives)
+    def test_baby_gloo_apis(self, collective: str) -> None:
+        pg = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
+        pg.configure(self.store_addr, 0, 1)
+
+        run_collective(pg=pg, collective=collective)
+
+        # force collection to ensure no BabyWork objects remain
+        gc.collect()
+
+        self.assertEqual(pg.num_active_work(), 0)
+        pg.shutdown()
+
+    def test_timeout(self) -> None:
+        pg = ProcessGroupGloo(timeout=timedelta(seconds=0.01))
+        with self.assertRaisesRegex(
+            RuntimeError, "(timeout after 10ms|Socket Timeout)"
+        ):
+            pg.configure(self.store_addr, 0, 2)
+
+    def test_baby_gloo(self) -> None:
         def run(rank: int) -> Tuple[torch.Tensor, Work]:
             a = ProcessGroupBabyGloo()
-            a.configure(store_addr, rank, 2)
+            a.configure(self.store_addr, rank, 2)
 
             self.assertEqual(a.size(), 2)
 
@@ -203,29 +306,18 @@ class ProcessGroupTest(TestCase):
         torch.testing.assert_close(bt, torch.tensor([3]))
 
     def test_baby_gloo_timeout(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr = f"localhost:{store.port}/prefix"
-
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=0.01))
         with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
-            a.configure(store_addr, 0, 2)
+            a.configure(self.store_addr, 0, 2)
 
-    def test_reconfigure_baby_process_group(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
+    def test_reconfigure_process_group_baby_gloo(self) -> None:
         a = ProcessGroupBabyGloo()
-        a.configure(store_addr, 0, 1)
+        a.configure(self.store_addr, 0, 1)
         future_thread_1 = a._future_thread
         future_queue_1 = a._future_queue
         p_1 = a._p
 
-        store_addr = f"localhost:{store.port}/prefix2"
+        store_addr = f"localhost:{self.store.port}/prefix2"
         a.configure(store_addr, 0, 1)
         future_thread_2 = a._future_thread
         future_queue_2 = a._future_queue
@@ -249,89 +341,6 @@ class ProcessGroupTest(TestCase):
         assert p_2 is not None
         self.assertTrue(p_2.is_alive())
 
-    def test_baby_gloo_apis(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr = f"localhost:{store.port}/prefix"
-
-        a = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
-        a.configure(store_addr, 0, 1)
-
-        _test_pg(a)
-
-        # force collection to ensure no BabyWork objects remain
-        gc.collect()
-
-        self.assertEqual(a.num_active_work(), 0)
-
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    @skipUnless(torch.cuda.is_available(), "needs CUDA")
-    def test_baby_nccl_apis(self) -> None:
-        # set to 1 if more than >=2 gpus
-        device_id = 1 % torch.cuda.device_count()
-        torch.cuda.set_device(device_id)
-
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr = f"localhost:{store.port}/prefix"
-
-        a = ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
-        a.configure(store_addr, 0, 1)
-
-        _test_pg(a, torch.randn((2, 3), device="cuda"))
-
-        torch.cuda.synchronize()
-
-        # force collection to ensure no BabyWork objects remain
-        gc.collect()
-
-        self.assertEqual(a.num_active_work(), 0)
-
-    def test_dummy(self) -> None:
-        pg = ProcessGroupDummy(0, 1)
-        m = nn.Linear(3, 4)
-        m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
-        m(torch.rand(2, 3))
-
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
-    def test_baby_nccl_2gpu(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr: str = f"localhost:{store.port}/prefix"
-
-        def run(rank: int) -> Tuple[torch.Tensor, Work]:
-            a = ProcessGroupBabyNCCL(
-                timeout=timedelta(seconds=10.0),
-            )
-            a.configure(store_addr, rank, 2)
-            self.assertEqual(a.size(), 2)
-
-            # We test using set_device to ensure stream device is correct.
-            torch.cuda.set_device(rank)
-            at = torch.tensor([rank + 1], device="cuda")
-
-            a_work = a.allreduce([at], ReduceOp.SUM)
-            return at, a_work
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        at, a_work = a_fut.result()
-        bt, b_work = b_fut.result()
-
-        a_work.wait()
-        b_work.get_future().wait()
-
-        torch.testing.assert_close(at.cpu(), bt.cpu())
-
     def test_device_mesh(self) -> None:
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(0)
@@ -340,14 +349,9 @@ class ProcessGroupTest(TestCase):
 
         mesh_1d = init_device_mesh("cpu", mesh_shape=(1,), mesh_dim_names=("tp",))
 
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
         pg = ProcessGroupGloo()
         pg.register("test_device_mesh")
-        pg.configure(store_addr, 0, 1)
+        pg.configure(self.store_addr, 0, 1)
 
         mesh_2d = extend_device_mesh(mesh_1d, pg)
         mesh_2d.get_group("dp")
@@ -357,14 +361,8 @@ class ProcessGroupTest(TestCase):
 
     def test_functional_collectives(self) -> None:
         dummy_init_pg()
-
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
         pg = ProcessGroupGloo().register("test_func_col")
-        pg.configure(store_addr, 0, 1)
+        pg.configure(self.store_addr, 0, 1)
 
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
@@ -375,6 +373,16 @@ class ProcessGroupTest(TestCase):
             _functional_collectives.all_reduce(t, "sum", pg).wait()
         finally:
             pg.unregister()
+
+
+class DummyTests(TestCase):
+    collectives = ["allreduce", "allgather", "broadcast", "broadcast_one"]
+
+    def test_dummy(self) -> None:
+        pg = ProcessGroupDummy(0, 1)
+        m = nn.Linear(3, 4)
+        m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
+        m(torch.rand(2, 3))
 
     def test_process_group_wrapper(self) -> None:
         pg = ProcessGroupDummy(0, 1)
@@ -391,18 +399,19 @@ class ProcessGroupTest(TestCase):
         wrapper = ErrorSwallowingProcessGroupWrapper(pg)
         self.assertIs(wrapper.parent, pg)
 
-        works = _test_pg(wrapper)
+        works = run_collective(pg=wrapper, collective="allreduce")
         self.assertIsInstance(list(works.values())[0], _ErrorSwallowingWork)
 
         err = RuntimeError("test")
         wrapper.report_error(err)
         self.assertEqual(wrapper.error(), err)
 
-        works = _test_pg(wrapper)
+        works = run_collective(pg=wrapper, collective="allreduce")
         for work in works.values():
             self.assertIsInstance(work, _DummyWork)
 
     def test_managed_process_group(self) -> None:
+        """Test the interaction between a ManagedProcessGroup and a Manager."""
         manager = Mock(spec=Manager)
         manager.errored.return_value = None
         manager._pg = ProcessGroupDummy(0, 1)
@@ -411,9 +420,10 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.size(), 123)
 
-        works = _test_pg(pg)
+        works = run_collective(pg=pg, collective="allreduce")
         self.assertIsInstance(list(works.values())[0], _ManagedWork)
 
+        # No errors occurred during collective
         self.assertEqual(manager.report_error.call_count, 0)
         self.assertEqual(manager.wrap_future.call_count, 2)
         self.assertEqual(manager.wait_quorum.call_count, 2)
