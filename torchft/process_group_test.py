@@ -100,6 +100,18 @@ def run_collective(
     coll = getattr(pg, collective)
     args_list = _build_args(pg=pg, collective=collective, example_tensor=example_tensor)
     works: Dict[str, dist._Work] = {}
+    def check_tensors(arg: Any) -> None:  # pyre-ignore[2]
+        """Recursively check tensors for expected shape and dtype."""
+        if isinstance(arg, torch.Tensor):
+            assert (
+                arg.dtype == dtype
+            ), f"Output dtype mismatch: {arg.dtype} != {dtype}"
+            assert (
+                arg.shape == shape
+            ), f"Output shape mismatch: {arg.shape} != {shape}"
+        elif isinstance(arg, (list, tuple)):
+            for item in arg:
+                check_tensors(item)
 
     for args in args_list:
         work = coll(*args)
@@ -107,20 +119,6 @@ def run_collective(
         work.wait()
         fut = work.get_future()
         fut.wait()
-
-        def check_tensors(arg: Any) -> None:  # pyre-ignore[2]
-            """Recursively check tensors for expected shape and dtype."""
-            if isinstance(arg, torch.Tensor):
-                assert (
-                    arg.dtype == dtype
-                ), f"Output dtype mismatch: {arg.dtype} != {dtype}"
-                assert (
-                    arg.shape == shape
-                ), f"Output shape mismatch: {arg.shape} != {shape}"
-            elif isinstance(arg, (list, tuple)):
-                for item in arg:
-                    check_tensors(item)
-
         check_tensors(args)
     print(works)
     return works
