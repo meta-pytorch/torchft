@@ -22,17 +22,17 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
+    cast,
     Dict,
     Generator,
     List,
     Optional,
     Tuple,
+    TYPE_CHECKING,
     TypeVar,
     Union,
-    cast,
 )
 
 import torch
@@ -43,14 +43,14 @@ import torch.multiprocessing as mp
 # pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
     DeviceMesh,
+    get_rank,
+    init_device_mesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
     ProcessGroupNCCL as BaseProcessGroupNCCL,
     Store,
     TCPStore,
-    get_rank,
-    init_device_mesh,
 )
 from torch.distributed.distributed_c10d import (
     AllgatherOptions,
@@ -140,6 +140,34 @@ class ProcessGroup(BaseProcessGroup):
         Gathers tensors from the whole group in a list.
 
         See torch.distributed.all_gather for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def send(
+        self,
+        tensors: List[torch.Tensor],
+        dst_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        """
+        Sends the tensor to the given rank.
+
+        See torch.distributed.send for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def recv(
+        self,
+        tensors: List[torch.Tensor],
+        src_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        """
+        Receives the tensor from the given rank.
+
+        See torch.distributed.recv for more details.
         """
         raise NotImplementedError("not implemented")
 
@@ -267,6 +295,22 @@ class ProcessGroupWrapper(ProcessGroup):
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
         return self.parent.broadcast(tensor_list, opts)
 
+    def send(
+        self,
+        tensors: List[torch.Tensor],
+        dst_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        return self.parent.send(tensors, dst_rank, tag)
+
+    def recv(
+        self,
+        tensors: List[torch.Tensor],
+        src_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        return self.parent.recv(tensors, src_rank, tag)
+
     def size(self) -> int:
         return self.parent.size()
 
@@ -373,6 +417,26 @@ class ProcessGroupDummy(ProcessGroup):
         return res
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+        res = _DummyWork(tensors)
+        self._work.append(res)
+        return res
+
+    def send(
+        self,
+        tensors: List[torch.Tensor],
+        dst_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        res = _DummyWork(tensors)
+        self._work.append(res)
+        return res
+
+    def recv(
+        self,
+        tensors: List[torch.Tensor],
+        src_rank: int,
+        tag: int = 0,
+    ) -> Work:
         res = _DummyWork(tensors)
         self._work.append(res)
         return res
@@ -764,8 +828,9 @@ class ProcessGroupBaby(ProcessGroup):
 
                         args = _PickleSafeOptions.unsafe_args(args)
                         fn = getattr(pg, func_name)
+                        op_work = fn(*args, **kwargs)
                         work[next_op_id] = _OpMetadata(
-                            work=fn(*args, **kwargs),
+                            work=op_work,
                             stream=stream,
                         )
                     tx.put(next_op_id)
@@ -778,7 +843,7 @@ class ProcessGroupBaby(ProcessGroup):
                     with metadata.set_stream():
                         # With WorkNCCL this makes the stream wait not the CPU when
                         # no timeout is passed.
-                        metadata.work.wait()
+                        metadata.work.wait(timedelta(seconds=60.0))
 
                         # Register event on the stream that we can pass to the main
                         # process.
@@ -969,6 +1034,30 @@ class ProcessGroupBaby(ProcessGroup):
                 tensor.share_memory_()
 
         return self._run_func("broadcast", tensor_list, opts)
+
+    def send(
+        self,
+        tensors: List[torch.Tensor],
+        dst_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        for tensor in tensors:
+            if not tensor.is_shared():
+                tensor.share_memory_()
+
+        return self._run_func("send", tensors, dst_rank, tag)
+
+    def recv(
+        self,
+        tensors: List[torch.Tensor],
+        src_rank: int,
+        tag: int = 0,
+    ) -> Work:
+        for tensor in tensors:
+            if not tensor.is_shared():
+                tensor.share_memory_()
+
+        return self._run_func("recv", tensors, src_rank, tag)
 
     def size(self) -> int:
         return self._world_size
