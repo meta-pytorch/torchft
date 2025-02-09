@@ -1,5 +1,6 @@
 import socket
 from http.server import ThreadingHTTPServer
+from urllib.request import build_opener, HTTPHandler
 
 
 class _IPv6HTTPServer(ThreadingHTTPServer):
