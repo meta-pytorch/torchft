@@ -329,13 +329,13 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         This function is a placeholder for the reduce_scatter operation in the
         ProcessGroupGloo class. However, this operation is not supported by the
         Gloo backend, and thus, calling this function will raise a
-        NotImplementedError.
+        RuntimeError.
 
         Raises:
-            NotImplementedError: Always raised since reduce_scatter is not
+            RuntimeError: Always raised since reduce_scatter is not
             supported by ProcessGroupGloo.
         """
-        raise NotImplementedError("ProcessGroupGloo does not support reduce_scatter.")
+        raise RuntimeError("ProcessGroupGloo does not support reduce_scatter.")
 
 
 class ProcessGroupNCCL(ProcessGroupWrapper):
@@ -1131,15 +1131,13 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
         This function is a placeholder for the reduce_scatter operation in the
         ProcessGroupGloo class. However, this operation is not supported by the
         Gloo backend, and thus, calling this function will raise a
-        NotImplementedError.
+        RuntimeError.
 
         Raises:
-            NotImplementedError: Always raised since reduce_scatter is not
+            RuntimeError: Always raised since reduce_scatter is not
             supported by ProcessGroupGloo.
         """
-        raise NotImplementedError(
-            "ProcessGroupBabyGloo does not support reduce_scatter."
-        )
+        raise RuntimeError("ProcessGroupBabyGloo does not support reduce_scatter.")
 
 
 class ProcessGroupBabyNCCL(ProcessGroupBaby):
