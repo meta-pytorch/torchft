@@ -317,7 +317,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr: str = f"localhost:{store.port}/prefix"
 
-        def run(rank: int) -> Tuple[torch.Tensor, Work]:
+        def run(rank: int) -> Tuple[ProcessGroupBabyNCCL, torch.Tensor, Work]:
             a = ProcessGroupBabyNCCL(
                 timeout=timedelta(seconds=10.0),
             )
@@ -329,19 +329,29 @@ class ProcessGroupTest(TestCase):
             at = torch.tensor([rank + 1], device="cuda")
 
             a_work = a.allreduce([at], ReduceOp.SUM)
-            return at, a_work
+            return a, at, a_work
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             a_fut = executor.submit(run, 0)
             b_fut = executor.submit(run, 1)
 
-        at, a_work = a_fut.result()
-        bt, b_work = b_fut.result()
+        a, at, a_work = a_fut.result()
+        b, bt, b_work = b_fut.result()
 
-        a_work.wait()
-        b_work.get_future().wait()
-
-        torch.testing.assert_close(at.cpu(), bt.cpu())
+        try:
+            a_work.wait()
+            b_work.get_future().wait()
+            torch.testing.assert_close(at.cpu(), bt.cpu())
+        finally:
+            # cleanup - first ensure that babywork is deleted before shutting down PGs
+            # note futures must be deleted as they hold references to babywork
+            del a_fut
+            del b_fut
+            del a_work
+            del b_work
+            gc.collect()
+            b.shutdown()
+            a.shutdown()
 
     def test_device_mesh(self) -> None:
         os.environ["MASTER_ADDR"] = "localhost"
