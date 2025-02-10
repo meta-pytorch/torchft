@@ -66,8 +66,8 @@ class FSDPTest(unittest.TestCase):
     # pyre-ignore[56]: Pyre was not able to infer the type of argument
     @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
     def test_fsdp(self) -> None:
-        multiprocessing.set_start_method("spawn")
-        with ProcessPoolExecutor(max_workers=4) as executor:
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=4, mp_context=context) as executor:
             futures = []
             for i in range(4):
                 future = executor.submit(self._test_fsdp, 4, i)

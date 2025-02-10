@@ -10,7 +10,7 @@ from datetime import timedelta
 from unittest import TestCase
 from unittest.mock import MagicMock
 
-from torchft.checkpointing import CheckpointServer, _timed_acquire
+from torchft.checkpointing.http_transport import HTTPTransport, _timed_acquire
 
 
 class TestCheckpointing(TestCase):
@@ -18,7 +18,7 @@ class TestCheckpointing(TestCase):
         expected = {"state": "dict"}
         state_dict_fn = MagicMock()
         state_dict_fn.return_value = expected
-        server = CheckpointServer(
+        server = HTTPTransport(
             timeout=timedelta(seconds=10),
         )
 
@@ -58,7 +58,7 @@ class TestCheckpointing(TestCase):
         server.shutdown()
 
     def test_checkpoint_server_locking(self) -> None:
-        server = CheckpointServer(
+        server = HTTPTransport(
             timeout=timedelta(seconds=10),
         )
 
