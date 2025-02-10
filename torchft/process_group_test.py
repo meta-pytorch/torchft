@@ -21,6 +21,7 @@ from torch import nn
 from torch._C._distributed_c10d import (
     AllgatherOptions,
     AllreduceOptions,
+    AllreduceCoalescedOptions,
     AllToAllOptions,
     BroadcastOptions,
     ReduceOp,
@@ -93,7 +94,9 @@ def _test_pg(
     collectives = [
         ("allreduce", ([input_tensor], AllreduceOptions())),
         ("allreduce", ([input_tensor], ReduceOp.SUM)),
+        #("allreduce_coalesced", ([input_tensor], AllreduceCoalescedOptions())),
         ("allgather", (output_tensors, [input_tensor], AllgatherOptions())),
+        #("allgather_into_tensor_coalesced", (output_tensors[0], [input_tensor], AllgatherOptions())),
         ("broadcast", (tensor_list, BroadcastOptions())),
         ("broadcast_one", (input_tensor, 0)),
         (
