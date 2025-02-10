@@ -141,7 +141,7 @@ class ProcessGroup(BaseProcessGroup):
     def allreduce(
         self,
         tensors: List[torch.Tensor],
-        opts: Union[AllreduceCoalescedOptions, ReduceOp],
+        opts: Union[AllreduceOptions, ReduceOp],
     ) -> Work:
         """
         Reduces the tensor data across all machines in such a way that all get the final result.
@@ -150,7 +150,9 @@ class ProcessGroup(BaseProcessGroup):
         raise NotImplementedError("not implemented")
 
     def allreduce_coalesced(
-        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+        self,
+        tensors: List[torch.Tensor],
+        opts: AllreduceCoalescedOptions,
     ) -> Work:
         """
         Performs an all_reduce operation in a coalesced manner.
@@ -534,9 +536,12 @@ class ProcessGroupDummy(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self.parent.allgather_into_tensor_coalesced(
-            output_tensors, input_tensors, opts
-        )
+        for o, i in zip(output_tensors, input_tensors):
+            o.copy_(i)
+
+        res = _DummyWork(output_tensors)
+        self._work.append(res)
+        return res
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
         res = _DummyWork(tensors)
@@ -546,7 +551,9 @@ class ProcessGroupDummy(ProcessGroup):
     def allreduce_coalesced(
         self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
     ) -> Work:
-        return self.parent.allreduce_coalesced(tensors, opts)
+        res = _DummyWork(tensors)
+        self._work.append(res)
+        return res
 
     def alltoall_base(
         self,
@@ -556,12 +563,13 @@ class ProcessGroupDummy(ProcessGroup):
         input_split_sizes: List[int],
         options: AllToAllOptions,
     ) -> Work:
-        return self.parent.alltoall_base(
-            output_buffer, input_buffer, output_split_sizes, input_split_sizes, options
-        )
+        output_buffer.copy_(input_buffer)
+        res = _DummyWork([output_buffer])
+        self._work.append(res)
+        return res
 
     def barrier(self) -> Work:
-        return self.parent.barrier()
+        return _DummyWork(None)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
         res = _DummyWork(tensor_list)
@@ -569,7 +577,7 @@ class ProcessGroupDummy(ProcessGroup):
         return res
 
     def receive(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
-        return self.parent.receive(tensors, rank, tag)
+        return _DummyWork(None)
 
     def reduce_scatter(
         self,
@@ -590,12 +598,15 @@ class ProcessGroupDummy(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: ReduceScatterOptions,
     ) -> Work:
-        return self.parent.reduce_scatter_tensor_coalesced(
-            output_tensors, input_tensors, opts
-        )
+        for o, i in zip(output_tensors, input_tensors):
+            o.copy_(i)
+
+        res = _DummyWork(output_tensors)
+        self._work.append(res)
+        return res
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
-        return self.parent.send(tensors, dst_rank, tag)
+        return _DummyWork(None)
 
     def size(self) -> int:
         return self._world
@@ -1201,7 +1212,7 @@ class ProcessGroupBaby(ProcessGroup):
     def allreduce_coalesced(
         self,
         tensors: List[torch.Tensor],
-        opts: Union[dist.AllreduceOptions, dist.ReduceOp],
+        opts: Union[dist.AllreduceCoalescedOptions, dist.ReduceOp],
     ) -> Work:
         assert isinstance(tensors, list), "input must be list"
 
@@ -1338,7 +1349,6 @@ class _PickleSafeOptions:
                 AllreduceCoalescedOptions,
                 AllToAllOptions,
                 BroadcastOptions,
-                ReduceOp,
                 ReduceScatterOptions,
             ),
         ):
