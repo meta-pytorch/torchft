@@ -61,31 +61,6 @@ def dummy_init_pg() -> None:
         )
 
 
-def _should_run_collective(collective_str: str, backend_str: str, device: str) -> bool:
-    """Verify if the collective is supported by the backend and device.
-
-    See https://pytorch.org/docs/stable/distributed.html#backends for the
-    supported collectives / backends / devices matrix.
-
-    """
-    if "nccl" in backend_str.lower():
-        # all collectives are supported for NCCL/CUDA but none on CPU.
-        return device == "cuda"
-    elif "gloo" in backend_str.lower():
-        if device == "cuda":
-            # GLOO/GPU only supports broadcast and all_reduce.
-            if collective_str in ["broadcast", "all_reduce"]:
-                return True
-            return False
-        else:  # cpu
-            if collective_str in ["reduce_scatter", "all_to_all"]:
-                return False
-            return True
-    else:
-        # Non defined backends (e.g. ErrorSwallowing) should continue to work.
-        return True
-
-
 def _test_pg(
     pg: ProcessGroup,
     example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
@@ -127,27 +102,21 @@ def _test_pg(
     ]
     works: Dict[str, dist._Work] = {}
 
-    try:
-        backend_str = pg.getBackendName()
-        device = example_tensor.device
-        if type(device) is torch.device:
-            device = device.type
-    except NotImplementedError as e:
-        backend_str = ""
-        device = ""
-
     for coll_str, args in collectives:
-        if not _should_run_collective(coll_str, backend_str=backend_str, device=device):
-            continue
-        coll = getattr(pg, coll_str)
-        work = coll(*args)
-        works[coll_str] = work
-        work.wait()
-        fut = work.get_future()
-        fut.wait()
-
-        # Check that all tensor arguments have the expected shapes and dtypes
-        check_tensors(args)
+        try:
+            coll = getattr(pg, coll_str)
+            work = coll(*args)
+            works[coll_str] = work
+            work.wait()
+            fut = work.get_future()
+            fut.wait()
+            # Check that all tensor arguments have the expected shapes and dtypes
+            check_tensors(args)
+        except RuntimeError as e:
+            if f"does not support {coll_str}" in str(e):
+                # Skip collectives that are not supported by the backend.
+                continue
+            raise e
 
     print(works)
     return works
