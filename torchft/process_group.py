@@ -55,6 +55,7 @@ from torch.distributed import (
 from torch.distributed.distributed_c10d import (
     AllgatherOptions,
     AllreduceOptions,
+    AllToAllOptions,
     BroadcastOptions,
     ReduceOp,
     ReduceScatterOptions,
@@ -107,29 +108,6 @@ class ProcessGroup(BaseProcessGroup):
 
         self._group_name: Optional[str] = None
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
-        """
-        This reconfigures the ProcessGroup to use a new store, rank and world size.
-
-        Every time this is called it must be provided with a unique prefixed
-        store address. I.e. localhost:1234/my/prefix/1
-
-        This function will block until the underlying ProcessGroup is created.
-        If an error occurs this will throw.
-
-        Args:
-            store_addr: address of the store to use
-            rank: rank of this process
-            world_size: world size of this process group
-        """
-        raise NotImplementedError("not implemented")
-
-    # pyre-fixme[14]: inconsistent override
-    def allreduce(
-        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
-    ) -> Work:
-        raise NotImplementedError("not implemented")
-
     # pyre-fixme[14]: inconsistent override
     def allgather(
         self,
@@ -141,6 +119,61 @@ class ProcessGroup(BaseProcessGroup):
         Gathers tensors from the whole group in a list.
 
         See torch.distributed.all_gather for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def allgather_into_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        """
+        Performs an all_gather operation into a single tensor.
+        See torch.distributed.all_gather_into_tensor for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def allreduce(
+        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+    ) -> Work:
+        """
+        Reduces the tensor data across all machines in such a way that all get the final result.
+        See torch.distributed.all_reduce for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    def allreduce_coalesced(
+        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+    ) -> Work:
+        """
+        Performs an all_reduce operation in a coalesced manner.
+        See torch.distributed.all_reduce_coalesced for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def alltoall_base(
+        self,
+        output_buffer: torch.Tensor,
+        input_buffer: torch.Tensor,
+        output_split_sizes: List[int],
+        input_split_sizes: List[int],
+        options: AllToAllOptions,
+    ) -> Work:
+        """
+        Performs an all_to_all operation.
+        See torch.distributed.all_to_all_single for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def barrier(self) -> Work:
+        """
+        Synchronizes all processes.
+        See torch.distributed.barrier for more details.
         """
         raise NotImplementedError("not implemented")
 
@@ -160,6 +193,18 @@ class ProcessGroup(BaseProcessGroup):
         opts.rootRank = root
         return self.broadcast([tensor], opts)
 
+    def receive(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
+        """
+        Receives a list of tensors from the process with rank `rank`.
+        Args:
+            tensors (List[torch.Tensor]): The list of tensors to fill.
+            rank (int): The rank of the process to receive from.
+            tag (int): The tag to match for the receive.
+        Returns:
+            Work: A work handle representing the asynchronous receive operation.
+        """
+        raise NotImplementedError("not implemented")
+
     # pyre-fixme[14]: inconsistent override
     def reduce_scatter(
         self,
@@ -171,6 +216,50 @@ class ProcessGroup(BaseProcessGroup):
         Reduces, then scatters a list of tensors to all processes in a group.
 
         See torch.distributed.reduce_scatter for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+
+    # pyre-fixme[14]: inconsistent override
+    def reduce_scatter_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: ReduceScatterOptions,
+    ) -> Work:
+        """
+        Reduces the tensor data across all machines in such a way that all get the final result.
+        See torch.distributed.reduce_scatter_tensor for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
+        """
+        Sends a list of tensors to the process with rank `dst_rank`.
+        Args:
+            tensors (List[torch.Tensor]): The list of tensors to send.
+            dst_rank (int): The rank of the process to send to.
+            tag (int): The tag to match for the send.
+        Returns:
+            Work: A work handle representing the asynchronous send operation.
+        """
+        raise NotImplementedError("not implemented")
+
+    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+        """
+        This reconfigures the ProcessGroup to use a new store, rank and world size.
+
+        Every time this is called it must be provided with a unique prefixed
+        store address. I.e. localhost:1234/my/prefix/1
+
+        This function will block until the underlying ProcessGroup is created.
+        If an error occurs this will throw.
+
+        Args:
+            store_addr: address of the store to use
+            rank: rank of this process
+            world_size: world size of this process group
         """
         raise NotImplementedError("not implemented")
 
@@ -268,9 +357,6 @@ class ProcessGroupWrapper(ProcessGroup):
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         raise NotImplementedError("not implemented")
 
-    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
-        return self.parent.allreduce(tensors, opts)
-
     def allgather(
         self,
         output_tensors: List[List[torch.Tensor]],
@@ -279,8 +365,44 @@ class ProcessGroupWrapper(ProcessGroup):
     ) -> Work:
         return self.parent.allgather(output_tensors, input_tensor, opts)
 
+    def allgather_into_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        return self.parent.allgather_into_tensor_coalesced(
+            output_tensors, input_tensors, opts
+        )
+
+    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+        return self.parent.allreduce(tensors, opts)
+
+    def allreduce_coalesced(
+        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+    ) -> Work:
+        return self.parent.allreduce_coalesced(tensors, opts)
+
+    def alltoall_base(
+        self,
+        output_buffer: torch.Tensor,
+        input_buffer: torch.Tensor,
+        output_split_sizes: List[int],
+        input_split_sizes: List[int],
+        options: AllToAllOptions,
+    ) -> Work:
+        return self.parent.alltoall_base(
+            output_buffer, input_buffer, output_split_sizes, input_split_sizes, options
+        )
+
+    def barrier(self) -> Work:
+        return self.parent.barrier()
+
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
         return self.parent.broadcast(tensor_list, opts)
+
+    def receive(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
+        return self.parent.receive(tensors, rank, tag)
 
     def reduce_scatter(
         self,
@@ -289,6 +411,19 @@ class ProcessGroupWrapper(ProcessGroup):
         opts: object,
     ) -> Work:
         return self.parent.reduce_scatter(output_tensors, input_tensors, opts)
+
+    def reduce_scatter_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: ReduceScatterOptions,
+    ) -> Work:
+        return self.parent.reduce_scatter_tensor_coalesced(
+            output_tensors, input_tensors, opts
+        )
+
+    def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
+        return self.parent.send(tensors, dst_rank, tag)
 
     def size(self) -> int:
         return self.parent.size()

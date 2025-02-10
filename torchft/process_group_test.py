@@ -21,6 +21,7 @@ from torch import nn
 from torch._C._distributed_c10d import (
     AllgatherOptions,
     AllreduceOptions,
+    AllToAllOptions,
     BroadcastOptions,
     ReduceOp,
     ReduceScatterOptions,
