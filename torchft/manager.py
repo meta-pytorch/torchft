@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 import torch
 from torch.distributed import ReduceOp, TCPStore
 
-from torchft.checkpointing import CheckpointServer, CheckpointTransport
+from torchft.checkpointing import CheckpointTransport, HTTPTransport
 from torchft.futures import future_timeout
 from torchft.torchft import Manager as _Manager, ManagerClient
 
@@ -141,7 +141,7 @@ class Manager:
             replica_id: if rank==0, the replica_id for this group
             hostname: if rank==0, the hostname to advertise to the lighthouse server
             checkpoint_transport: the checkpoint transport to use for
-                transfering checkpoints to recovering replicas
+                transfering checkpoints to recovering replicas, defaults to HTTPTransport
         """
         self._load_state_dict = load_state_dict
         self._user_state_dict = state_dict
@@ -160,7 +160,7 @@ class Manager:
         self._min_replica_size = min_replica_size
 
         if checkpoint_transport is None:
-            checkpoint_transport = CheckpointServer[Dict[str, T]](
+            checkpoint_transport = HTTPTransport[Dict[str, T]](
                 timeout=timeout,
             )
 
