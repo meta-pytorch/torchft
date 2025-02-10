@@ -318,6 +318,25 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     def getBackendName(self) -> str:
         return "torchft-gloo"
 
+    # pyre-fixme[14,15]: inconsistent override
+    def reduce_scatter(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[List[torch.Tensor]],
+        opts: ReduceScatterOptions,
+    ) -> None:
+        """
+        This function is a placeholder for the reduce_scatter operation in the
+        ProcessGroupGloo class. However, this operation is not supported by the
+        Gloo backend, and thus, calling this function will raise a
+        NotImplementedError.
+
+        Raises:
+            NotImplementedError: Always raised since reduce_scatter is not
+            supported by ProcessGroupGloo.
+        """
+        raise NotImplementedError("ProcessGroupGloo does not support reduce_scatter.")
+
 
 class ProcessGroupNCCL(ProcessGroupWrapper):
     """
@@ -1118,7 +1137,9 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
             NotImplementedError: Always raised since reduce_scatter is not
             supported by ProcessGroupGloo.
         """
-        raise NotImplementedError("ProcessGroupGloo does not support reduce_scatter.")
+        raise NotImplementedError(
+            "ProcessGroupBabyGloo does not support reduce_scatter."
+        )
 
 
 class ProcessGroupBabyNCCL(ProcessGroupBaby):
