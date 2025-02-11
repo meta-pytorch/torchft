@@ -162,7 +162,7 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         # Test send/recv between two processes
-        def run(rank: int) -> [torch.Tensor, Work]:
+        def run(rank: int, store_addr: str = store_addr) -> Tuple[torch.Tensor, Work]:
             pg = ProcessGroupGloo()
             pg.configure(store_addr, rank, 2)
 
@@ -226,45 +226,6 @@ class ProcessGroupTest(TestCase):
 
         torch.cuda.synchronize()
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
-    def dont_test_nccl_send_recv(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr: str = f"localhost:{store.port}/prefix"
-
-        def run(rank: int) -> Tuple[ProcessGroupNCCL, torch.Tensor, Work]:
-            a = ProcessGroupNCCL()
-            a.configure(store_addr, rank, 2)
-            self.assertEqual(a.size(), 2)
-
-            # We test using set_device to ensure stream device is correct.
-            torch.cuda.set_device(rank)
-
-            if rank == 0:
-                at = torch.tensor([42], device="cuda", dtype=torch.int32)
-                work = a.send([at], 1, 0)
-                return a, at, work
-            else:
-                tensor = torch.zeros(1, device="cuda", dtype=torch.int32)
-                work = a.recv([tensor], 0, 0)
-                #torch.cuda.synchronize()
-                return a, tensor, work
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        a, at, a_work = a_fut.result()
-        b, bt, b_work = b_fut.result()
-
-        a_work.wait()
-        b_work.get_future().wait()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(at.cpu(), bt.cpu())
-
     def test_baby_gloo(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
@@ -272,7 +233,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr: str = f"localhost:{store.port}/prefix"
 
-        def run(rank: int) -> Tuple[torch.Tensor, Work]:
+        def run(rank: int) -> Tuple[ProcessGroupBabyGloo, torch.Tensor, Work]:
             a = ProcessGroupBabyGloo()
             a.configure(store_addr, rank, 2)
 
@@ -281,22 +242,31 @@ class ProcessGroupTest(TestCase):
             at = torch.tensor([rank + 1])
 
             a_work = a.allreduce([at], ReduceOp.SUM)
-            return at, a_work
+            return a, at, a_work
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             a_fut = executor.submit(run, 0)
             b_fut = executor.submit(run, 1)
 
-        at, a_work = a_fut.result()
-        bt, b_work = b_fut.result()
+        a, at, a_work = a_fut.result()
+        b, bt, b_work = b_fut.result()
 
-        a_work.wait()
-        fut = b_work.get_future()
+        try:
+            a_work.wait()
+            fut = b_work.get_future()
 
-        fut.wait()
+            fut.wait()
 
-        torch.testing.assert_close(at, torch.tensor([3]))
-        torch.testing.assert_close(bt, torch.tensor([3]))
+            torch.testing.assert_close(at, torch.tensor([3]))
+            torch.testing.assert_close(bt, torch.tensor([3]))
+        finally:
+            del a_fut
+            del b_fut
+            del a_work
+            del b_work
+            gc.collect()
+            a.shutdown()
+            b.shutdown()
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -308,6 +278,7 @@ class ProcessGroupTest(TestCase):
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=0.01))
         with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
             a.configure(store_addr, 0, 2)
+        a.shutdown()
 
     def test_reconfigure_baby_process_group(self) -> None:
         store = TCPStore(
@@ -344,6 +315,7 @@ class ProcessGroupTest(TestCase):
         self.assertFalse(future_queue_2.closed())
         assert p_2 is not None
         self.assertTrue(p_2.is_alive())
+        a.shutdown()
 
     def test_baby_gloo_apis(self) -> None:
         store = TCPStore(
@@ -361,6 +333,7 @@ class ProcessGroupTest(TestCase):
         gc.collect()
 
         self.assertEqual(a.num_active_work(), 0)
+        a.shutdown()
 
     def test_baby_gloo_send_recv(self) -> None:
         store = TCPStore(
@@ -369,7 +342,7 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         # Test send/recv between two processes
-        def run(rank: int) -> [torch.Tensor, Work]:
+        def run(rank: int, store_addr: str = store_addr) -> Tuple[torch.Tensor, Work]:
             pg = ProcessGroupBabyGloo()
             pg.configure(store_addr, rank, 2)
 
@@ -417,6 +390,7 @@ class ProcessGroupTest(TestCase):
         gc.collect()
 
         self.assertEqual(a.num_active_work(), 0)
+        a.shutdown()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 

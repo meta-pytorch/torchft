@@ -162,7 +162,6 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
     def barrier(self, opts: BarrierOptions) -> Work:
         """
         Synchronizes all processes.
@@ -186,7 +185,8 @@ class ProcessGroup(BaseProcessGroup):
         opts.rootRank = root
         return self.broadcast([tensor], opts)
 
-    def recv(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
+    # pyre-fixme[14]: inconsistent override
+    def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
         """
         Receives a list of tensors from the process with rank `rank`.
         Args:
@@ -370,8 +370,8 @@ class ProcessGroupWrapper(ProcessGroup):
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
         return self.parent.broadcast(tensor_list, opts)
 
-    def recv(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
-        return self.parent.recv(tensors, rank, tag)
+    def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
+        return self.parent.recv(tensors, src_rank, tag)
 
     def reduce_scatter(
         self,
@@ -536,7 +536,7 @@ class ProcessGroupDummy(ProcessGroup):
         self._work.append(res)
         return res
 
-    def recv(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
+    def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
         return _DummyWork(None)
 
     def reduce_scatter(
@@ -1185,14 +1185,14 @@ class ProcessGroupBaby(ProcessGroup):
 
         return self._run_func("broadcast", tensor_list, opts)
 
-    def recv(self, tensors: List[torch.Tensor], rank: int, tag: int) -> Work:
+    def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
         assert isinstance(tensors, list), "input must be list"
 
         for tensor in tensors:
             if not tensor.is_shared():
                 tensor.share_memory_()
 
-        return self._run_func("recv", tensors, rank, tag)
+        return self._run_func("recv", tensors, src_rank, tag)
 
     def reduce_scatter(
         self,
@@ -1213,14 +1213,14 @@ class ProcessGroupBaby(ProcessGroup):
                     tensor.share_memory_()
         return self._run_func("reduce_scatter", output_tensors, input_tensors, opts)
 
-    def send(self, tensor_list: List[torch.Tensor], rank: int, tag: int) -> Work:
-        assert isinstance(tensor_list, list), "input must be list"
+    def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
+        assert isinstance(tensors, list), "input must be list"
 
-        for tensor in tensor_list:
+        for tensor in tensors:
             if not tensor.is_shared():
                 tensor.share_memory_()
 
-        return self._run_func("send", tensor_list, rank, tag)
+        return self._run_func("send", tensors, dst_rank, tag)
 
     def size(self) -> int:
         return self._world_size
