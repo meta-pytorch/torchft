@@ -4,19 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import io
 import logging
 import socket
 import threading
+import time
 import urllib.request
-from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
-from typing import Generator, Generic, List, Optional, TypeVar
+from typing import Generator, List, Optional, TypeVar, cast
 
 import torch
+from torch.utils._pytree import TreeSpec, tree_flatten, tree_unflatten
 
+from torchft.checkpointing._rwlock import RWLock
+from torchft.checkpointing._serialization import _streaming_load, _streaming_save
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.http import _IPv6HTTPServer
 
@@ -26,22 +29,11 @@ T = TypeVar("T")
 
 
 @contextmanager
-def _timed_acquire(
-    lock: threading.Lock, timeout: timedelta
-) -> Generator[None, None, None]:
-    """
-    Acquire a lock with a timeout.
-
-    Args:
-        lock: the lock to acquire
-        timeout: the timeout to acquire the lock
-    """
-    if not lock.acquire(timeout=timeout.total_seconds()):
-        raise TimeoutError(f"timed out acquiring lock after {timeout}")
-    try:
-        yield
-    finally:
-        lock.release()
+def _time(desc: str) -> Generator[None, None, None]:
+    start = time.perf_counter()
+    yield
+    end = time.perf_counter()
+    logger.info(f"{desc} took {end - start}s")
 
 
 class HTTPTransport(CheckpointTransport[T]):
@@ -53,15 +45,24 @@ class HTTPTransport(CheckpointTransport[T]):
     from an existing worker.
 
     Args:
-        state_dict: a callable that returns the state dict to be transferred
+        timeout: the timeout for HTTP requests
+        num_chunks: the number of chunks to split the checkpoint into (0 for no chunking)
     """
 
-    def __init__(self, timeout: timedelta) -> None:
-        self._checkpoint_lock = threading.Lock()
+    def __init__(self, timeout: timedelta, num_chunks: int) -> None:
+        self._checkpoint_lock = RWLock(timeout=timeout.total_seconds())
         self._disallowed = False
         self._step = -1
         self._timeout = timeout
         self._state_dict: Optional[T] = None
+        self._num_chunks = num_chunks
+        self._stream: Optional[torch.cuda.Stream] = (
+            torch.cuda.Stream() if torch.cuda.is_available() else None
+        )
+
+        # staged checkpoint information
+        self._spec: Optional[TreeSpec] = None
+        self._chunks: Optional[List[List[object]]] = None
 
         # We don't allow checkpoints until the first send_checkpoint to avoid
         # serving the default step=-1 invalid checkpoint.
@@ -78,37 +79,56 @@ class HTTPTransport(CheckpointTransport[T]):
                     # validate socket timeout is actually set
                     assert self.connection.gettimeout() == self.timeout
 
-                    with _timed_acquire(
-                        ckpt_server._checkpoint_lock, ckpt_server._timeout
-                    ):
+                    with ckpt_server._checkpoint_lock.r_lock():
                         step = ckpt_server._step
 
-                        if self.path != f"/checkpoint/{step}":
-                            self.send_response(400)
-                            self.send_header("Content-type", "text/plain")
-                            self.end_headers()
-                            self.err(
-                                f"invalid checkpoint requested, serving {step} but got {self.path}"
+                        parts = self.path.split("/")
+                        assert len(parts) == 4
+                        if parts[1] != "checkpoint":
+                            self.send_error(
+                                400,
+                                f"invalid url format, expected /checkpoint/step/key but got {self.path}",
                             )
                             return
 
-                        self.send_response(200)
-                        self.send_header("Content-type", "application/octet-stream")
-                        self.end_headers()
+                        step = int(parts[2])
+                        if step != ckpt_server._step:
+                            self.send_error(
+                                400,
+                                f"invalid checkpoint requested, serving {ckpt_server._step} but got {step=}",
+                            )
+                            return
 
-                        state_dict = ckpt_server._state_dict
+                        key = parts[3]
+                        if key == "full":
+                            self.send_response(200)
+                            self.send_header("Content-type", "application/octet-stream")
+                            self.end_headers()
 
-                        torch.save(state_dict, self.wfile)
+                            state_dict = ckpt_server._state_dict
+
+                            _streaming_save(state_dict, self.wfile)
+                            return
+
+                        if key == "metadata":
+                            self.send_response(200)
+                            self.send_header("Content-type", "application/octet-stream")
+                            self.end_headers()
+
+                            _streaming_save(ckpt_server._spec, self.wfile)
+                        else:
+                            chunk = ckpt_server._chunks[int(key)]
+
+                            self.send_response(200)
+                            self.send_header("Content-type", "application/octet-stream")
+                            self.end_headers()
+
+                            _streaming_save(chunk, self.wfile)
                 except Exception as e:
                     logger.exception(
                         f"Exception in checkpoint server when handling {self.path=}: {e}",
                     )
-                    self.send_response(500, str(e))
-                    self.end_headers()
-
-            def err(self, msg: str) -> None:
-                logger.error(msg)
-                self.wfile.write(msg.encode())
+                    self.send_error(500, str(e))
 
         server_address = ("", 0)
         self._server = _IPv6HTTPServer(server_address, RequestHandler)
@@ -122,22 +142,23 @@ class HTTPTransport(CheckpointTransport[T]):
         self._thread.start()
 
     @classmethod
-    def load_from_address(cls, address: str, timeout: timedelta) -> T:
+    def _load_from_address(cls, address: str, timeout: timedelta) -> object:
         """
         Loads a checkpoint from the given address.
 
         Args:
             address: the HTTP address to load the checkpoint from
         """
-        logger.info(f"fetching checkpoint from {address}")
+        msg = f"fetching checkpoint from {address}"
+        logger.info(msg)
 
-        with urllib.request.urlopen(address, timeout=timeout.total_seconds()) as f:
-            data = f.read()
-
-        reader = io.BytesIO(data)
-        # We have to set weights_only to False as there are some non-tensor
-        # states like lr_scheduler.
-        return torch.load(reader, weights_only=False)
+        with _time(msg), urllib.request.urlopen(
+            address, timeout=timeout.total_seconds()
+        ) as f:
+            # We have to set weights_only to False as there are some non-tensor
+            # states like lr_scheduler.
+            # pyre-fixme[16]: needs torch>=2.7
+            return cast(T, _streaming_load(f, weights_only=False))
 
     def address(self) -> str:
         """
@@ -165,7 +186,7 @@ class HTTPTransport(CheckpointTransport[T]):
         """
         if not self._disallowed:
             self._disallowed = True
-            self._checkpoint_lock.acquire()
+            self._checkpoint_lock.w_acquire()
 
     def allow_checkpoint(self, step: int) -> None:
         """
@@ -178,7 +199,7 @@ class HTTPTransport(CheckpointTransport[T]):
 
         if self._disallowed:
             self._disallowed = False
-            self._checkpoint_lock.release()
+            self._checkpoint_lock.w_release()
 
     def shutdown(self, wait: bool = True) -> None:
         """
@@ -198,10 +219,80 @@ class HTTPTransport(CheckpointTransport[T]):
     def send_checkpoint(
         self, dst_ranks: List[int], step: int, state_dict: T, timeout: timedelta
     ) -> None:
-        self._state_dict = state_dict
+        values, spec = tree_flatten(state_dict)
+
+        with (
+            torch.cuda.stream(self._stream)
+            if self._stream is not None
+            else nullcontext()
+        ):
+            with _time("transferring state_dict to CPU"):
+                values = _to_cpu(values, pin_memory=False)
+                if self._stream is not None:
+                    self._stream.synchronize()
+
+        # Unflatten so non-chunked transfer uses CPU tensors
+        self._state_dict = tree_unflatten(values, spec)
+
+        # Save spec for chunked
+        self._spec = spec
+        self._chunks = _split_chunks(values, self._num_chunks)
+
         self.allow_checkpoint(step)
 
     def recv_checkpoint(
         self, src_rank: int, metadata: str, step: int, timeout: timedelta
     ) -> T:
-        return self.load_from_address(f"{metadata}{step}", timeout)
+        base_url = f"{metadata}{step}"
+        if self._num_chunks == 0:
+            return cast(T, self._load_from_address(f"{base_url}/full", timeout))
+        else:
+            urls = [f"{base_url}/metadata"] + [
+                f"{base_url}/{i}" for i in range(self._num_chunks)
+            ]
+
+            with ThreadPoolExecutor(max_workers=len(urls)) as executor:
+                futures = [
+                    executor.submit(self._load_from_address, url, timeout)
+                    for url in urls
+                ]
+
+                spec, *chunks = [future.result() for future in futures]
+                spec = cast(TreeSpec, spec)
+                chunks = cast(List[List[object]], chunks)
+
+            values = _merge_chunks(chunks, self._num_chunks)
+
+            return tree_unflatten(values, spec)
+
+
+def _to_cpu(values: List[T], pin_memory: bool) -> List[T]:
+    out = []
+    for v in values:
+        if isinstance(v, torch.Tensor):
+            if v.device.type == "cuda":
+                if pin_memory:
+                    cpu = torch.empty(*tuple(v.size()), dtype=v.dtype, pin_memory=True)
+                    cpu.copy_(v, non_blocking=True)
+                    out.append(cpu)
+                else:
+                    out.append(v.cpu())
+            else:
+                out.append(v)
+        else:
+            out.append(v)
+    return out
+
+
+def _split_chunks(values: List[T], num_chunks: int) -> List[List[T]]:
+    return [values[i::num_chunks] for i in range(num_chunks)]
+
+
+def _merge_chunks(chunks: List[List[T]], num_chunks: int) -> List[T]:
+    max_len = max(len(lst) for lst in chunks)
+    output_list = []
+    for i in range(max_len):
+        for lst in chunks:
+            if i < len(lst):
+                output_list.append(lst[i])
+    return output_list

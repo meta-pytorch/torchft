@@ -162,6 +162,7 @@ class Manager:
         if checkpoint_transport is None:
             checkpoint_transport = HTTPTransport[Dict[str, T]](
                 timeout=timeout,
+                num_chunks=0,
             )
 
         self._checkpoint_transport: CheckpointTransport[Dict[str, T]] = (
