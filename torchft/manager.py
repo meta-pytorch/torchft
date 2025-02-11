@@ -408,6 +408,7 @@ class Manager:
             self.wait_quorum()
 
             if self._healing:
+                print("self._healing set to true", flush=True)
                 # eagerly apply pending state_dict so we can run the forwards pass
                 self._apply_pending_state_dict()
 
