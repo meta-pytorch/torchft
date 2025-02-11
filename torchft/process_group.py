@@ -1345,6 +1345,9 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     def getBackendName(self) -> str:
         return "torchft-baby-nccl"
 
+    def shutdown(self) -> None:
+        super().shutdown()
+
 
 def extend_device_mesh(
     mesh: DeviceMesh, pg: ProcessGroup, name: str = "dp", dim: int = 0
