@@ -90,8 +90,7 @@ def _test_pg(
             for item in arg:
                 check_tensors(item)
 
-    # Test collectives
-    # Note - send/recv require multiple processes to test, so we skip them here
+    # Test collectives. send/recv require multiple processes to test, so we skip them here
     collectives = [
         ("allreduce", ([input_tensor], AllreduceOptions())),
         ("allreduce", ([input_tensor], ReduceOp.SUM)),
@@ -233,7 +232,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr: str = f"localhost:{store.port}/prefix"
 
-        def run(rank: int) -> Tuple[ProcessGroupBabyGloo, torch.Tensor, Work]:
+        def run(rank: int) -> Tuple[torch.Tensor, Work]:
             a = ProcessGroupBabyGloo()
             a.configure(store_addr, rank, 2)
 
@@ -242,31 +241,22 @@ class ProcessGroupTest(TestCase):
             at = torch.tensor([rank + 1])
 
             a_work = a.allreduce([at], ReduceOp.SUM)
-            return a, at, a_work
+            return at, a_work
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             a_fut = executor.submit(run, 0)
             b_fut = executor.submit(run, 1)
 
-        a, at, a_work = a_fut.result()
-        b, bt, b_work = b_fut.result()
+        at, a_work = a_fut.result()
+        bt, b_work = b_fut.result()
 
-        try:
-            a_work.wait()
-            fut = b_work.get_future()
+        a_work.wait()
+        fut = b_work.get_future()
 
-            fut.wait()
+        fut.wait()
 
-            torch.testing.assert_close(at, torch.tensor([3]))
-            torch.testing.assert_close(bt, torch.tensor([3]))
-        finally:
-            del a_fut
-            del b_fut
-            del a_work
-            del b_work
-            gc.collect()
-            a.shutdown()
-            b.shutdown()
+        torch.testing.assert_close(at, torch.tensor([3]))
+        torch.testing.assert_close(bt, torch.tensor([3]))
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
