@@ -25,15 +25,23 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class MyModel(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, in_dim: int = 3, out_dim: int = 4) -> None:
         super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
         self.model = nn.Sequential(
-            nn.Linear(3, 4),
+            nn.Linear(in_dim, out_dim),
             nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
+
+    def get_rand_inputs(self, batch_size: int) -> torch.Tensor:
+        return torch.rand(batch_size, self.in_dim)
+
+    def get_rand_labels(self, batch_size: int) -> torch.Tensor:
+        return torch.randint(3, (batch_size,))
 
 
 class InjectedFailure(Exception):
@@ -63,17 +71,19 @@ class FailureInjector:
 
 class TrainLoop(Protocol):
     def __call__(
-        self, rank: int, store_port: int, runner: "Runner"
+        self, rank: int, store_port: int, device: torch.device, runner: "Runner"
     ) -> Dict[str, Dict[str, object]]: ...
 
 
 @dataclass
 class Runner:
     replica_id: int
+    num_replicas: int
     lighthouse_address: str
     failure_injector: FailureInjector
     train_loop: TrainLoop
 
+    use_cuda: bool = False
     world_size: int = 1
     attempts: int = 3
     manager_args: Dict[str, object] = field(default_factory=dict)
@@ -92,11 +102,22 @@ class Runner:
         ) as executor:
             futures = []
             for rank in range(self.world_size):
+                if self.use_cuda:
+                    num_cuda_devices = torch.cuda.device_count()
+                    assert num_cuda_devices >= self.num_replicas
+                    device_index = (
+                        num_cuda_devices // self.num_replicas
+                    ) * self.replica_id + rank
+                    device = torch.device(f"cuda:{device_index}")
+                else:
+                    device = torch.device("cpu")
+
                 futures.append(
                     executor.submit(
                         self.train_loop,
                         rank=rank,
                         store_port=store.port,
+                        device=device,
                         runner=self,
                     )
                 )
@@ -129,6 +150,7 @@ class Runner:
 def ddp_train_loop(
     rank: int,
     store_port: int,
+    device: torch.device,
     runner: Runner,
 ) -> Dict[str, Dict[str, object]]:
     with ExitStack() as stack:
@@ -213,6 +235,7 @@ class ManagerIntegTest(TestCase):
                 failure_injector = FailureInjector()
                 runner = Runner(
                     replica_id=replica_id,
+                    num_replicas=num_replicas,
                     lighthouse_address=lighthouse.address(),
                     failure_injector=failure_injector,
                     train_loop=ddp_train_loop,
@@ -260,6 +283,7 @@ class ManagerIntegTest(TestCase):
             ):
                 runner = Runner(
                     replica_id=replica_id,
+                    num_replicas=num_replicas,
                     lighthouse_address=lighthouse.address(),
                     failure_injector=failure_injector,
                     manager_args={
@@ -301,6 +325,7 @@ class ManagerIntegTest(TestCase):
             ):
                 runner = Runner(
                     replica_id=replica_id,
+                    num_replicas=num_replicas,
                     lighthouse_address=lighthouse.address(),
                     failure_injector=failure_injector,
                     world_size=world_size,
