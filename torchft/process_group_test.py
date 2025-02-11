@@ -71,6 +71,7 @@ def _test_pg(
     """
     Helper function to test a set of collective operations on a given process group.
     """
+
     shape: torch.Size = example_tensor.shape
     dtype: torch.dtype = example_tensor.dtype
 
@@ -268,7 +269,6 @@ class ProcessGroupTest(TestCase):
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=0.01))
         with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
             a.configure(store_addr, 0, 2)
-        a.shutdown()
 
     def test_reconfigure_baby_process_group(self) -> None:
         store = TCPStore(
@@ -305,7 +305,6 @@ class ProcessGroupTest(TestCase):
         self.assertFalse(future_queue_2.closed())
         assert p_2 is not None
         self.assertTrue(p_2.is_alive())
-        a.shutdown()
 
     def test_baby_gloo_apis(self) -> None:
         store = TCPStore(
@@ -323,7 +322,6 @@ class ProcessGroupTest(TestCase):
         gc.collect()
 
         self.assertEqual(a.num_active_work(), 0)
-        a.shutdown()
 
     def test_baby_gloo_send_recv(self) -> None:
         store = TCPStore(
