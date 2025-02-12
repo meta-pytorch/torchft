@@ -139,15 +139,9 @@ def _test_pg(
 
 def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     """
-    Helper function to test a set of collective operations within multiple process groups.
+    Helper function to test a set of collective operations in settings with multiple
+    process groups.
     """
-    # Test allreduce
-    tc = tensor.clone()
-    allreduce_work = pg.allreduce([tc], ReduceOp.SUM)
-    allreduce_work.wait()
-    expected_tensor = torch.tensor([3], device=tc.device)
-    torch.testing.assert_close(tc, expected_tensor)
-
     # Test allgather
     tensor_list = [
         torch.zeros(2, dtype=torch.int64, device=tensor.device) for _ in range(2)
@@ -162,17 +156,25 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
         tensor_list[1], torch.tensor([3, 4], device=tensor.device)
     )
 
-    # Test send/recv
-    if rank == 0:
-        send_tensor = tensor.clone()
-        send_work = pg.send([send_tensor], 1, 0)
-        send_work.wait()
-    else:
-        recv_tensor = torch.zeros_like(tensor)
-        recv_work = pg.recv([recv_tensor], 0, 0)
-        recv_work.wait()
-        expected = torch.tensor([1], device=tensor.device)
-        torch.testing.assert_close(recv_tensor, expected)
+    # Test allreduce
+    tc = tensor.clone()
+    allreduce_work = pg.allreduce([tc], ReduceOp.SUM)
+    allreduce_work.wait()
+    expected_tensor = torch.tensor([3], device=tc.device)
+    torch.testing.assert_close(tc, expected_tensor)
+
+    # Test allreduce_coalesced
+    tensors = [tensor.clone(), tensor.clone() + 1]
+    allreduce_coalesced_work = pg.allreduce_coalesced(
+        tensors, AllreduceCoalescedOptions()
+    )
+    allreduce_coalesced_work.wait()
+    expected_tensors = [
+        torch.tensor([3], device=tensor.device),
+        torch.tensor([5], device=tensor.device),
+    ]
+    for t, expected in zip(tensors, expected_tensors):
+        torch.testing.assert_close(t, expected)
 
     # Test all-to-all
     input_tensor = torch.tensor([rank + 1, rank + 5], device=tensor.device)
@@ -193,6 +195,30 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     broadcast_work.wait()
     expected_broadcast = torch.tensor([1], device=tensor.device)
     torch.testing.assert_close(broadcast_tensor, expected_broadcast)
+
+    # Test broadcast_one
+    broadcast_one_tensor = tensor.clone() if rank == 0 else torch.zeros_like(tensor)
+    broadcast_one_work = pg.broadcast_one(broadcast_one_tensor, 0)
+    broadcast_one_work.wait()
+    torch.testing.assert_close(
+        broadcast_one_tensor, torch.tensor([1], device=tensor.device)
+    )
+
+    # Test barrier
+    barrier_work = pg.barrier(BarrierOptions())
+    barrier_work.wait()
+
+    # Test send/recv
+    if rank == 0:
+        send_tensor = tensor.clone()
+        send_work = pg.send([send_tensor], 1, 0)
+        send_work.wait()
+    else:
+        recv_tensor = torch.zeros_like(tensor)
+        recv_work = pg.recv([recv_tensor], 0, 0)
+        recv_work.wait()
+        expected = torch.tensor([1], device=tensor.device)
+        torch.testing.assert_close(recv_tensor, expected)
 
     # Test reduce_scatter
     if tensor.device.type == "cuda":
