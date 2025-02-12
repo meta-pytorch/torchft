@@ -194,6 +194,38 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     expected_broadcast = torch.tensor([1], device=tensor.device)
     torch.testing.assert_close(broadcast_tensor, expected_broadcast)
 
+    # Test reduce_scatter
+    if tensor.device.type == "cuda":
+        # reduce scatter not supported on GLOO
+        input_tensors = [
+            torch.tensor(
+                [rank + 1, rank + 3], device=tensor.device, dtype=torch.float32
+            ),
+            torch.tensor(
+                [rank + 5, rank + 7], device=tensor.device, dtype=torch.float32
+            ),
+        ]
+        output_tensor = torch.empty(2, device=tensor.device)
+        reduce_scatter_work = pg.reduce_scatter(
+            [output_tensor], [input_tensors], ReduceScatterOptions()
+        )
+        reduce_scatter_work.wait()
+        # Input tensors become:
+        # rank 0: [[1, 3], [5, 7]]
+        # rank 1: [[2, 4], [6, 8]]
+        # Therefore expected outputs are:
+        # rank 0: [1 + 2 = 3, 3 + 4 = 7]
+        # rank 1: [5 + 6 = 11, 7 + 8 = 15]
+        if rank == 0:
+            expected_reduce_scatter = torch.tensor(
+                [3, 7], device=tensor.device, dtype=torch.float32
+            )
+        else:
+            expected_reduce_scatter = torch.tensor(
+                [11, 15], device=tensor.device, dtype=torch.float32
+            )
+        torch.testing.assert_close(output_tensor, expected_reduce_scatter)
+
 
 class ProcessGroupTest(TestCase):
     def test_gloo(self) -> None:
@@ -391,7 +423,10 @@ class ProcessGroupTest(TestCase):
             # We test using set_device to ensure stream device is correct.
             torch.cuda.set_device(rank)
             at = torch.tensor([rank + 1], device="cuda")
-            _test_multi_pg(a, rank, at)
+            try:
+                _test_multi_pg(a, rank, at)
+            finally:
+                a.shutdown()
             return a
 
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -400,9 +435,8 @@ class ProcessGroupTest(TestCase):
 
         a = a_fut.result()
         b = b_fut.result()
+
         # cleanup
-        a.shutdown()
-        b.shutdown()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
