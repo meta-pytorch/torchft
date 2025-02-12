@@ -132,6 +132,7 @@ class ProcessGroup(BaseProcessGroup):
     ) -> Work:
         """
         Reduces the tensor data across all machines in such a way that all get the final result.
+
         See torch.distributed.all_reduce for more details.
         """
         raise NotImplementedError("not implemented")
@@ -143,6 +144,7 @@ class ProcessGroup(BaseProcessGroup):
     ) -> Work:
         """
         Performs an all_reduce operation in a coalesced manner.
+
         See torch.distributed.all_reduce_coalesced for more details.
         """
         raise NotImplementedError("not implemented")
@@ -158,6 +160,7 @@ class ProcessGroup(BaseProcessGroup):
     ) -> Work:
         """
         Performs an all_to_all operation.
+
         See torch.distributed.all_to_all_single for more details.
         """
         raise NotImplementedError("not implemented")
@@ -165,6 +168,7 @@ class ProcessGroup(BaseProcessGroup):
     def barrier(self, opts: BarrierOptions) -> Work:
         """
         Synchronizes all processes.
+
         See torch.distributed.barrier for more details.
         """
         raise NotImplementedError("not implemented")
@@ -189,12 +193,8 @@ class ProcessGroup(BaseProcessGroup):
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
         """
         Receives a list of tensors from the process with rank `rank`.
-        Args:
-            tensors (List[torch.Tensor]): The list of tensors to fill.
-            rank (int): The rank of the process to receive from.
-            tag (int): The tag to match for the receive.
-        Returns:
-            Work: A work handle representing the asynchronous receive operation.
+
+        See torch.distributed.recv for more details.
         """
         raise NotImplementedError("not implemented")
 
@@ -216,12 +216,8 @@ class ProcessGroup(BaseProcessGroup):
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
         """
         Sends a list of tensors to the process with rank `dst_rank`.
-        Args:
-            tensors (List[torch.Tensor]): The list of tensors to send.
-            dst_rank (int): The rank of the process to send to.
-            tag (int): The tag to match for the send.
-        Returns:
-            Work: A work handle representing the asynchronous send operation.
+
+        See torch.distributed.send for more details.
         """
         raise NotImplementedError("not implemented")
 

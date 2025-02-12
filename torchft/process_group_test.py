@@ -137,6 +137,64 @@ def _test_pg(
     return works
 
 
+def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """
+    Helper function to test a set of collective operations within multiple process groups.
+    """
+    # Test allreduce
+    tc = tensor.clone()
+    allreduce_work = pg.allreduce([tc], ReduceOp.SUM)
+    allreduce_work.wait()
+    expected_tensor = torch.tensor([3], device=tc.device)
+    torch.testing.assert_close(tc, expected_tensor)
+
+    # Test allgather
+    tensor_list = [
+        torch.zeros(2, dtype=torch.int64, device=tensor.device) for _ in range(2)
+    ]
+    ag_tensor = torch.arange(2, dtype=torch.int64, device=tensor.device) + 1 + 2 * rank
+    allgather_work = pg.allgather([tensor_list], [ag_tensor], AllgatherOptions())
+    allgather_work.wait()
+    torch.testing.assert_close(
+        tensor_list[0], torch.tensor([1, 2], device=tensor.device)
+    )
+    torch.testing.assert_close(
+        tensor_list[1], torch.tensor([3, 4], device=tensor.device)
+    )
+
+    # Test send/recv
+    if rank == 0:
+        send_tensor = tensor.clone()
+        send_work = pg.send([send_tensor], 1, 0)
+        send_work.wait()
+    else:
+        recv_tensor = torch.zeros_like(tensor)
+        recv_work = pg.recv([recv_tensor], 0, 0)
+        recv_work.wait()
+        expected = torch.tensor([1], device=tensor.device)
+        torch.testing.assert_close(recv_tensor, expected)
+
+    # Test all-to-all
+    input_tensor = torch.tensor([rank + 1, rank + 5], device=tensor.device)
+    output_tensor = torch.empty_like(input_tensor)
+    alltoall_work = pg.alltoall_base(
+        output_tensor, input_tensor, [1, 1], [1, 1], AllToAllOptions()
+    )
+    alltoall_work.wait()
+    if rank == 0:
+        expected_alltoall = torch.tensor([1, 2], device=tensor.device)
+    else:
+        expected_alltoall = torch.tensor([5, 6], device=tensor.device)
+    torch.testing.assert_close(output_tensor, expected_alltoall)
+
+    # Test broadcast
+    broadcast_tensor = tensor.clone() if rank == 0 else torch.zeros_like(tensor)
+    broadcast_work = pg.broadcast([broadcast_tensor], BroadcastOptions())
+    broadcast_work.wait()
+    expected_broadcast = torch.tensor([1], device=tensor.device)
+    torch.testing.assert_close(broadcast_tensor, expected_broadcast)
+
+
 class ProcessGroupTest(TestCase):
     def test_gloo(self) -> None:
         store = TCPStore(
@@ -154,37 +212,6 @@ class ProcessGroupTest(TestCase):
         m = nn.Linear(3, 4)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
-
-    def test_gloo_send_recv(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
-        # Test send/recv between two processes
-        def run(rank: int, store_addr: str = store_addr) -> Tuple[torch.Tensor, Work]:
-            pg = ProcessGroupGloo()
-            pg.configure(store_addr, rank, 2)
-
-            if rank == 0:
-                tensor = torch.ones(2, 3)
-                work = pg.send([tensor], 1, 0)
-                return tensor, work
-            else:
-                tensor = torch.zeros(2, 3)
-                work = pg.recv([tensor], 0, 0)
-                return tensor, work
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        at, a_work = a_fut.result()
-        bt, b_work = b_fut.result()
-
-        a_work.wait()
-        b_work.wait()
-        torch.testing.assert_close(at, bt)
 
     def test_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -233,31 +260,19 @@ class ProcessGroupTest(TestCase):
 
         store_addr: str = f"localhost:{store.port}/prefix"
 
-        def run(rank: int) -> Tuple[torch.Tensor, Work]:
-            a = ProcessGroupBabyGloo()
-            a.configure(store_addr, rank, 2)
+        def run(rank: int, store_addr: str = store_addr) -> None:
+            pg = ProcessGroupBabyGloo()
+            pg.configure(store_addr, rank, 2)
 
-            self.assertEqual(a.size(), 2)
-
-            at = torch.tensor([rank + 1])
-
-            a_work = a.allreduce([at], ReduceOp.SUM)
-            return at, a_work
+            tensor = torch.tensor([rank + 1])
+            _test_multi_pg(pg, rank, tensor)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             a_fut = executor.submit(run, 0)
             b_fut = executor.submit(run, 1)
 
-        at, a_work = a_fut.result()
-        bt, b_work = b_fut.result()
-
-        a_work.wait()
-        fut = b_work.get_future()
-
-        fut.wait()
-
-        torch.testing.assert_close(at, torch.tensor([3]))
-        torch.testing.assert_close(bt, torch.tensor([3]))
+        a_fut.result()
+        b_fut.result()
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -323,37 +338,6 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(a.num_active_work(), 0)
 
-    def test_baby_gloo_send_recv(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
-        # Test send/recv between two processes
-        def run(rank: int, store_addr: str = store_addr) -> Tuple[torch.Tensor, Work]:
-            pg = ProcessGroupBabyGloo()
-            pg.configure(store_addr, rank, 2)
-
-            if rank == 0:
-                tensor = torch.ones(2, 3)
-                work = pg.send([tensor], 1, 0)
-                return tensor, work
-            else:
-                tensor = torch.zeros(2, 3)
-                work = pg.recv([tensor], 0, 0)
-                return tensor, work
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        at, a_work = a_fut.result()
-        bt, b_work = b_fut.result()
-
-        a_work.wait()
-        b_work.wait()
-        torch.testing.assert_close(at, bt)
-
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_baby_nccl_apis(self) -> None:
@@ -390,58 +374,6 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
-    def test_baby_nccl_send_recv_2gpu(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr: str = f"localhost:{store.port}/prefix"
-
-        def run(rank: int) -> Tuple[ProcessGroupBabyNCCL, torch.Tensor, Work]:
-            a = ProcessGroupBabyNCCL(
-                timeout=timedelta(seconds=10.0),
-            )
-            a.configure(store_addr, rank, 2)
-            self.assertEqual(a.size(), 2)
-
-            # We test using set_device to ensure stream device is correct.
-            torch.cuda.set_device(rank)
-
-            if rank == 0:
-                at = torch.tensor([rank + 1], device="cuda", dtype=torch.int32)
-                work = a.send([at], 1, 0)
-                return a, at, work
-            else:
-                tensor = torch.zeros(1, device="cuda", dtype=torch.int32)
-                work = a.recv([tensor], 0, 0)
-                return a, tensor, work
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        a, at, a_work = a_fut.result()
-        b, bt, b_work = b_fut.result()
-
-        try:
-            a_work.get_future().wait()
-            b_work.get_future().wait()
-            torch.testing.assert_close(at.cpu(), bt.cpu())
-        finally:
-            # cleanup - first ensure that babywork is deleted before shutting down PGs
-            # note futures must be deleted as they hold references to babywork
-            del a_fut
-            del b_fut
-            del a_work
-            del b_work
-            gc.collect()
-            b.shutdown()
-            a.shutdown()
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
     def test_baby_nccl_2gpu(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
@@ -449,7 +381,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr: str = f"localhost:{store.port}/prefix"
 
-        def run(rank: int) -> Tuple[ProcessGroupBabyNCCL, torch.Tensor, Work]:
+        def run(rank: int) -> ProcessGroupBabyNCCL:
             a = ProcessGroupBabyNCCL(
                 timeout=timedelta(seconds=10.0),
             )
@@ -459,33 +391,20 @@ class ProcessGroupTest(TestCase):
             # We test using set_device to ensure stream device is correct.
             torch.cuda.set_device(rank)
             at = torch.tensor([rank + 1], device="cuda")
-
-            a_work = a.allreduce([at], ReduceOp.SUM)
-            return a, at, a_work
+            _test_multi_pg(a, rank, at)
+            return a
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             a_fut = executor.submit(run, 0)
             b_fut = executor.submit(run, 1)
 
-        a, at, a_work = a_fut.result()
-        b, bt, b_work = b_fut.result()
-
-        try:
-            a_work.wait()
-            b_work.get_future().wait()
-            torch.testing.assert_close(at.cpu(), bt.cpu())
-        finally:
-            # cleanup - first ensure that babywork is deleted before shutting down PGs
-            # note futures must be deleted as they hold references to babywork
-            del a_fut
-            del b_fut
-            del a_work
-            del b_work
-            gc.collect()
-            b.shutdown()
-            a.shutdown()
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+        a = a_fut.result()
+        b = b_fut.result()
+        # cleanup
+        a.shutdown()
+        b.shutdown()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     def test_device_mesh(self) -> None:
         os.environ["MASTER_ADDR"] = "localhost"
