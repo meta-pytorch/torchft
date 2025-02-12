@@ -772,6 +772,26 @@ class _OpMetadata:
             yield
 
 
+def _maybe_share_tensors(
+    tensor: Union[List[List[torch.Tensor]], List[torch.Tensor], torch.Tensor]
+) -> None:
+    """Move a tensor / list of tensors to shared memory if not already in shared memory."""
+    if isinstance(tensor, list):
+        for t in tensor:
+            _maybe_share_tensors(t)
+    elif isinstance(tensor, torch.Tensor):
+        if not tensor.is_shared():
+            tensor.share_memory_()
+    else:
+        raise TypeError(f"expected tensor or list but got {type(tensor)}")
+
+
+def _assert_list(tensors: Union[List[torch.Tensor], List[List[torch.Tensor]]]) -> None:
+    """Assert that the input is a list of tensors or a nested list of tensors."""
+    if not isinstance(tensors, list):
+        raise TypeError(f"expected list but got {type(tensors)}")
+
+
 class ProcessGroupBaby(ProcessGroup):
     """
     This is a process group that runs the underlying process group in a
@@ -1104,18 +1124,10 @@ class ProcessGroupBaby(ProcessGroup):
         input_tensor: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        assert isinstance(output_tensors, list), "input must be list"
-        assert isinstance(input_tensor, list), "input must be list"
-
-        for tensor_list in output_tensors:
-            for tensor in tensor_list:
-                if not tensor.is_shared():
-                    tensor.share_memory_()
-
-        for tensor in input_tensor:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
+        _assert_list(output_tensors)
+        _assert_list(input_tensor)
+        _maybe_share_tensors(output_tensors)
+        _maybe_share_tensors(input_tensor)
         return self._run_func("allgather", output_tensors, input_tensor, opts)
 
     def allreduce(
@@ -1123,12 +1135,8 @@ class ProcessGroupBaby(ProcessGroup):
         tensors: List[torch.Tensor],
         opts: Union[dist.AllreduceOptions, dist.ReduceOp],
     ) -> Work:
-        assert isinstance(tensors, list), "input must be list"
-
-        for tensor in tensors:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
+        _assert_list(tensors)
+        _maybe_share_tensors(tensors)
         return self._run_func("allreduce", tensors, opts)
 
     def allreduce_coalesced(
@@ -1136,12 +1144,8 @@ class ProcessGroupBaby(ProcessGroup):
         tensors: List[torch.Tensor],
         opts: Union[dist.AllreduceCoalescedOptions, dist.ReduceOp],
     ) -> Work:
-        assert isinstance(tensors, list), "input must be list"
-
-        for tensor in tensors:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
+        _assert_list(tensors)
+        _maybe_share_tensors(tensors)
         return self._run_func("allreduce_coalesced", tensors, opts)
 
     def alltoall_base(
@@ -1152,10 +1156,8 @@ class ProcessGroupBaby(ProcessGroup):
         input_split_sizes: List[int],
         opts: AllToAllOptions,
     ) -> Work:
-        if not output_buffer.is_shared():
-            output_buffer.share_memory_()
-        if not input_buffer.is_shared():
-            input_buffer.share_memory_()
+        _maybe_share_tensors(output_buffer)
+        _maybe_share_tensors(input_buffer)
         return self._run_func(
             "alltoall_base",
             output_buffer,
@@ -1173,21 +1175,13 @@ class ProcessGroupBaby(ProcessGroup):
         tensor_list: List[torch.Tensor],
         opts: BroadcastOptions,
     ) -> Work:
-        assert isinstance(tensor_list, list), "input must be list"
-
-        for tensor in tensor_list:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
+        _assert_list(tensor_list)
+        _maybe_share_tensors(tensor_list)
         return self._run_func("broadcast", tensor_list, opts)
 
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
-        assert isinstance(tensors, list), "input must be list"
-
-        for tensor in tensors:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
+        _assert_list(tensors)
+        _maybe_share_tensors(tensors)
         return self._run_func("recv", tensors, src_rank, tag)
 
     def reduce_scatter(
@@ -1196,26 +1190,15 @@ class ProcessGroupBaby(ProcessGroup):
         input_tensors: List[List[torch.Tensor]],
         opts: ReduceScatterOptions,
     ) -> Work:
-        assert isinstance(output_tensors, list), "input must be list"
-        assert isinstance(input_tensors, list), "input must be list"
-
-        for tensor in output_tensors:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
-        for tensor_list in input_tensors:
-            for tensor in tensor_list:
-                if not tensor.is_shared():
-                    tensor.share_memory_()
+        _assert_list(output_tensors)
+        _assert_list(input_tensors)
+        _maybe_share_tensors(output_tensors)
+        _maybe_share_tensors(input_tensors)
         return self._run_func("reduce_scatter", output_tensors, input_tensors, opts)
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
-        assert isinstance(tensors, list), "input must be list"
-
-        for tensor in tensors:
-            if not tensor.is_shared():
-                tensor.share_memory_()
-
+        _assert_list(tensors)
+        _maybe_share_tensors(tensors)
         return self._run_func("send", tensors, dst_rank, tag)
 
     def size(self) -> int:
