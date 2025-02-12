@@ -146,8 +146,10 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     tensor_list = [
         torch.zeros(2, dtype=torch.int64, device=tensor.device) for _ in range(2)
     ]
-    ag_tensor = torch.arange(2, dtype=torch.int64, device=tensor.device) + 1 + 2 * rank
-    allgather_work = pg.allgather([tensor_list], [ag_tensor], AllgatherOptions())
+    allgather_tensor = (
+        torch.arange(2, dtype=torch.int64, device=tensor.device) + 1 + 2 * rank
+    )
+    allgather_work = pg.allgather([tensor_list], [allgather_tensor], AllgatherOptions())
     allgather_work.wait()
     torch.testing.assert_close(
         tensor_list[0], torch.tensor([1, 2], device=tensor.device)
@@ -169,12 +171,8 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
         tensors, AllreduceCoalescedOptions()
     )
     allreduce_coalesced_work.wait()
-    expected_tensors = [
-        torch.tensor([3], device=tensor.device),
-        torch.tensor([5], device=tensor.device),
-    ]
-    for t, expected in zip(tensors, expected_tensors):
-        torch.testing.assert_close(t, expected)
+    torch.testing.assert_close(tensors[0], torch.tensor([3], device=tensor.device))
+    torch.testing.assert_close(tensors[1], torch.tensor([5], device=tensor.device))
 
     # Test all-to-all
     input_tensor = torch.tensor([rank + 1, rank + 5], device=tensor.device)
@@ -322,6 +320,8 @@ class ProcessGroupTest(TestCase):
             pg = ProcessGroupBabyGloo()
             pg.configure(store_addr, rank, 2)
 
+            self.assertEqual(pg.size(), 2)
+
             tensor = torch.tensor([rank + 1])
             _test_multi_pg(pg, rank, tensor)
 
@@ -410,19 +410,21 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         a = ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
-        a.configure(store_addr, 0, 1)
+        try:
+            a.configure(store_addr, 0, 1)
 
-        _test_pg(a, torch.randn((2, 3), device="cuda"))
+            _test_pg(a, torch.randn((2, 3), device="cuda"))
 
-        torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
-        # force collection to ensure no BabyWork objects remain
-        gc.collect()
+            # force collection to ensure no BabyWork objects remain
+            gc.collect()
 
-        self.assertEqual(a.num_active_work(), 0)
-        a.shutdown()
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+            self.assertEqual(a.num_active_work(), 0)
+        finally:
+            a.shutdown()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
     def test_dummy(self) -> None:
         pg = ProcessGroupDummy(0, 1)
