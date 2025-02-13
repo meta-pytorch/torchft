@@ -6,8 +6,8 @@
 
 import urllib.error
 from datetime import timedelta
-from typing import Any, Dict
-from unittest import TestCase
+from typing import Dict
+from unittest import TestCase, skipUnless
 from unittest.mock import MagicMock
 
 import torch
@@ -15,17 +15,14 @@ from parameterized import parameterized
 
 from torchft.checkpointing.http_transport import HTTPTransport
 from torchft.checkpointing.http_transport_bench import main as bench_main
+from torchft.checkpointing.transport import CheckpointTransport
+from torchft.checkpointing.transport_test import (
+    assertStateDictEqual,
+    run_multi_recovery_test,
+)
 
 
 class TestHTTPTransport(TestCase):
-    def assertStateDictEqual(self, a: Dict[str, object], b: Dict[str, object]) -> None:
-        for k, v1 in a.items():
-            v2 = b[k]
-            if isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
-                torch.testing.assert_close(v1.cpu(), v2.cpu())
-            else:
-                self.assertEqual(v1, v2)
-
     @parameterized.expand(
         [
             ("no chunks", 0),
@@ -59,7 +56,7 @@ class TestHTTPTransport(TestCase):
         out = server.recv_checkpoint(
             src_rank=0, metadata=metadata, step=1234, timeout=timedelta(seconds=10)
         )
-        self.assertStateDictEqual(out, expected)
+        assertStateDictEqual(self, out, expected)
 
         # test timeout
         with self.assertRaisesRegex(urllib.error.URLError, r"urlopen error"):
@@ -113,6 +110,30 @@ class TestHTTPTransport(TestCase):
         self.assertTrue(server._disallowed)
 
         server.shutdown()
+
+    def test_multi_http_transport_cpu(self) -> None:
+        device = torch.device("cpu")
+
+        def init(rank: int, world_size: int) -> CheckpointTransport[Dict[str, object]]:
+            return HTTPTransport(
+                timeout=timedelta(seconds=10),
+                num_chunks=0,
+            )
+
+        run_multi_recovery_test(self, init, device=device)
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_multi_http_transport_cuda(self) -> None:
+        device = torch.device("cuda")
+
+        def init(rank: int, world_size: int) -> CheckpointTransport[Dict[str, object]]:
+            return HTTPTransport(
+                timeout=timedelta(seconds=10),
+                num_chunks=0,
+            )
+
+        run_multi_recovery_test(self, init, device=device)
 
     def test_benchmark(self) -> None:
         bench_main(

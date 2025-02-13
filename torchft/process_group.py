@@ -966,13 +966,17 @@ class ProcessGroupBaby(ProcessGroup):
                     next_op_id += 1
                 elif cmd == "wait":
                     op_id: int = op[1]
+                    timeout: Optional[timedelta] = op[2]
 
                     metadata = work[op_id]
 
                     with metadata.set_stream():
                         # With WorkNCCL this makes the stream wait not the CPU when
                         # no timeout is passed.
-                        metadata.work.wait()
+                        if timeout is not None:
+                            metadata.work.wait(timeout)
+                        else:
+                            metadata.work.wait()
 
                         # Register event on the stream that we can pass to the main
                         # process.
@@ -1051,7 +1055,7 @@ class ProcessGroupBaby(ProcessGroup):
         self._assert_alive()
 
         assert self._tx is not None
-        self._tx.put(("wait", op_id), timeout=self._timeout)
+        self._tx.put(("wait", op_id, timeout), timeout=self._timeout)
 
         assert self._rx is not None
         op_id, event = cast(
