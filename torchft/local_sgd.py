@@ -17,6 +17,7 @@ from torch import nn, optim
 from torch.nn.parameter import Parameter
 from torch.optim.optimizer import Optimizer
 from torch.utils.hooks import RemovableHandle
+import torch.distributed as dist
 
 from torchft.manager import Manager
 
@@ -223,17 +224,35 @@ class DiLoCo(LocalSGD):
             self._outer_optimizer.step()
             self._save_parameters()
         self._outer_optimizer.zero_grad()
-
+    
     def _average_grads(self) -> None:
         """
-        Average the gradients across the diloco group.
+        Efficiently averages gradients across the diloco group using buffer-based bucketization.
         """
-        works = []
-        for p in self._model.parameters():
-            # Perform allreduce on the pseudogradients
-            assert p.grad is not None
-            work = self._manager.allreduce(p.grad)
-            works.append(work)
-        # Wait for all allreduce operations to complete
-        for work in works:
-            work.wait()
+
+        grads = [p.grad for p in self._model.parameters() if p.grad is not None]
+
+        if not grads:
+            return  # No gradients to process
+
+        # Compute total size and allocate a flat buffer for all gradients
+        total_size = sum(g.numel() for g in grads)
+        flat_buffer = torch.zeros(total_size, dtype=grads[0].dtype, device=grads[0].device)
+
+        # Pack gradients into the buffer
+        offset = 0
+        for g in grads:
+            flat_buffer[offset : offset + g.numel()].copy_(g.view(-1))
+            offset += g.numel()
+
+        # Perform Allreduce on the entire buffer
+        work = self._manager.allreduce(flat_buffer)
+
+        # Wait for Allreduce to complete
+        work.wait()
+
+        # Unpack gradients back into their original tensors
+        offset = 0
+        for g in grads:
+            g.copy_(flat_buffer[offset : offset + g.numel()].view_as(g))
+            offset += g.numel()
