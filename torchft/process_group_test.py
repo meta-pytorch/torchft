@@ -139,62 +139,119 @@ def _test_pg(
 
 
 def run_allgather_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test allgather collective operation"""
-    tensor_list = [
-        torch.zeros(2, dtype=torch.int64, device=tensor.device) for _ in range(2)
+    """Test allgather collective operation.
+
+    Suppose each rank's local tensor = [rank+1, rank+2],
+    we allgather => gather onto a list of length world_sz.
+    """
+    world_sz = pg.size()
+    to_gather = torch.stack([tensor, tensor + 1], dim=0)
+    # shape: (2,)
+    to_gather = to_gather.reshape(-1)
+
+    # Gathers as follows: [ [ recv0 ], [ recv1 ], ... [ recv_{sz-1} ] ]
+    # Each recv is shape (2,)
+    output_list = [
+        torch.zeros(2, device=tensor.device, dtype=tensor.dtype)
+        for _ in range(world_sz)
     ]
-    allgather_tensor = (
-        torch.arange(2, dtype=torch.int64, device=tensor.device) + 1 + 2 * rank
-    )
-    allgather_work = pg.allgather([tensor_list], [allgather_tensor], AllgatherOptions())
-    allgather_work.wait()
-    torch.testing.assert_close(
-        tensor_list[0], torch.tensor([1, 2], device=tensor.device)
-    )
-    torch.testing.assert_close(
-        tensor_list[1], torch.tensor([3, 4], device=tensor.device)
-    )
+
+    work = pg.allgather([output_list], [to_gather], AllgatherOptions())
+    work.wait()
+
+    for r in range(world_sz):
+        expected = torch.tensor(
+            [r + 1, r + 2], device=tensor.device, dtype=tensor.dtype
+        )
+        torch.testing.assert_close(output_list[r], expected)
 
 
 def run_allreduce_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test allreduce collective operation"""
+    """Test allreduce collective operation.
+
+    Assume each rank's tensor has value = rank + 1.
+    The final result after allreduce(SUM) should be sum(r=1,...,world_sz-1).
+    """
     tc = tensor.clone()
-    allreduce_work = pg.allreduce([tc], ReduceOp.SUM)
-    allreduce_work.wait()
-    expected_tensor = torch.tensor([3], device=tc.device)
-    torch.testing.assert_close(tc, expected_tensor)
+    world_sz = pg.size()
+    work = pg.allreduce([tc], ReduceOp.SUM)
+    work.wait()
+    expected_val = sum(r + 1 for r in range(world_sz))
+    torch.testing.assert_close(tc, torch.tensor([expected_val], device=tensor.device))
 
 
 def run_allreduce_coalesced_test(
     pg: ProcessGroup, rank: int, tensor: torch.Tensor
 ) -> None:
-    """Test allreduce_coalesced collective operation"""
-    tensors = [tensor.clone(), tensor.clone() + 1]
-    allreduce_coalesced_work = pg.allreduce_coalesced(
-        tensors, AllreduceCoalescedOptions()
-    )
-    allreduce_coalesced_work.wait()
-    torch.testing.assert_close(tensors[0], torch.tensor([3], device=tensor.device))
-    torch.testing.assert_close(tensors[1], torch.tensor([5], device=tensor.device))
+    """Test allreduce_coalesced collective operation.
+
+    Assume each rank's tensor has value = rank + 1.
+    We coalesce 1 tensors:
+    - t0 = [rank + 1]
+    - t1 = [rank + 2]
+
+    Our final sum should be sum(r=1,...,world_sz-1) + sum(r=2,...,world_sz-1).
+    """
+    world_sz = pg.size()
+    t0 = tensor.clone()
+    t1 = tensor.clone() + 1
+    work = pg.allreduce_coalesced([t0, t1], AllreduceCoalescedOptions())
+    work.wait()
+    sum_t0 = sum(r + 1 for r in range(world_sz))
+    sum_t1 = sum(r + 2 for r in range(world_sz))
+    torch.testing.assert_close(t0, torch.tensor([sum_t0], device=t0.device))
+    torch.testing.assert_close(t1, torch.tensor([sum_t1], device=t1.device))
 
 
 def run_alltoall_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test all-to-all collective operation"""
-    input_tensor = torch.tensor([rank + 1, rank + 5], device=tensor.device)
-    output_tensor = torch.empty_like(input_tensor)
+    """Test all-to-all collective operation.
+
+    Suppose each rank's local tensor = [rank*ws+1, rank*ws+2, ..., rank*ws + n]
+
+    e.g.:
+    rank=0 => [1,2]
+    rank=1 => [3,4]
+
+    After all-to-all, rank r's output[k] = the element from rank k that is destined for rank r,
+    e.g.: (k*n) + (r+1):
+
+    rank=0 => [1,3]
+    rank=1 => [2,4]
+
+    """
+    world_sz = pg.size()
+    if world_sz < 2:
+        return
+
+    input_tensor = torch.arange(
+        start=rank * world_sz + 1,
+        end=rank * world_sz + 1 + world_sz,
+        device=tensor.device,
+        dtype=tensor.dtype,
+    )
+    output_tensor = torch.empty(world_sz, device=tensor.device, dtype=tensor.dtype)
+
+    send_sz = [1] * world_sz
+    recv_sz = [1] * world_sz
+
     alltoall_work = pg.alltoall_base(
-        output_tensor, input_tensor, [1, 1], [1, 1], AllToAllOptions()
+        output_tensor, input_tensor, send_sz, recv_sz, AllToAllOptions()
     )
     alltoall_work.wait()
-    if rank == 0:
-        expected_alltoall = torch.tensor([1, 2], device=tensor.device)
-    else:
-        expected_alltoall = torch.tensor([5, 6], device=tensor.device)
-    torch.testing.assert_close(output_tensor, expected_alltoall)
+
+    expected = torch.empty(world_sz, device=tensor.device, dtype=tensor.dtype)
+    for k in range(world_sz):
+        val = k * world_sz + (rank + 1)
+        expected[k] = val
+
+    torch.testing.assert_close(output_tensor, expected)
 
 
 def run_broadcast_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test broadcast collective operation"""
+    """Test broadcast collective operation.
+
+    rank0 will broadcast a known value and all other ranks should get it.
+    """
     broadcast_tensor = tensor.clone() if rank == 0 else torch.zeros_like(tensor)
     broadcast_work = pg.broadcast([broadcast_tensor], BroadcastOptions())
     broadcast_work.wait()
@@ -203,7 +260,10 @@ def run_broadcast_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> Non
 
 
 def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test broadcast_one collective operation"""
+    """Test broadcast_one collective operation.
+
+    rank0 will broadcast a known value and all other ranks should get it.
+    """
     broadcast_one_tensor = tensor.clone() if rank == 0 else torch.zeros_like(tensor)
     broadcast_one_work = pg.broadcast_one(broadcast_one_tensor, 0)
     broadcast_one_work.wait()
@@ -214,18 +274,23 @@ def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) ->
 
 # pyre-fixme[2]: Parameter must be annotated.
 def run_barrier_test(pg: ProcessGroup, *args) -> None:
-    """Test barrier collective operation"""
+    """Test barrier collective operation."""
     barrier_work = pg.barrier(BarrierOptions())
     barrier_work.wait()
 
 
 def run_send_recv_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test send/recv point-to-point operations"""
+    """Test send/recv point-to-point operations.
+
+    Simple point-to-point between ranks 0 and 1, ignored for other ranks.
+    """
+    if pg.size() < 2:
+        return
     if rank == 0:
         send_tensor = tensor.clone()
         send_work = pg.send([send_tensor], 1, 0)
         send_work.wait()
-    else:
+    elif rank == 1:
         recv_tensor = torch.zeros_like(tensor)
         recv_work = pg.recv([recv_tensor], 0, 0)
         recv_work.wait()
@@ -234,31 +299,56 @@ def run_send_recv_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> Non
 
 
 def run_reduce_scatter_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """Test reduce_scatter collective operation"""
-    if tensor.device.type == "cuda":
-        # reduce scatter not supported on GLOO
-        input_tensors = [
-            torch.tensor(
-                [rank + 1, rank + 3], device=tensor.device, dtype=torch.float32
-            ),
-            torch.tensor(
-                [rank + 5, rank + 7], device=tensor.device, dtype=torch.float32
-            ),
-        ]
-        output_tensor = torch.empty(2, device=tensor.device)
-        reduce_scatter_work = pg.reduce_scatter(
-            [output_tensor], [input_tensors], ReduceScatterOptions()
+    """Test reduce_scatter collective operation.
+
+    Assume each rank creates a matrix where each row r contains values:
+        [r * world_sz + 1, ..., r * world_sz + world_sz]
+
+    For example, with world_size=2:
+        [[1, 2],
+         [3, 4]]
+
+    The reduce_scatter operation then:
+        - Reduces (sums) corresponding rows across all ranks
+        - Scatters the results so each rank gets one row of the final sum
+        - Since all ranks had the same initial data, the expected result for each rank r is:
+            rank r receives: [rworld_sz + 1, ..., rworld_sz + world_sz] * world_sz
+
+    For example, with 2 ranks:
+        rank 0 gets: [1, 2] * 2 = [2, 4] (first row)
+        rank 1 gets: [3, 4] * 2 = [6, 8] (second row)
+    """
+    if tensor.device.type == "cpu":
+        return
+    # reduce scatter not supported on GLOO
+    world_sz = pg.size()
+    if world_sz < 2:
+        return
+
+    local_data = []
+    for r in range(world_sz):
+        row_vals = torch.arange(
+            start=r * world_sz + 1,
+            end=r * world_sz + world_sz + 1,
+            device=tensor.device,
+            dtype=torch.float32,
         )
-        reduce_scatter_work.wait()
-        if rank == 0:
-            expected_reduce_scatter = torch.tensor(
-                [3, 7], device=tensor.device, dtype=torch.float32
-            )
-        else:
-            expected_reduce_scatter = torch.tensor(
-                [11, 15], device=tensor.device, dtype=torch.float32
-            )
-        torch.testing.assert_close(output_tensor, expected_reduce_scatter)
+        local_data.append(row_vals)
+
+    out = torch.zeros(world_sz, device=tensor.device, dtype=torch.float32)
+    opts = ReduceScatterOptions()
+    opts.reduceOp = ReduceOp.SUM
+    work = pg.reduce_scatter([out], [local_data], opts)
+    work.wait()
+
+    expected_row = torch.arange(
+        start=rank * world_sz + 1,
+        end=rank * world_sz + world_sz + 1,
+        device=tensor.device,
+        dtype=torch.float32,
+    )
+    expected_sum = expected_row * world_sz
+    torch.testing.assert_close(out, expected_sum)
 
 
 _COLLECTIVE_TO_FUNC: Dict[str, Callable[[ProcessGroup, int, torch.Tensor], None]] = {
