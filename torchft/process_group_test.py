@@ -697,7 +697,11 @@ class MultiPgBaseTest(TestCase):
         for pg in cls.pg_pool:
             shutdown = getattr(pg, "shutdown", None)
             if shutdown is not None:
-                shutdown()
+                # shutdown may have been called during resiliency test, so ignore errors
+                try:
+                    shutdown()
+                except Exception:
+                    pass
         cls.executor.shutdown(wait=True)
         super().tearDownClass()
 
@@ -721,18 +725,12 @@ class MultiPgBaseTest(TestCase):
             return ProcessGroupDummy(0, 1)
 
     # pyre-fixme[3]: Return type must be annotated.
-    def _run_parallel(
-        self,
-        # pyre-fixme[2]: Parameter must be annotated.
-        func: Callable[[ProcessGroup, int, torch.Tensor, Any, Any], Any],
-        device: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> List[Any]:
+    def _run_parallel(self, collective: str, device: str = "cpu") -> List[Any]:
         """
         Helper to run on all ranks in parallel, returning a list
         of results or raising an exception if any fail.
         """
+        func = _COLLECTIVE_TO_FUNC[collective]
         futures = []
         for rank in range(self.WORLD_SIZE):
             pg = self.pg_pool[rank]
@@ -740,9 +738,57 @@ class MultiPgBaseTest(TestCase):
             if "cuda" in device:
                 device = f"cuda:{rank}"
             tensor = torch.tensor([rank + 1], device=device)
-            fut = self.executor.submit(func, pg, rank, tensor, *args, **kwargs)
+            fut = self.executor.submit(func, pg, rank, tensor)
             futures.append(fut)
         return [f.result() for f in futures]
+
+    def _run_with_resiliency(self, collective: str, device: str = "cpu") -> List[str]:
+        """
+        Run a collective with resiliency:
+        - fault_rank (last rank) simulates a crash.
+        - surviving ranks detect the error, then reconfigure PG to exclude fault_rank.
+        - surviving ranks run the same collective again successfully.
+        """
+
+        def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
+            fault_rank = self.WORLD_SIZE - 1
+            test = _COLLECTIVE_TO_FUNC[collective]
+
+            t1 = torch.tensor([rank + 1], device=dev, dtype=torch.float32)
+            # Simulate failure on the fault rank, but other ranks should still succeed.
+            if rank == fault_rank:
+                shutdown = getattr(pg, "shutdown", None)
+                if shutdown is not None:
+                    shutdown()
+                return f"Rank{rank} crashed"
+
+            try:
+                test(pg, rank, t1.clone())
+            except RuntimeError as e:
+                assert f"Simulated rank{rank} failure" in str(e)
+
+            # Re-configure the PG to exclude the fault rank
+            new_world_size = self.WORLD_SIZE - 1
+            new_store_addr = f"localhost:{self.store.port}/reconfig_{collective}"
+            pg.configure(new_store_addr, rank, new_world_size)
+
+            # run the same collective again successfully
+            t2 = torch.tensor([rank + 1], device=dev, dtype=torch.float32)
+            test(pg, rank, t2)
+            return f"Rank{rank} final success."
+
+        # run in parallel
+        futs = [
+            self.executor.submit(worker, self.pg_pool[r], r, device)
+            for r in range(self.WORLD_SIZE)
+        ]
+        results = []
+        for f in futs:
+            try:
+                results.append(f.result(timeout=20))
+            except Exception as e:
+                results.append(e)
+        return results
 
 
 class GlooMultiPgTest(MultiPgBaseTest):
@@ -760,8 +806,11 @@ class GlooMultiPgTest(MultiPgBaseTest):
 
     @parameterized.expand(COLLECTIVES)
     def test_collective(self, collective: str) -> None:
-        collective_func = _COLLECTIVE_TO_FUNC[collective]
-        self._run_parallel(collective_func, device="cpu")
+        self._run_parallel(collective, device="cpu")
+
+    @parameterized.expand(COLLECTIVES)
+    def test_collective_with_resiliency(self, collective: str) -> None:
+        self._run_with_resiliency(collective, device="cpu")
 
 
 class BabyGlooMultiPgTest(MultiPgBaseTest):
@@ -779,12 +828,16 @@ class BabyGlooMultiPgTest(MultiPgBaseTest):
 
     @parameterized.expand(COLLECTIVES)
     def test_collective(self, collective: str) -> None:
-        collective_func = _COLLECTIVE_TO_FUNC[collective]
-        self._run_parallel(collective_func, device="cpu")
+        self._run_parallel(collective, device="cpu")
+
+    @parameterized.expand(COLLECTIVES)
+    def test_collective_with_resiliency(self, collective: str) -> None:
+        self._run_with_resiliency(collective, device="cpu")
 
 
-@skipUnless(torch.cuda.is_available(), "needs CUDA")
-@skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
+@skipUnless(
+    torch.cuda.is_available() and torch.cuda.device_count() >= 2, "needs 2 CUDA devices"
+)
 class BabyNcclMultiPgTest(MultiPgBaseTest):
     BACKEND = "baby_nccl"
     WORLD_SIZE = 2
@@ -802,5 +855,27 @@ class BabyNcclMultiPgTest(MultiPgBaseTest):
 
     @parameterized.expand(COLLECTIVES)
     def test_collective(self, collective: str) -> None:
-        collective_func = _COLLECTIVE_TO_FUNC[collective]
-        self._run_parallel(collective_func, device="cuda")
+        self._run_parallel(collective, device="cuda")
+
+
+@skipUnless(
+    torch.cuda.is_available() and torch.cuda.device_count() >= 3, "needs 3 CUDA devices"
+)
+class BabyNcclResiliencyTest(MultiPgBaseTest):
+    BACKEND = "baby_nccl"
+    WORLD_SIZE = 3
+    COLLECTIVES = [
+        "allreduce",
+        "allreduce_coalesced",
+        "allgather",
+        "alltoall_base",
+        "barrier",
+        "broadcast",
+        "broadcast_one",
+        "reduce_scatter",
+        "send/recv",
+    ]
+
+    @parameterized.expand(COLLECTIVES)
+    def test_collective_with_resiliency(self, collective: str) -> None:
+        self._run_parallel(collective, device="cuda")
