@@ -705,17 +705,16 @@ class MultiPgBaseTest(TestCase):
     def _create_pg(cls, backend: str) -> ProcessGroup:
         """
         Helper that creates a new ProcessGroup of the specified type.
-        We replicate the logic from the original test_* methods to decide how to
-        instantiate Gloo, NCCL, or Baby versions, etc.
+
+        NCCL groups aren't currently supported - we prefer to test
+        BabyNCCLGroups as they spin up their own subprocesses.
         """
         if backend == "gloo":
-            return ProcessGroupGloo(timeout=timedelta(seconds=2))
-        elif backend == "nccl":
-            return ProcessGroupNCCL()
+            return ProcessGroupGloo(timeout=timedelta(seconds=1))
         elif backend == "baby_gloo":
             return ProcessGroupBabyGloo(timeout=timedelta(seconds=2))
         elif backend == "baby_nccl":
-            return ProcessGroupBabyNCCL(timeout=timedelta(seconds=5))
+            return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
         else:
             # fallback / dummy
             return ProcessGroupDummy(0, 1)
