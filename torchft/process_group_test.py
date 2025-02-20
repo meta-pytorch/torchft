@@ -11,12 +11,13 @@ import os
 import unittest
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, Dict, Tuple, cast
+from typing import Any, Callable, Dict, List, cast
 from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
+from parameterized import parameterized
 from torch import nn
 from torch._C._distributed_c10d import (
     AllgatherOptions,
@@ -137,12 +138,8 @@ def _test_pg(
     return works
 
 
-def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
-    """
-    Helper function to test a set of collective operations in settings with multiple
-    process groups.
-    """
-    # Test allgather
+def run_allgather_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test allgather collective operation"""
     tensor_list = [
         torch.zeros(2, dtype=torch.int64, device=tensor.device) for _ in range(2)
     ]
@@ -158,14 +155,20 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
         tensor_list[1], torch.tensor([3, 4], device=tensor.device)
     )
 
-    # Test allreduce
+
+def run_allreduce_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test allreduce collective operation"""
     tc = tensor.clone()
     allreduce_work = pg.allreduce([tc], ReduceOp.SUM)
     allreduce_work.wait()
     expected_tensor = torch.tensor([3], device=tc.device)
     torch.testing.assert_close(tc, expected_tensor)
 
-    # Test allreduce_coalesced
+
+def run_allreduce_coalesced_test(
+    pg: ProcessGroup, rank: int, tensor: torch.Tensor
+) -> None:
+    """Test allreduce_coalesced collective operation"""
     tensors = [tensor.clone(), tensor.clone() + 1]
     allreduce_coalesced_work = pg.allreduce_coalesced(
         tensors, AllreduceCoalescedOptions()
@@ -174,7 +177,9 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     torch.testing.assert_close(tensors[0], torch.tensor([3], device=tensor.device))
     torch.testing.assert_close(tensors[1], torch.tensor([5], device=tensor.device))
 
-    # Test all-to-all
+
+def run_alltoall_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test all-to-all collective operation"""
     input_tensor = torch.tensor([rank + 1, rank + 5], device=tensor.device)
     output_tensor = torch.empty_like(input_tensor)
     alltoall_work = pg.alltoall_base(
@@ -187,14 +192,18 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
         expected_alltoall = torch.tensor([5, 6], device=tensor.device)
     torch.testing.assert_close(output_tensor, expected_alltoall)
 
-    # Test broadcast
+
+def run_broadcast_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test broadcast collective operation"""
     broadcast_tensor = tensor.clone() if rank == 0 else torch.zeros_like(tensor)
     broadcast_work = pg.broadcast([broadcast_tensor], BroadcastOptions())
     broadcast_work.wait()
     expected_broadcast = torch.tensor([1], device=tensor.device)
     torch.testing.assert_close(broadcast_tensor, expected_broadcast)
 
-    # Test broadcast_one
+
+def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test broadcast_one collective operation"""
     broadcast_one_tensor = tensor.clone() if rank == 0 else torch.zeros_like(tensor)
     broadcast_one_work = pg.broadcast_one(broadcast_one_tensor, 0)
     broadcast_one_work.wait()
@@ -202,11 +211,16 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
         broadcast_one_tensor, torch.tensor([1], device=tensor.device)
     )
 
-    # Test barrier
+
+# pyre-fixme[2]: Parameter must be annotated.
+def run_barrier_test(pg: ProcessGroup, *args) -> None:
+    """Test barrier collective operation"""
     barrier_work = pg.barrier(BarrierOptions())
     barrier_work.wait()
 
-    # Test send/recv
+
+def run_send_recv_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test send/recv point-to-point operations"""
     if rank == 0:
         send_tensor = tensor.clone()
         send_work = pg.send([send_tensor], 1, 0)
@@ -218,7 +232,9 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
         expected = torch.tensor([1], device=tensor.device)
         torch.testing.assert_close(recv_tensor, expected)
 
-    # Test reduce_scatter
+
+def run_reduce_scatter_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
+    """Test reduce_scatter collective operation"""
     if tensor.device.type == "cuda":
         # reduce scatter not supported on GLOO
         input_tensors = [
@@ -234,12 +250,6 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
             [output_tensor], [input_tensors], ReduceScatterOptions()
         )
         reduce_scatter_work.wait()
-        # Input tensors become:
-        # rank 0: [[1, 3], [5, 7]]
-        # rank 1: [[2, 4], [6, 8]]
-        # Therefore expected outputs are:
-        # rank 0: [1 + 2 = 3, 3 + 4 = 7]
-        # rank 1: [5 + 6 = 11, 7 + 8 = 15]
         if rank == 0:
             expected_reduce_scatter = torch.tensor(
                 [3, 7], device=tensor.device, dtype=torch.float32
@@ -249,6 +259,19 @@ def _test_multi_pg(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
                 [11, 15], device=tensor.device, dtype=torch.float32
             )
         torch.testing.assert_close(output_tensor, expected_reduce_scatter)
+
+
+_COLLECTIVE_TO_FUNC: Dict[str, Callable[[ProcessGroup, int, torch.Tensor], None]] = {
+    "allgather": run_allgather_test,
+    "allreduce": run_allreduce_test,
+    "allreduce_coalesced": run_allreduce_coalesced_test,
+    "alltoall_base": run_alltoall_test,
+    "barrier": run_barrier_test,
+    "broadcast": run_broadcast_test,
+    "broadcast_one": run_broadcast_one_test,
+    "reduce_scatter": run_reduce_scatter_test,
+    "send/recv": run_send_recv_test,
+}
 
 
 class ProcessGroupTest(TestCase):
@@ -308,29 +331,6 @@ class ProcessGroupTest(TestCase):
         _test_pg(pg, torch.tensor([2], device=device))
 
         torch.cuda.synchronize()
-
-    def test_baby_gloo(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr: str = f"localhost:{store.port}/prefix"
-
-        def run(rank: int, store_addr: str = store_addr) -> None:
-            pg = ProcessGroupBabyGloo()
-            pg.configure(store_addr, rank, 2)
-
-            self.assertEqual(pg.size(), 2)
-
-            tensor = torch.tensor([rank + 1])
-            _test_multi_pg(pg, rank, tensor)
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        a_fut.result()
-        b_fut.result()
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -431,42 +431,6 @@ class ProcessGroupTest(TestCase):
         m = nn.Linear(3, 4)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
-
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
-    def test_baby_nccl_2gpu(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr: str = f"localhost:{store.port}/prefix"
-
-        def run(rank: int) -> ProcessGroupBabyNCCL:
-            a = ProcessGroupBabyNCCL(
-                timeout=timedelta(seconds=10.0),
-            )
-            a.configure(store_addr, rank, 2)
-            self.assertEqual(a.size(), 2)
-
-            # We test using set_device to ensure stream device is correct.
-            torch.cuda.set_device(rank)
-            at = torch.tensor([rank + 1], device="cuda")
-            try:
-                _test_multi_pg(a, rank, at)
-            finally:
-                a.shutdown()
-            return a
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            a_fut = executor.submit(run, 0)
-            b_fut = executor.submit(run, 1)
-
-        a = a_fut.result()
-        b = b_fut.result()
-
-        # cleanup
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
 
     def test_device_mesh(self) -> None:
         os.environ["MASTER_ADDR"] = "localhost"
@@ -600,3 +564,153 @@ class DeviceMeshTest(TestCase):
             for i in range(4):
                 future = executor.submit(self._test_init_device_mesh, 4, i)
                 futures.append(future)
+
+
+class MultiPgBaseTest(TestCase):
+    """
+    A base test that creates N processes (via ThreadPoolExecutor) sharing
+    a single ProcessGroup. Each test_* method will reuse the same PG.
+
+    Subclasses can specify:
+    - BACKEND: the backend to use for the ProcessGroup ("gloo" or "nccl")
+    - WORLD_SIZE: how many ranks to simulate
+    - Additional config for the PG, i.e. timeouts.
+    """
+
+    BACKEND = "gloo"
+    WORLD_SIZE = 2
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+
+        cls.store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        cls.store_addr = f"localhost:{cls.store.port}/prefix"
+
+        cls.pg_pool: List[ProcessGroup] = []
+
+        cls.executor = ThreadPoolExecutor(max_workers=cls.WORLD_SIZE)
+
+        def init_pg(rank: int) -> ProcessGroup:
+            pg = cls._create_pg(cls.BACKEND)
+            pg.configure(cls.store_addr, rank, cls.WORLD_SIZE)
+            return pg
+
+        futures = [cls.executor.submit(init_pg, rank) for rank in range(cls.WORLD_SIZE)]
+        cls.pg_pool = [future.result() for future in futures]
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        # Cleanup
+        for pg in cls.pg_pool:
+            shutdown = getattr(pg, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+        cls.executor.shutdown(wait=True)
+        super().tearDownClass()
+
+    @classmethod
+    def _create_pg(cls, backend: str) -> ProcessGroup:
+        """
+        Helper that creates a new ProcessGroup of the specified type.
+        We replicate the logic from the original test_* methods to decide how to
+        instantiate Gloo, NCCL, or Baby versions, etc.
+        """
+        if backend == "gloo":
+            return ProcessGroupGloo(timeout=timedelta(seconds=5))
+        elif backend == "nccl":
+            return ProcessGroupNCCL()
+        elif backend == "baby_gloo":
+            return ProcessGroupBabyGloo(timeout=timedelta(seconds=5))
+        elif backend == "baby_nccl":
+            return ProcessGroupBabyNCCL(timeout=timedelta(seconds=5))
+        else:
+            # fallback / dummy
+            return ProcessGroupDummy(0, 1)
+
+    # pyre-fixme[3]: Return type must be annotated.
+    def _run_parallel(
+        self,
+        # pyre-fixme[2]: Parameter must be annotated.
+        func: Callable[[ProcessGroup, int, torch.Tensor, Any, Any], Any],
+        device: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> List[Any]:
+        """
+        Helper to run on all ranks in parallel, returning a list
+        of results or raising an exception if any fail.
+        """
+        futures = []
+        for rank in range(self.WORLD_SIZE):
+            pg = self.pg_pool[rank]
+            # Each worker calls `func(pg=pg, rank=rank, tensor=tensor, *args, **kwargs)`
+            if "cuda" in device:
+                device = f"cuda:{rank}"
+            tensor = torch.tensor([rank + 1], device=device)
+            fut = self.executor.submit(func, pg, rank, tensor, *args, **kwargs)
+            futures.append(fut)
+        return [f.result() for f in futures]
+
+
+class GlooMultiPgTest(MultiPgBaseTest):
+    BACKEND = "gloo"
+    WORLD_SIZE = 2
+    COLLECTIVES = [
+        "allreduce",
+        "allreduce_coalesced",
+        "allgather",
+        "barrier",
+        "broadcast",
+        "broadcast_one",
+        "send/recv",
+    ]
+
+    @parameterized.expand(COLLECTIVES)
+    def test_collective(self, collective: str) -> None:
+        collective_func = _COLLECTIVE_TO_FUNC[collective]
+        self._run_parallel(collective_func, device="cpu")
+
+
+class BabyGlooMultiPgTest(MultiPgBaseTest):
+    BACKEND = "baby_gloo"
+    WORLD_SIZE = 2
+    COLLECTIVES = [
+        "allreduce",
+        "allreduce_coalesced",
+        "allgather",
+        "barrier",
+        "broadcast",
+        "broadcast_one",
+        "send/recv",
+    ]
+
+    @parameterized.expand(COLLECTIVES)
+    def test_collective(self, collective: str) -> None:
+        collective_func = _COLLECTIVE_TO_FUNC[collective]
+        self._run_parallel(collective_func, device="cpu")
+
+
+@skipUnless(torch.cuda.is_available(), "needs CUDA")
+@skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
+class BabyNcclMultiPgTest(MultiPgBaseTest):
+    BACKEND = "baby_nccl"
+    WORLD_SIZE = 2
+    COLLECTIVES = [
+        "allreduce",
+        "allreduce_coalesced",
+        "allgather",
+        "alltoall_base",
+        "barrier",
+        "broadcast",
+        "broadcast_one",
+        "reduce_scatter",
+        "send/recv",
+    ]
+
+    @parameterized.expand(COLLECTIVES)
+    def test_collective(self, collective: str) -> None:
+        collective_func = _COLLECTIVE_TO_FUNC[collective]
+        self._run_parallel(collective_func, device="cuda")
