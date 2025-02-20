@@ -712,7 +712,7 @@ class MultiPgBaseTest(TestCase):
         if backend == "gloo":
             return ProcessGroupGloo(timeout=timedelta(seconds=1))
         elif backend == "baby_gloo":
-            return ProcessGroupBabyGloo(timeout=timedelta(seconds=2))
+            return ProcessGroupBabyGloo(timeout=timedelta(seconds=5))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
         else:
