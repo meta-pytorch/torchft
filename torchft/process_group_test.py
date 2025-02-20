@@ -697,11 +697,7 @@ class MultiPgBaseTest(TestCase):
         for pg in cls.pg_pool:
             shutdown = getattr(pg, "shutdown", None)
             if shutdown is not None:
-                # shutdown may have been called during resiliency test, so ignore errors
-                try:
-                    shutdown()
-                except Exception:
-                    pass
+                shutdown()
         cls.executor.shutdown(wait=True)
         super().tearDownClass()
 
@@ -713,11 +709,11 @@ class MultiPgBaseTest(TestCase):
         instantiate Gloo, NCCL, or Baby versions, etc.
         """
         if backend == "gloo":
-            return ProcessGroupGloo(timeout=timedelta(seconds=5))
+            return ProcessGroupGloo(timeout=timedelta(seconds=2))
         elif backend == "nccl":
             return ProcessGroupNCCL()
         elif backend == "baby_gloo":
-            return ProcessGroupBabyGloo(timeout=timedelta(seconds=5))
+            return ProcessGroupBabyGloo(timeout=timedelta(seconds=2))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=5))
         else:
@@ -757,9 +753,6 @@ class MultiPgBaseTest(TestCase):
             t1 = torch.tensor([rank + 1], device=dev, dtype=torch.float32)
             # Simulate failure on the fault rank, but other ranks should still succeed.
             if rank == fault_rank:
-                shutdown = getattr(pg, "shutdown", None)
-                if shutdown is not None:
-                    shutdown()
                 return f"Rank{rank} crashed"
 
             try:
