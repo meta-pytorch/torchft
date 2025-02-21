@@ -99,6 +99,10 @@ def _test_pg(
         ("allreduce_coalesced", ([input_tensor], AllreduceCoalescedOptions())),
         ("allgather", (output_tensors, [input_tensor], AllgatherOptions())),
         (
+            "allgather_into_tensor_coalesced",
+            (output_tensors[0], [input_tensor], AllgatherOptions()),
+        ),
+        (
             "alltoall_base",
             (
                 output_tensors[0][0],
@@ -114,6 +118,10 @@ def _test_pg(
         (
             "reduce_scatter",
             (output_tensors[0], [[input_tensor]], ReduceScatterOptions()),
+        ),
+        (
+            "reduce_scatter_tensor_coalesced",
+            (output_tensors[0], [input_tensor], ReduceScatterOptions()),
         ),
     ]
     works: Dict[str, dist._Work] = {}
@@ -164,6 +172,49 @@ def run_allgather_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> Non
             [r + 1, r + 2], device=tensor.device, dtype=tensor.dtype
         )
         torch.testing.assert_close(output_list[r], expected)
+
+
+def run_allgather_into_tensor_coalesced_test(
+    pg: ProcessGroup, rank: int, tensor: torch.Tensor
+) -> None:
+    """Test allgather tensor coalesced collective operation.
+
+    This example gathers two local tensors, T0 and T1, from each rank into corresponding
+    output tensors.
+
+    For world_sz = n, each rank r has:
+        T0 = [r+1],
+        T1 = [r+10]
+
+    After allgather_into_tensor_coalesced, we result in two tensors: out0, out1,
+    both length n.
+
+    out0 gathers T0 from all ranks, out1 gathers T1 from all ranks.
+
+    We verify that out0[k] == [k+1] and out1[k] == [k+10] for all k.
+
+    """
+    world_sz = pg.size()
+
+    if world_sz < 2:
+        return
+
+    t0 = torch.tensor([rank + 1], device=tensor.device, dtype=tensor.dtype)
+    t1 = torch.tensor([rank + 10], device=tensor.device, dtype=tensor.dtype)
+
+    out0 = torch.zeros(world_sz, device=tensor.device, dtype=tensor.dtype)
+    out1 = torch.zeros(world_sz, device=tensor.device, dtype=tensor.dtype)
+
+    work = pg.allgather_into_tensor_coalesced(
+        [out0, out1], [t0, t1], AllgatherOptions()
+    )
+    work.wait()
+
+    for r in range(world_sz):
+        expected0 = torch.tensor([r + 1], device=t0.device, dtype=t0.dtype)
+        torch.testing.assert_close(out0[r], expected0[0])
+        expected1 = torch.tensor([r + 10], device=t1.device, dtype=t1.dtype)
+        torch.testing.assert_close(out1[r], expected1[0])
 
 
 def run_allreduce_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
@@ -351,8 +402,87 @@ def run_reduce_scatter_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -
     torch.testing.assert_close(out, expected_sum)
 
 
+def run_reduce_scatter_tensor_coalesced_test(
+    pg: ProcessGroup, rank: int, tensor: torch.Tensor
+) -> None:
+    """Test reduce_scatter tensor coalesced collective operation.
+
+      We define two 2D tensors, each shaped [world_sz, world_sz] which is replicated on each rank.
+
+      reduce_scatter coalesced will reduce each row of each tensor, then scatter the results to each rank.
+      Because these are replicated on all ranks, the reduced sum for each row is:
+          [r*world_sz + 1, ..., r*world_sz + world_sz] * world_sz
+
+      For example, with 2 ranks:
+          rank 0 gets: [1, 2] * 2 = [2, 4] (first row)
+          rank 1 gets: [3, 4] * 2 = [6, 8] (second row)
+    For example, with 2 ranks:
+          rank 0 gets: [1, 2] * 2 = [2, 4] (first row)
+          rank 1 gets: [3, 4] * 2 = [6, 8] (second row)
+
+    """
+    world_sz = pg.size()
+    if world_sz < 2:
+        return  # skip trivial
+
+    # Build M0, M1 (each is a list of n rows) fully replicated on all ranks
+    M0 = []
+    M1 = []
+    for r in range(world_sz):
+        row0 = torch.arange(
+            start=r * world_sz + 1,
+            end=r * world_sz + world_sz + 1,
+            device=tensor.device,
+            dtype=torch.float32,
+        )
+        row1 = torch.arange(
+            start=r * world_sz + 100,
+            end=r * world_sz + 100 + world_sz,
+            device=tensor.device,
+            dtype=torch.float32,
+        )
+        M0.append(row0)
+        M1.append(row1)
+
+    # Each rank receives one "row" for M0, one row for M1, after reduce_scatter_coalesced
+    out0 = torch.zeros(world_sz, device=tensor.device, dtype=torch.float32)
+    out1 = torch.zeros(world_sz, device=tensor.device, dtype=torch.float32)
+
+    opts = ReduceScatterOptions()
+    opts.reduceOp = ReduceOp.SUM
+
+    M0 = torch.stack(M0)
+    M1 = torch.stack(M1)
+
+    work = pg.reduce_scatter_tensor_coalesced([out0, out1], [M0, M1], opts)
+    work.wait()
+
+    base0 = (
+        torch.arange(
+            start=rank * world_sz + 1,
+            end=rank * world_sz + world_sz + 1,
+            device=tensor.device,
+            dtype=torch.float32,
+        )
+        * world_sz
+    )
+    base1 = (
+        torch.arange(
+            start=rank * world_sz + 100,
+            end=rank * world_sz + 100 + world_sz,
+            device=tensor.device,
+            dtype=torch.float32,
+        )
+        * world_sz
+    )
+
+    torch.testing.assert_close(out0, base0)
+    torch.testing.assert_close(out1, base1)
+
+
 _COLLECTIVE_TO_FUNC: Dict[str, Callable[[ProcessGroup, int, torch.Tensor], None]] = {
     "allgather": run_allgather_test,
+    "allgather_into_tensor_coalesced": run_allgather_into_tensor_coalesced_test,
     "allreduce": run_allreduce_test,
     "allreduce_coalesced": run_allreduce_coalesced_test,
     "alltoall_base": run_alltoall_test,
@@ -360,13 +490,14 @@ _COLLECTIVE_TO_FUNC: Dict[str, Callable[[ProcessGroup, int, torch.Tensor], None]
     "broadcast": run_broadcast_test,
     "broadcast_one": run_broadcast_one_test,
     "reduce_scatter": run_reduce_scatter_test,
+    "reduce_scatter_tensor_coalesced": run_reduce_scatter_tensor_coalesced_test,
     "send/recv": run_send_recv_test,
 }
 _ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
 
 
 class ProcessGroupTest(TestCase):
-    def test_gloo(self) -> None:
+    def test_gloo_apis(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -397,7 +528,7 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
-    def test_nccl(self) -> None:
+    def test_nccl_apis(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -790,6 +921,7 @@ class GlooMultiPgTest(MultiPgBaseTest):
     SKIP = [
         "alltoall_base",
         "reduce_scatter",
+        "reduce_scatter_tensor_coalesced",
     ]
     COLLECTIVES: List[str] = list(set(_ALL_COLLECTIVES) - set(SKIP))
 
@@ -808,6 +940,7 @@ class BabyGlooMultiPgTest(MultiPgBaseTest):
     SKIP = [
         "alltoall_base",
         "reduce_scatter",
+        "reduce_scatter_tensor_coalesced",
     ]
     COLLECTIVES: List[str] = list(set(_ALL_COLLECTIVES) - set(SKIP))
 
