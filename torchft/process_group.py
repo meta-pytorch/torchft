@@ -399,7 +399,6 @@ class ProcessGroupWrapper(ProcessGroup):
         )
 
     def barrier(self, opts: BarrierOptions) -> Work:
-        print(type(self.parent))
         return self.parent.barrier(opts)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
@@ -522,6 +521,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
         backend_class = BaseProcessGroupNCCL(store, rank, world_size)
+        backend_class._set_sequence_number_for_group()
         pg._register_backend(
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
         )
@@ -1492,6 +1492,7 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
         backend_class = BaseProcessGroupNCCL(store, rank, world_size)
+        backend_class._set_sequence_number_for_group()
         pg._register_backend(
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
         )

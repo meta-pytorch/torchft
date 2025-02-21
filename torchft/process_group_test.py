@@ -425,9 +425,9 @@ def run_reduce_scatter_tensor_coalesced_test(
     if world_sz < 2:
         return  # skip trivial
 
-    # Build M0, M1 (each is a list of n rows) fully replicated on all ranks
-    M0 = []
-    M1 = []
+    # Build m0, m1 (each is a list of n rows) fully replicated on all ranks
+    m0 = []
+    m1 = []
     for r in range(world_sz):
         row0 = torch.arange(
             start=r * world_sz + 1,
@@ -441,20 +441,20 @@ def run_reduce_scatter_tensor_coalesced_test(
             device=tensor.device,
             dtype=torch.float32,
         )
-        M0.append(row0)
-        M1.append(row1)
+        m0.append(row0)
+        m1.append(row1)
 
-    # Each rank receives one "row" for M0, one row for M1, after reduce_scatter_coalesced
+    # Each rank receives one "row" for m0, one row for m1, after reduce_scatter_coalesced
     out0 = torch.zeros(world_sz, device=tensor.device, dtype=torch.float32)
     out1 = torch.zeros(world_sz, device=tensor.device, dtype=torch.float32)
 
     opts = ReduceScatterOptions()
     opts.reduceOp = ReduceOp.SUM
 
-    M0 = torch.stack(M0)
-    M1 = torch.stack(M1)
+    m0 = torch.stack(m0)
+    m1 = torch.stack(m1)
 
-    work = pg.reduce_scatter_tensor_coalesced([out0, out1], [M0, M1], opts)
+    work = pg.reduce_scatter_tensor_coalesced([out0, out1], [m0, m1], opts)
     work.wait()
 
     base0 = (
