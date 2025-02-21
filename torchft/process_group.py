@@ -125,6 +125,20 @@ class ProcessGroup(BaseProcessGroup):
         raise NotImplementedError("not implemented")
 
     # pyre-fixme[14]: inconsistent override
+    def allgather_into_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        """
+        Performs an allgather operation on coalesced tensors.
+
+        See torch.distributed.allgather_coalesced for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
     def allreduce(
         self,
         tensors: List[torch.Tensor],
@@ -209,6 +223,20 @@ class ProcessGroup(BaseProcessGroup):
         Reduces, then scatters a list of tensors to all processes in a group.
 
         See torch.distributed.reduce_scatter for more details.
+        """
+        raise NotImplementedError("not implemented")
+
+    # pyre-fixme[14]: inconsistent override
+    def reduce_scatter_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: ReduceScatterOptions,
+    ) -> Work:
+        """
+        Performs a reduce-scatter operation on coalesced tensors.
+
+        See torch.distributed.reduce_scatter_tensor for more details.
         """
         raise NotImplementedError("not implemented")
 
@@ -336,9 +364,19 @@ class ProcessGroupWrapper(ProcessGroup):
         self,
         output_tensors: List[List[torch.Tensor]],
         input_tensor: List[torch.Tensor],
-        opts: object,
+        opts: AllgatherOptions,
     ) -> Work:
         return self.parent.allgather(output_tensors, input_tensor, opts)
+
+    def allgather_into_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        return self.parent.allgather_into_tensor_coalesced(
+            output_tensors, input_tensors, opts
+        )
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
         return self.parent.allreduce(tensors, opts)
@@ -376,6 +414,16 @@ class ProcessGroupWrapper(ProcessGroup):
         opts: object,
     ) -> Work:
         return self.parent.reduce_scatter(output_tensors, input_tensors, opts)
+
+    def reduce_scatter_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: ReduceScatterOptions,
+    ) -> Work:
+        return self.parent.reduce_scatter_tensor_coalesced(
+            output_tensors, input_tensors, opts
+        )
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
         return self.parent.send(tensors, dst_rank, tag)
@@ -499,6 +547,19 @@ class ProcessGroupDummy(ProcessGroup):
         self._work.append(res)
         return res
 
+    def allgather_into_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        for o, i in zip(output_tensors, input_tensors):
+            o.copy_(i)
+
+        res = _DummyWork(output_tensors)
+        self._work.append(res)
+        return res
+
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
         res = _DummyWork(tensors)
         self._work.append(res)
@@ -542,6 +603,19 @@ class ProcessGroupDummy(ProcessGroup):
         opts: object,
     ) -> Work:
         for o, i in zip(output_tensors, input_tensors[0]):
+            o.copy_(i)
+
+        res = _DummyWork(output_tensors)
+        self._work.append(res)
+        return res
+
+    def reduce_scatter_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: ReduceScatterOptions,
+    ) -> Work:
+        for o, i in zip(output_tensors, input_tensors):
             o.copy_(i)
 
         res = _DummyWork(output_tensors)
@@ -1134,6 +1208,20 @@ class ProcessGroupBaby(ProcessGroup):
         _maybe_share_tensors(input_tensor)
         return self._run_func("allgather", output_tensors, input_tensor, opts)
 
+    def allgather_into_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        _assert_list(output_tensors)
+        _assert_list(input_tensors)
+        _maybe_share_tensors(output_tensors)
+        _maybe_share_tensors(input_tensors)
+        return self._run_func(
+            "allgather_into_tensor_coalesced", output_tensors, input_tensors, opts
+        )
+
     def allreduce(
         self,
         tensors: List[torch.Tensor],
@@ -1199,6 +1287,20 @@ class ProcessGroupBaby(ProcessGroup):
         _maybe_share_tensors(output_tensors)
         _maybe_share_tensors(input_tensors)
         return self._run_func("reduce_scatter", output_tensors, input_tensors, opts)
+
+    def reduce_scatter_tensor_coalesced(
+        self,
+        output_tensors: List[torch.Tensor],
+        input_tensors: List[torch.Tensor],
+        opts: ReduceScatterOptions,
+    ) -> Work:
+        _assert_list(output_tensors)
+        _assert_list(input_tensors)
+        _maybe_share_tensors(output_tensors)
+        _maybe_share_tensors(input_tensors)
+        return self._run_func(
+            "reduce_scatter_tensor_coalesced", output_tensors, input_tensors, opts
+        )
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
         _assert_list(tensors)
