@@ -362,6 +362,7 @@ _COLLECTIVE_TO_FUNC: Dict[str, Callable[[ProcessGroup, int, torch.Tensor], None]
     "reduce_scatter": run_reduce_scatter_test,
     "send/recv": run_send_recv_test,
 }
+_ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
 
 
 class ProcessGroupTest(TestCase):
@@ -785,16 +786,12 @@ class MultiPgBaseTest(TestCase):
 
 class GlooMultiPgTest(MultiPgBaseTest):
     BACKEND = "gloo"
-    WORLD_SIZE = 2
-    COLLECTIVES = [
-        "allreduce",
-        "allreduce_coalesced",
-        "allgather",
-        "barrier",
-        "broadcast",
-        "broadcast_one",
-        "send/recv",
+    WORLD_SIZE = 3
+    SKIP = [
+        "alltoall_base",
+        "reduce_scatter",
     ]
+    COLLECTIVES: List[str] = list(set(_ALL_COLLECTIVES) - set(SKIP))
 
     @parameterized.expand(COLLECTIVES)
     def test_collective(self, collective: str) -> None:
@@ -807,16 +804,12 @@ class GlooMultiPgTest(MultiPgBaseTest):
 
 class BabyGlooMultiPgTest(MultiPgBaseTest):
     BACKEND = "baby_gloo"
-    WORLD_SIZE = 2
-    COLLECTIVES = [
-        "allreduce",
-        "allreduce_coalesced",
-        "allgather",
-        "barrier",
-        "broadcast",
-        "broadcast_one",
-        "send/recv",
+    WORLD_SIZE = 3
+    SKIP = [
+        "alltoall_base",
+        "reduce_scatter",
     ]
+    COLLECTIVES: List[str] = list(set(_ALL_COLLECTIVES) - set(SKIP))
 
     @parameterized.expand(COLLECTIVES)
     def test_collective(self, collective: str) -> None:
@@ -833,19 +826,8 @@ class BabyGlooMultiPgTest(MultiPgBaseTest):
 class BabyNcclMultiPgTest(MultiPgBaseTest):
     BACKEND = "baby_nccl"
     WORLD_SIZE = 2
-    COLLECTIVES = [
-        "allreduce",
-        "allreduce_coalesced",
-        "allgather",
-        "alltoall_base",
-        "barrier",
-        "broadcast",
-        "broadcast_one",
-        "reduce_scatter",
-        "send/recv",
-    ]
 
-    @parameterized.expand(COLLECTIVES)
+    @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective(self, collective: str) -> None:
         self._run_parallel(collective, device="cuda")
 
@@ -856,18 +838,7 @@ class BabyNcclMultiPgTest(MultiPgBaseTest):
 class BabyNcclResiliencyTest(MultiPgBaseTest):
     BACKEND = "baby_nccl"
     WORLD_SIZE = 3
-    COLLECTIVES = [
-        "allreduce",
-        "allreduce_coalesced",
-        "allgather",
-        "alltoall_base",
-        "barrier",
-        "broadcast",
-        "broadcast_one",
-        "reduce_scatter",
-        "send/recv",
-    ]
 
-    @parameterized.expand(COLLECTIVES)
+    @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective_with_resiliency(self, collective: str) -> None:
         self._run_parallel(collective, device="cuda")
