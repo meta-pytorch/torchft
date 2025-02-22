@@ -1148,8 +1148,6 @@ class ProcessGroupBaby(ProcessGroup):
             logger.exception(f"got unexpected error in future handler: {e}")
 
     def _get_future(self, op_id: int) -> Future[object]:
-        self._assert_alive()
-
         with self._futures_lock:
             fut = Future()  # pyre-fixme[29]: is not a function
             self._futures[op_id] = fut
@@ -1162,8 +1160,6 @@ class ProcessGroupBaby(ProcessGroup):
         return fut
 
     def _wait(self, op_id: int, timeout: Optional[timedelta] = None) -> bool:
-        self._assert_alive()
-
         assert self._tx is not None
         self._tx.put(("wait", op_id, timeout), timeout=self._timeout)
 
@@ -1179,14 +1175,10 @@ class ProcessGroupBaby(ProcessGroup):
         return True
 
     def _del(self, op_id: int) -> None:
-        self._assert_alive()
-
         assert self._tx is not None
         self._tx.put(("del", op_id), timeout=self._timeout)
 
     def _run_func(self, func: str, *args: object, **kwargs: object) -> Work:
-        self._assert_alive()
-
         rx = self._rx
         tx = self._tx
         assert rx is not None
@@ -1221,16 +1213,6 @@ class ProcessGroupBaby(ProcessGroup):
         assert isinstance(op_id, int), f"invalid return {op_id}"
 
         return _BabyWork(pg=self, op_id=op_id)
-
-    def _assert_alive(self) -> None:
-        """
-        Assert that the process group is alive. This is used to ensure that
-        operations are not performed on a dead process group and any errors are surfaced.
-        """
-        p = self._p
-        assert p is not None
-        if not p.is_alive():
-            raise RuntimeError(f"child process {p.pid=} is dead {p.exitcode=}")
 
     def allgather(
         self,

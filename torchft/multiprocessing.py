@@ -38,17 +38,19 @@ class _MonitoredQueue:
 
         start = time.perf_counter()
         while True:
-            elapsed = time.perf_counter() - start
-            if elapsed > timeout:
-                raise TimeoutError(f"queue.get() timed out after {timeout} seconds")
-            if not self._p.is_alive():
-                raise RuntimeError(f"process is not alive {self._p.exitcode}")
-
             try:
                 v = self._q.get(timeout=self._poll_interval_s)
                 break
             except queue.Empty:
-                continue
+                pass
+
+            elapsed = time.perf_counter() - start
+            if elapsed > timeout:
+                raise TimeoutError(f"queue.get() timed out after {timeout} seconds")
+
+            # polling the process can be slow so we only do it every poll_interval
+            if not self._p.is_alive():
+                raise RuntimeError(f"process is not alive {self._p.exitcode}")
 
         if isinstance(v, Exception):
             raise v
@@ -71,17 +73,19 @@ class _MonitoredQueue:
 
         start = time.perf_counter()
         while True:
-            elapsed = time.perf_counter() - start
-            if elapsed > timeout:
-                raise TimeoutError(f"queue.put() timed out after {timeout} seconds")
-            if not self._p.is_alive():
-                raise RuntimeError(f"process is not alive {self._p.exitcode}")
-
             try:
                 self._q.put(obj, timeout=self._poll_interval_s)
                 break
             except queue.Full:
-                continue
+                pass
+
+            elapsed = time.perf_counter() - start
+            if elapsed > timeout:
+                raise TimeoutError(f"queue.put() timed out after {timeout} seconds")
+
+            # polling the process can be slow so we only do it every poll_interval
+            if not self._p.is_alive():
+                raise RuntimeError(f"process is not alive {self._p.exitcode}")
 
     def close(self) -> None:
         self._q.close()
