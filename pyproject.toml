@@ -33,9 +33,10 @@ dev = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+module-name = "torchft._torchft"
 
 [project.scripts]
-torchft_lighthouse = "torchft.torchft:lighthouse_main"
+torchft_lighthouse = "torchft._torchft:lighthouse_main"
 
 [tool.isort]
 multi_line_output = 3
