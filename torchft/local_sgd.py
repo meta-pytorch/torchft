@@ -183,7 +183,8 @@ class DiLoCo(LocalSGD):
     diloco: https://arxiv.org/pdf/2311.08105
     """
 
-    BUCKET_SIZE_BYTES = 32 * 1024 * 1024
+    bucket_cap_mb = 32 * 1024 * 1024
+    use_bucketization = False
 
     def __init__(
         self,
@@ -194,7 +195,8 @@ class DiLoCo(LocalSGD):
         sync_every: int,
         backup_device: Optional[torch.device] = None,
         pin_memory: bool = True,
-        use_bucketization=False,
+        use_bucketization: bool = False,
+        bucket_cap_mb: int = None,
     ) -> None:
         if manager._use_async_quorum:
             raise ValueError(
@@ -205,6 +207,10 @@ class DiLoCo(LocalSGD):
             manager, model, inner_optimizer, sync_every, backup_device, pin_memory
         )
         self._outer_optimizer = outer_optimizer
+        if bucket_cap_mb is not None:
+            self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
+
+        self.use_bucketization = use_bucketization
 
     def _perform_sync(self) -> None:
         """
