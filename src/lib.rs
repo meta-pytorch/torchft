@@ -10,8 +10,8 @@ mod net;
 mod retry;
 mod timeout;
 
-use atty::Stream;
 use anyhow::Result;
+use atty::Stream;
 use core::time::Duration;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use std::env;
