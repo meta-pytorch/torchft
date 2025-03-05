@@ -574,30 +574,30 @@ class ProcessGroupTest(TestCase):
         a = ProcessGroupBabyGloo()
         a.configure(store_addr, 0, 1)
         future_thread_1 = a._future_thread
-        future_queue_1 = a._future_queue
+        future_pipe_1 = a._future_pipe
         p_1 = a._p
 
         store_addr = f"localhost:{store.port}/prefix2"
         a.configure(store_addr, 0, 1)
         future_thread_2 = a._future_thread
-        future_queue_2 = a._future_queue
+        future_pipe_2 = a._future_pipe
         p_2 = a._p
 
         self.assertNotEqual(future_thread_1, future_thread_2)
-        self.assertNotEqual(future_queue_1, future_queue_2)
+        self.assertNotEqual(future_pipe_1, future_pipe_2)
         self.assertNotEqual(p_1, p_2)
 
         assert future_thread_1 is not None
         self.assertFalse(future_thread_1.is_alive())
-        assert future_queue_1 is not None
-        self.assertTrue(future_queue_1.closed())
+        assert future_pipe_1 is not None
+        self.assertTrue(future_pipe_1.closed())
         assert p_1 is not None
         self.assertFalse(p_1.is_alive())
 
         assert future_thread_2 is not None
         self.assertTrue(future_thread_2.is_alive())
-        assert future_queue_2 is not None
-        self.assertFalse(future_queue_2.closed())
+        assert future_pipe_2 is not None
+        self.assertFalse(future_pipe_2.closed())
         assert p_2 is not None
         self.assertTrue(p_2.is_alive())
 
@@ -609,14 +609,22 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
-        a.configure(store_addr, 0, 1)
+        try:
+            a.configure(store_addr, 0, 1)
 
-        _test_pg(a)
+            _test_pg(a)
 
-        # force collection to ensure no BabyWork objects remain
-        gc.collect()
+            # force collection to ensure no BabyWork objects remain
+            gc.collect()
 
-        self.assertEqual(a.num_active_work(), 0)
+            self.assertEqual(a.num_active_work(), 0)
+
+        finally:
+            a.shutdown()
+
+        t = torch.zeros(10)
+        with self.assertRaisesRegex(OSError, "handle is closed"):
+            a.allreduce([t], AllreduceOptions()).wait()
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
@@ -647,6 +655,10 @@ class ProcessGroupTest(TestCase):
             a.shutdown()
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+
+        t = torch.zeros(10)
+        with self.assertRaisesRegex(OSError, "handle is closed"):
+            a.allreduce([t], AllreduceOptions()).wait()
 
     def test_dummy(self) -> None:
         pg = ProcessGroupDummy(0, 1)
@@ -884,6 +896,7 @@ class MultiPgBaseTest(TestCase):
             t1 = torch.tensor([rank + 1], device=dev, dtype=torch.float32)
             # Simulate failure on the fault rank, but other ranks should still succeed.
             if rank == fault_rank:
+                pg.shutdown()
                 return f"Rank{rank} crashed"
 
             try:
