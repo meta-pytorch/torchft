@@ -35,6 +35,15 @@ from typing import (
     cast,
 )
 
+# Import record_function for profiling, but handle the case where it's not available
+try:
+    from torch.autograd.profiler import record_function
+except ImportError:
+    # Create a no-op record_function for backward compatibility
+    @contextmanager
+    def record_function(name: str) -> Generator[None, None, None]:
+        yield
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -837,14 +846,18 @@ class _BabyWork(Work):
         self,
         pg: "ProcessGroupBaby",
         op_id: int,
+        func_name: str,
     ) -> None:
         super().__init__()
 
         self._pg = pg
         self._op_id = op_id
+        self._func_name = func_name
 
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
-        return self._pg._wait(self._op_id, timeout)
+        # Use record_function to profile the waiting time
+        with record_function(f"ProcessGroupBaby::{self._func_name}::wait"):
+            return self._pg._wait(self._op_id, timeout)
 
     def synchronize(self) -> None:
         # TODO: No one seems to use this and NCCL wait already only waits the
@@ -853,7 +866,9 @@ class _BabyWork(Work):
         raise NotImplementedError("not implemented")
 
     def get_future(self) -> Future[object]:
-        return self._pg._get_future(self._op_id)
+        # Use record_function to profile the future retrieval
+        with record_function(f"ProcessGroupBaby::{self._func_name}::get_future"):
+            return self._pg._get_future(self._op_id)
 
     def __del__(self) -> None:
         self._pg._del(self._op_id)
@@ -1068,10 +1083,13 @@ class ProcessGroupBaby(ProcessGroup):
 
                         args = _PickleSafeOptions.unsafe_args(args)
                         fn = getattr(pg, func_name)
-                        work[next_op_id] = _OpMetadata(
-                            work=fn(*args, **kwargs),
-                            stream=stream,
-                        )
+                        
+                        # Use record_function to profile the operation in the subprocess
+                        with record_function(f"ProcessGroupBaby_Worker::{func_name}"):
+                            work[next_op_id] = _OpMetadata(
+                                work=fn(*args, **kwargs),
+                                stream=stream,
+                            )
                     tx.put(next_op_id)
                     next_op_id += 1
                 elif cmd == "wait":
@@ -1083,10 +1101,11 @@ class ProcessGroupBaby(ProcessGroup):
                     with metadata.set_stream():
                         # With WorkNCCL this makes the stream wait not the CPU when
                         # no timeout is passed.
-                        if timeout is not None:
-                            metadata.work.wait(timeout)
-                        else:
-                            metadata.work.wait()
+                        with record_function(f"ProcessGroupBaby_Worker::wait"):
+                            if timeout is not None:
+                                metadata.work.wait(timeout)
+                            else:
+                                metadata.work.wait()
 
                         # Register event on the stream that we can pass to the main
                         # process.
@@ -1107,8 +1126,10 @@ class ProcessGroupBaby(ProcessGroup):
 
                     def callback(fut: Future[object]) -> None:
                         try:
-                            fut.wait()
-                            future_queue.put((op_id, _FUTURE_RESULT, None))
+                            # Use record_function for profiling the callback
+                            with record_function(f"ProcessGroupBaby_Worker::future_callback"):
+                                fut.wait()
+                                future_queue.put((op_id, _FUTURE_RESULT, None))
                         except Exception as e:
                             future_queue.put((op_id, _FUTURE_EXCEPTION, e))
 
@@ -1134,20 +1155,30 @@ class ProcessGroupBaby(ProcessGroup):
                     continue
                 if cmd == _QUEUE_CLOSE:
                     break
-                op_id, mode, data = cast(Tuple[int, str, object], cmd)
-                with self._futures_lock:
-                    fut = self._futures[op_id]
-                    del self._futures[op_id]
-                if mode == _FUTURE_RESULT:
-                    fut.set_result(data)
-                elif mode == _FUTURE_EXCEPTION:
-                    fut.set_exception(data)
-                else:
-                    raise ValueError(f"unknown mode {mode}")
+                
+                # Process the future result with profiling
+                with record_function("ProcessGroupBaby::future_handler"):
+                    self._process_future_result(cmd)
         except Exception as e:
             logger.exception(f"got unexpected error in future handler: {e}")
+    
+    def _process_future_result(self, cmd: object) -> None:
+        op_id, mode, data = cast(Tuple[int, str, object], cmd)
+        with self._futures_lock:
+            fut = self._futures[op_id]
+            del self._futures[op_id]
+        if mode == _FUTURE_RESULT:
+            fut.set_result(data)
+        elif mode == _FUTURE_EXCEPTION:
+            fut.set_exception(data)
+        else:
+            raise ValueError(f"unknown mode {mode}")
 
     def _get_future(self, op_id: int) -> Future[object]:
+        with record_function("ProcessGroupBaby::_get_future"):
+            return self._get_future_impl(op_id)
+    
+    def _get_future_impl(self, op_id: int) -> Future[object]:
         with self._futures_lock:
             fut = Future()  # pyre-fixme[29]: is not a function
             self._futures[op_id] = fut
@@ -1160,6 +1191,10 @@ class ProcessGroupBaby(ProcessGroup):
         return fut
 
     def _wait(self, op_id: int, timeout: Optional[timedelta] = None) -> bool:
+        with record_function("ProcessGroupBaby::_wait"):
+            return self._wait_impl(op_id, timeout)
+    
+    def _wait_impl(self, op_id: int, timeout: Optional[timedelta] = None) -> bool:
         assert self._tx is not None
         self._tx.put(("wait", op_id, timeout), timeout=self._timeout)
 
@@ -1179,6 +1214,10 @@ class ProcessGroupBaby(ProcessGroup):
         self._tx.put(("del", op_id), timeout=self._timeout)
 
     def _run_func(self, func: str, *args: object, **kwargs: object) -> Work:
+        with record_function(f"ProcessGroupBaby::{func}"):
+            return self._run_func_impl(func, *args, **kwargs)
+            
+    def _run_func_impl(self, func: str, *args: object, **kwargs: object) -> Work:
         rx = self._rx
         tx = self._tx
         assert rx is not None
@@ -1212,7 +1251,7 @@ class ProcessGroupBaby(ProcessGroup):
         op_id = rx.get(self._timeout)
         assert isinstance(op_id, int), f"invalid return {op_id}"
 
-        return _BabyWork(pg=self, op_id=op_id)
+        return _BabyWork(pg=self, op_id=op_id, func_name=func)
 
     def allgather(
         self,
