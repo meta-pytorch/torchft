@@ -44,7 +44,7 @@ replica groups and then a per replica group manager and fault tolerance library
 that can be used in a standard PyTorch training loop.
 
 This allows for membership changes at the training step granularity which can
-greatly improve efficiency by avoiding stop the world training on errors.
+greatly improve efficiency by avoiding stopping the world training on errors.
 
 ![](./media/torchft-overview.png)
 
@@ -108,7 +108,7 @@ See [train_ddp.py](./train_ddp.py) for the full example.
 Invoke with:
 
 ```sh
-TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train.py
+TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train_ddp.py
 ```
 
 train.py:
