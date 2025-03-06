@@ -37,14 +37,19 @@ use log::{info, warn};
 #[cfg(test)]
 use std::{println as info, println as warn};
 
+// The replica_id string is of the form {replica_name}:{uuid} or just {uuid} (see torchft/manager.py)
+// We can parse the replica_id if it exists, otherwise we just use the uuid
 macro_rules! info_with_replica {
-    ($replica_id:expr, $($arg:tt)*) => {
-        info!(
-            "[Replica {}] {}",
-            $replica_id,
-            format!($($arg)*)
-        );
-    };
+    ($replica_id:expr, $($arg:tt)*) => {{
+        let parts: Vec<&str> = $replica_id.splitn(2, ':').collect();
+        let formatted_message = if parts.len() == 2 {
+            // If there are two parts, use the replica name
+            info!("[Replica {}] {}", parts[0], format!($($arg)*))
+        } else {
+            // Otherwise, just use the UUID
+            info!("[Replica {}] {}", $replica_id, format!($($arg)*))
+        };
+    }};
 }
 
 struct ManagerState {

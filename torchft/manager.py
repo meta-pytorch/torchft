@@ -29,6 +29,7 @@ import concurrent.futures
 import logging
 import os
 import socket
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from enum import Enum
@@ -188,9 +189,13 @@ class Manager:
             bind = f"[::]:{port}"
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
 
-            if replica_id is None:
-                replica_id = ""
-            replica_id = replica_id
+            # We need a unique identifier in the case that a worker restarts quickly and
+            # replaces the previous worker with the same ID.
+            new_uuid = str(uuid.uuid4())
+            if replica_id is None or replica_id == "":
+                replica_id = new_uuid
+            else:
+                replica_id = f"{replica_id}:{new_uuid}"
             self._manager = ManagerServer(
                 replica_id=replica_id,
                 lighthouse_addr=lighthouse_addr,
