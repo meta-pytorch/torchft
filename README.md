@@ -57,7 +57,7 @@ Before proceeding, ensure you have the following installed:
 
 Note that the Rust versions available in many conda environments may be outdated. To install the latest version of Rust, we recommend downloading it directly from the official website as shown in the below command:
 ```sh
-$ curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
 ```
 
 To install the required packages on a Debian-based system (such as Ubuntu) using apt, run:
@@ -75,7 +75,7 @@ sudo dnf install protobuf-compiler protobuf-devel
 ## Installation
 
 ```sh
-$ pip install .
+pip install .
 ```
 
 This uses pyo3+maturin to build the package, you'll need maturin installed.
@@ -85,7 +85,7 @@ If the installation command fails to invoke `cargo update` due to an inability t
 To install in editable mode w/ the Rust extensions you can use the normal pip install command:
 
 ```sh
-$ pip install -e .
+pip install -e .
 ```
 
 ## Usage
@@ -98,7 +98,7 @@ when using synchronous training.
 You can start a lighthouse server by running:
 
 ```sh
-$ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000
+RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000
 ```
 
 ### Example Training Loop (DDP)
@@ -108,7 +108,7 @@ See [train_ddp.py](./train_ddp.py) for the full example.
 Invoke with:
 
 ```sh
-$ TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train.py
+TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train.py
 ```
 
 train.py:
