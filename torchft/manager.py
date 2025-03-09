@@ -372,6 +372,7 @@ class Manager:
         allow_heal: bool = True,
         shrink_only: bool = False,
         timeout: Optional[timedelta] = None,
+        init_sync: bool = False,
     ) -> None:
         """
         .. note::
@@ -407,6 +408,7 @@ class Manager:
             allow_heal=allow_heal,
             shrink_only=shrink_only,
             quorum_timeout=timeout or self._quorum_timeout,
+            init_sync=True,
         )
         if not self._use_async_quorum:
             self.wait_quorum()
@@ -431,7 +433,7 @@ class Manager:
         self._quorum_future.result()
 
     def _async_quorum(
-        self, allow_heal: bool, shrink_only: bool, quorum_timeout: timedelta
+        self, allow_heal: bool, shrink_only: bool, quorum_timeout: timedelta, init_sync: bool
     ) -> None:
         quorum = self._client._quorum(
             rank=self._rank,
@@ -439,6 +441,7 @@ class Manager:
             checkpoint_metadata=self._checkpoint_transport.metadata(),
             shrink_only=shrink_only,
             timeout=quorum_timeout,
+            init_sync=init_sync,
         )
 
         quorum_id = quorum.quorum_id
