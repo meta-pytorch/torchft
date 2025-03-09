@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
+from typing import Callable, cast, Dict, List, Optional, TYPE_CHECKING, TypeVar
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
@@ -455,6 +455,7 @@ class Manager:
             checkpoint_metadata=self._checkpoint_transport.metadata(),
             shrink_only=shrink_only,
             timeout=quorum_timeout,
+            init_sync=self.init_sync,
         )
 
         quorum_id = quorum.quorum_id

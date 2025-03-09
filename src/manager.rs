@@ -431,7 +431,10 @@ fn compute_quorum_results(
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
-            if p.step != max_step || max_step == 0 && primary.replica_id != p.replica_id {
+            if init_sync
+                || p.step != max_step
+                || max_step == 0 && primary.replica_id != p.replica_id
+            {
                 Some(i)
             } else {
                 None
