@@ -285,7 +285,12 @@ impl ManagerService for Arc<Manager> {
 
         info_with_replica!(self.replica_id, "Finished quorum for rank {}", rank);
 
-        let reply = compute_quorum_results(&self.replica_id, rank, &quorum)?;
+        let reply = compute_quorum_results(
+            &self.replica_id,
+            rank,
+            &quorum,
+            req.init_sync.unwrap_or_default(),
+        )?;
 
         Ok(Response::new(reply))
     }
@@ -381,6 +386,7 @@ fn compute_quorum_results(
     replica_id: &str,
     rank: i64,
     quorum: &Quorum,
+    init_sync: bool,
 ) -> Result<ManagerQuorumResponse, Status> {
     let mut participants = quorum.participants.clone();
     participants.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
@@ -607,6 +613,7 @@ mod tests {
             step: 123,
             checkpoint_metadata: "addr".to_string(),
             shrink_only: false,
+            init_sync: Some(false),
         });
         request.set_timeout(Duration::from_secs(10));
         let resp = client.quorum(request).await?.into_inner();
@@ -666,6 +673,7 @@ mod tests {
                     step: 0,
                     checkpoint_metadata: "addr".to_string(),
                     shrink_only: false,
+                    init_sync: Some(false),
                 });
                 request.set_timeout(Duration::from_secs(10));
 
@@ -771,13 +779,13 @@ mod tests {
 
         // rank 0
 
-        let results = compute_quorum_results("replica_0", 0, &quorum)?;
+        let results = compute_quorum_results("replica_0", 0, &quorum, false)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 0);
         assert_eq!(results.recover_src_rank, None);
         assert_eq!(results.recover_dst_ranks, vec![1]);
 
-        let results = compute_quorum_results("replica_1", 0, &quorum)?;
+        let results = compute_quorum_results("replica_1", 0, &quorum, false)?;
         assert!(results.heal);
         assert_eq!(results.replica_rank, 1);
         assert_eq!(results.recover_src_rank, Some(0));
@@ -785,7 +793,7 @@ mod tests {
 
         // rank 1 assignments should be offset from rank 0 above and the primary
 
-        let results = compute_quorum_results("replica_1", 1, &quorum)?;
+        let results = compute_quorum_results("replica_1", 1, &quorum, false)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 1);
         assert_eq!(results.recover_src_rank, None);
@@ -845,21 +853,21 @@ mod tests {
 
         // rank 0
 
-        let results = compute_quorum_results("replica_0", 0, &quorum)?;
+        let results = compute_quorum_results("replica_0", 0, &quorum, false)?;
         assert!(results.heal);
         assert_eq!(results.recover_src_manager_address, "addr_1".to_string());
         assert_eq!(results.replica_rank, 0);
         assert_eq!(results.recover_src_rank, Some(1));
         assert!(results.recover_dst_ranks.is_empty());
 
-        let results = compute_quorum_results("replica_1", 0, &quorum)?;
+        let results = compute_quorum_results("replica_1", 0, &quorum, false)?;
         assert!(!results.heal);
         assert_eq!(results.recover_src_manager_address, "".to_string());
         assert_eq!(results.replica_rank, 1);
         assert_eq!(results.recover_src_rank, None);
         assert_eq!(results.recover_dst_ranks, vec![0, 4]);
 
-        let results = compute_quorum_results("replica_3", 0, &quorum)?;
+        let results = compute_quorum_results("replica_3", 0, &quorum, false)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 3);
         assert_eq!(results.recover_src_rank, None);
@@ -867,7 +875,7 @@ mod tests {
 
         // rank 1 assignments should be offset from rank 0 above
 
-        let results = compute_quorum_results("replica_1", 1, &quorum)?;
+        let results = compute_quorum_results("replica_1", 1, &quorum, false)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 1);
         assert_eq!(results.recover_src_rank, None);
