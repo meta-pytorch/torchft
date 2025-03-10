@@ -1093,10 +1093,12 @@ class ProcessGroupBaby(ProcessGroup):
 
                         args = _PickleSafeOptions.unsafe_args(args)
                         fn = getattr(pg, func_name)
+
                         work[op_id] = _OpMetadata(
                             work=fn(*args, **kwargs),
                             stream=stream,
                         )
+
                 elif cmd == "wait":
                     op_id, timeout = cast(tuple[int, timedelta], op[1:])
 
@@ -1126,15 +1128,29 @@ class ProcessGroupBaby(ProcessGroup):
                     del work[op_id]
                 elif cmd == "future":
                     op_id: int = cast(int, op[1])
+                    metadata: _OpMetadata = work[op_id]
 
-                    def callback(fut: Future[object]) -> None:
+                    def callback(fut: Future[object], metadata: _OpMetadata) -> None:
                         try:
-                            fut.wait()
-                            future_pipe.send((op_id, _FUTURE_RESULT, None))
-                        except Exception as e:
-                            future_pipe.send((op_id, _FUTURE_EXCEPTION, e))
+                            # create an event after the collective has been issued
+                            # to wait on this before we call "future"
+                            with metadata.set_stream():
+                                fut.wait()
+                                event = (
+                                    torch.cuda.current_stream().record_event(
+                                        torch.cuda.Event(interprocess=True)
+                                    )
+                                    if metadata.stream is not None
+                                    else None
+                                )
 
-                    work[op_id].work.get_future().add_done_callback(callback)
+                            future_pipe.send((op_id, _FUTURE_RESULT, None, event))
+                        except Exception as e:
+                            future_pipe.send((op_id, _FUTURE_EXCEPTION, e, None))
+
+                    metadata.work.get_future().add_done_callback(
+                        lambda fut: callback(fut, metadata)
+                    )
                 elif cmd == "num_active_work":
                     req_pipe.send(len(work))
                 else:
@@ -1153,11 +1169,15 @@ class ProcessGroupBaby(ProcessGroup):
                 except TimeoutError:
                     continue
 
-                op_id, mode, data = cast(Tuple[int, str, object], cmd)
+                op_id, mode, data, event = cast(
+                    Tuple[int, str, object, Optional[torch.cuda.Event]], cmd
+                )
                 with self._futures_lock:
                     fut = self._futures[op_id]
                     del self._futures[op_id]
                 if mode == _FUTURE_RESULT:
+                    if event is not None:
+                        event.wait()
                     fut.set_result(data)
                 elif mode == _FUTURE_EXCEPTION:
                     fut.set_exception(data)
