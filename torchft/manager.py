@@ -408,7 +408,7 @@ class Manager:
             allow_heal=allow_heal,
             shrink_only=shrink_only,
             quorum_timeout=timeout or self._quorum_timeout,
-            init_sync=True,
+            init_sync=init_sync,
         )
         if not self._use_async_quorum:
             self.wait_quorum()
