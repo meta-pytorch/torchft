@@ -372,7 +372,7 @@ class Manager:
         allow_heal: bool = True,
         shrink_only: bool = False,
         timeout: Optional[timedelta] = None,
-        init_sync: bool = False,
+        init_sync: bool = True,
     ) -> None:
         """
         .. note::

@@ -154,7 +154,7 @@ impl ManagerClient {
                 step: step,
                 checkpoint_metadata: checkpoint_metadata,
                 shrink_only: shrink_only,
-                init_sync: Some(false),
+                init_sync: true,
             });
 
             // This timeout is processed on the server side so we also enable
