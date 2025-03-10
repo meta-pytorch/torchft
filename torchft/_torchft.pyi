@@ -11,7 +11,7 @@ class ManagerClient:
         checkpoint_metadata: str,
         shrink_only: bool,
         timeout: timedelta,
-        init_sync: Optional[bool] = False,
+        init_sync: bool = True,
     ) -> QuorumResult: ...
     def _checkpoint_metadata(self, rank: int, timeout: timedelta) -> str: ...
     def should_commit(

@@ -76,7 +76,7 @@ message ManagerQuorumRequest {
     int64 step = 2;
     string checkpoint_metadata = 3;
     bool shrink_only = 4;
-    optional bool init_sync = 5;
+    bool init_sync = 5;
 }
 
 message ManagerQuorumResponse {
