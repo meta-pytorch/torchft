@@ -888,4 +888,86 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_compute_quorum_results_skip_init_sync() -> Result<()> {
+        let quorum = Quorum {
+            quorum_id: 1,
+            participants: vec![
+                QuorumMember {
+                    replica_id: "replica_0".to_string(),
+                    address: "addr_0".to_string(),
+                    store_address: "store_addr_0".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_1".to_string(),
+                    address: "addr_1".to_string(),
+                    store_address: "store_addr_1".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_2".to_string(),
+                    address: "addr_2".to_string(),
+                    store_address: "store_addr_2".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_3".to_string(),
+                    address: "addr_3".to_string(),
+                    store_address: "store_addr_3".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_4".to_string(),
+                    address: "addr_4".to_string(),
+                    store_address: "store_addr_4".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+            ],
+            created: None,
+        };
+
+        // rank 0
+
+        let results = compute_quorum_results("replica_0", 0, &quorum, false)?;
+        assert!(!results.heal);
+        assert_eq!(results.recover_src_manager_address, "".to_string());
+        assert_eq!(results.replica_rank, 0);
+        assert_eq!(results.recover_src_rank, None);
+        assert!(results.recover_dst_ranks.is_empty());
+
+        let results = compute_quorum_results("replica_1", 0, &quorum, false)?;
+        assert!(!results.heal);
+        assert_eq!(results.recover_src_manager_address, "".to_string());
+        assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_rank, None);
+        assert!(results.recover_dst_ranks.is_empty());
+
+        let results = compute_quorum_results("replica_3", 0, &quorum, false)?;
+        assert!(!results.heal);
+        assert_eq!(results.recover_src_manager_address, "".to_string());
+        assert_eq!(results.replica_rank, 3);
+        assert_eq!(results.recover_src_rank, None);
+        assert!(results.recover_dst_ranks.is_empty());
+
+        let results = compute_quorum_results("replica_1", 1, &quorum, false)?;
+        assert!(!results.heal);
+        assert_eq!(results.recover_src_manager_address, "".to_string());
+        assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_rank, None);
+        assert!(results.recover_dst_ranks.is_empty());
+
+        Ok(())
+    }
 }
