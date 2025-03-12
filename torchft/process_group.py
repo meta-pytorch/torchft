@@ -949,31 +949,34 @@ class ProcessGroupBaby(ProcessGroup):
         Shutdown the process group. This will kill the underlying process and
         close all pipes.
 
+        We close the pipes by sending a _PIPE_CLOSE message from the writing end (local)
+        to the reading end (remote). The remote end will then exit it's recv loop and we
+        will join the thread or process.
+
         This is a no-op if the process group is already shutdown.
 
         ProcessGroup can be reconfigured after shutdown.
         """
-        # Close the future pipe first
+        # Close the future pipe
         if self._future_pipe is not None:
-            # close future thread
             self._future_pipe.send((-1, _PIPE_CLOSE, None, None))
             assert self._future_pipe is not None
             self._future_pipe.close()
             self._future_pipe = None
-        # Join the future thread after closing its pipe
+        # Join the future thread
         if self._future_thread is not None:
             self._future_thread.join(timeout=10.0)
             assert self._future_thread is not None
             if self._future_thread.is_alive():
                 raise RuntimeError("Future thread did not exit")
             self._future_thread = None
-        # Close the request pipe to signal the worker process to exit
+        # Close the process pipe
         if self._pipe is not None:
             self._pipe.send((_PIPE_CLOSE,))
             assert self._pipe is not None
             self._pipe.close()
             self._pipe = None
-        # Terminate the worker process after closing its pipe
+        # Join the process
         if self._p is not None:
             self._p.join(timeout=10.0)
             assert self._p is not None
@@ -997,9 +1000,8 @@ class ProcessGroupBaby(ProcessGroup):
         |                   |  Pipe 2  |                   |
         +-------------------+          +-------------------+
 
-        Main Process: Maintains self._futures
-        Worker Process: Handles tasks, communicates with Future Thread.
-        Future Thread: Manages asynchronous tasks, updates self._futures.
+        Worker Process: Executes the collective operations.
+        Future Thread: Executes the user defined future callbacks.
         """
 
         self._world_size = world_size
