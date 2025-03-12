@@ -33,7 +33,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
+from typing import Callable, cast, Dict, List, Optional, TYPE_CHECKING, TypeVar
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
@@ -477,7 +477,7 @@ class Manager:
             self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
             self._quorum_id = quorum_id
 
-        if allow_heal:
+        if allow_heal and False:
             if quorum.recover_dst_ranks:
                 self._logger.info(
                     f"peers need recovery from us {quorum.recover_dst_ranks}"

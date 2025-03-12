@@ -1,9 +1,10 @@
 import asyncio
 import threading
 from datetime import timedelta
-from typing import Optional, TypeVar
+from typing import Callable, Optional, TypeVar
 from unittest.mock import Mock
 
+import torch
 from torch.futures import Future
 
 T = TypeVar("T")
@@ -17,7 +18,6 @@ class _TimerHandle:
 
     def set_timer(self, timer_handle: asyncio.TimerHandle) -> None:
         assert self._lock.locked()
-
         self._timer_handle = timer_handle
         self._lock.release()
 
@@ -99,6 +99,18 @@ class _TimeoutManager:
         fut.add_done_callback(callback)
         return timed_fut
 
+    def stream_timeout(self, callback: Callable[[], None], timeout: timedelta) -> None:
+        loop = self._maybe_start_event_loop()
+
+        event = torch.cuda.Event()
+        event.record()
+
+        def handler() -> None:
+            if not event.query():
+                callback()
+
+        loop.call_soon_threadsafe(self._register_handler, loop, handler, timeout)
+
     @classmethod
     def _register(
         cls,
@@ -115,6 +127,18 @@ class _TimeoutManager:
             ),
         )
         handle.set_timer(timer_handle)
+
+    @classmethod
+    def _register_handler(
+        cls,
+        loop,
+        handler: Callable[[], None],
+        timeout: timedelta,
+    ) -> None:
+        loop.call_later(
+            timeout.total_seconds(),
+            handler,
+        )
 
 
 _TIMEOUT_MANAGER = _TimeoutManager()
@@ -163,3 +187,18 @@ def future_wait(fut: Future[T], timeout: timedelta) -> T:
         raise TimeoutError(f"future did not complete within {timeout}")
 
     return fut.wait()
+
+
+def stream_timeout(callback: Callable[[], None], timeout: timedelta) -> None:
+    """
+    Registers a callback that will be called after the specified timeout if
+    the current stream doesn't complete in time.
+
+    This uses a cuda Event to track the completion of the current stream. If
+    the stream is not complete after the timeout, the callback is called.
+
+    Args:
+        callback: The callback to call if the stream doesn't complete in time.
+        timeout: The timeout to wait for the stream to complete.
+    """
+    _TIMEOUT_MANAGER.stream_timeout(callback, timeout)
