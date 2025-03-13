@@ -186,6 +186,12 @@ class DiLoCo:
 
         self._hooks: List[RemovableHandle] = []
         self._outer_optimizer = outer_optimizer
+
+        if bucket_cap_mb is not None:
+            self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
+
+        self.use_bucketization = use_bucketization
+        
         self.original_parameters: Dict[str, torch.Tensor] = {}
         for name, p in self._model.named_parameters():
             t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=self._backup_device)
@@ -250,10 +256,6 @@ class DiLoCo:
         self._manager.start_quorum()
         self._perform_sync()
         self._local_step = 0
-        if bucket_cap_mb is not None:
-            self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
-
-        self.use_bucketization = use_bucketization
 
     def _perform_sync(self) -> None:
         """
