@@ -1,7 +1,8 @@
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
-from typing import Callable, Dict, List
+from typing import Callable
 from unittest import TestCase
 
 import torch
@@ -14,12 +15,12 @@ TIMEOUT_REGEX = r"(Timed out|timed out|timeout|time out)"
 
 
 def assertStateDictEqual(
-    self: TestCase, a: Dict[str, object], b: Dict[str, object]
+    self: TestCase, a: dict[str, object], b: dict[str, object]
 ) -> None:
     for k, v1 in a.items():
         v2 = b[k]
         if isinstance(v1, DTensor) and isinstance(v2, DTensor):
-            torch.testing.assert_close(v1._local_tensor, v2._local_tensor)
+            torch.testing.assert_close(v1._local_tensor.cpu(), v2._local_tensor.cpu())
             self.assertEqual(v1._spec, v2._spec)
         elif isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
             torch.testing.assert_close(v1.cpu(), v2.cpu())
@@ -27,9 +28,23 @@ def assertStateDictEqual(
             self.assertEqual(v1, v2)
 
 
+def make_state_dict(device: torch.device) -> dict[str, object]:
+    device_mesh = DeviceMesh("cpu", 1)
+    tensor = torch.tensor([5, 6, 7])
+    dtensor: DTensor = distribute_tensor(tensor, device_mesh, [])
+
+    return {
+        "rank": torch.tensor([1, 2, 3], device=device),
+        # "strided": torch.tensor([10], device=device)[1::2],
+        "str": "str",
+        "int": 1234,
+        "dtensor": dtensor,
+    }
+
+
 def run_multi_recovery_test(
     self: TestCase,
-    init_transport: Callable[[int, int], CheckpointTransport[Dict[str, object]]],
+    init_transport: Callable[[int, int], CheckpointTransport[dict[str, object]]],
     device: torch.device,
 ) -> None:
     """
@@ -41,18 +56,14 @@ def run_multi_recovery_test(
     WORLD_SIZE: int = 3
 
     # barrier is used to simulate quorum/allreduce barriers
-    barrier: threading.Barrier = threading.Barrier(WORLD_SIZE)
+    barrier: threading.Barrier = threading.Barrier(WORLD_SIZE, timeout=10)
     metadata: str = ""
 
     dist.init_process_group(
         backend="gloo", rank=0, world_size=1, store=dist.HashStore()
     )
 
-    device_mesh = DeviceMesh("cpu", 1)
-    tensor = torch.randn(4, 4)
-    dtensor: DTensor = distribute_tensor(tensor, device_mesh, [])
-
-    def run(rank: int) -> CheckpointTransport[Dict[str, object]]:
+    def run(rank: int) -> CheckpointTransport[dict[str, object]]:
         transport = init_transport(rank, WORLD_SIZE)
 
         if rank == 0:
@@ -61,12 +72,7 @@ def run_multi_recovery_test(
 
         barrier.wait()
 
-        state_dict: Dict[str, object] = {
-            "rank": torch.tensor([1, 2, 3], device=device),
-            "str": "str",
-            "int": 1234,
-            "dtensor": dtensor,
-        }
+        state_dict: dict[str, object] = make_state_dict(device)
 
         # 3 node recovery
         if rank == 0:
@@ -140,6 +146,7 @@ def run_multi_recovery_test(
                 transports.append(fut.result())
         except Exception as e:
             print(e)
+            traceback.print_exc()
             raise
 
         for transport in transports:

@@ -189,9 +189,13 @@ class Manager:
             bind = f"[::]:{port}"
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
 
-            if replica_id is None:
-                replica_id = ""
-            replica_id = replica_id + str(uuid.uuid4())
+            # We need a unique identifier in the case that a worker restarts quickly and
+            # replaces the previous worker with the same ID.
+            new_uuid = str(uuid.uuid4())
+            if replica_id is None or replica_id == "":
+                replica_id = new_uuid
+            else:
+                replica_id = f"{replica_id}:{new_uuid}"
             self._manager = ManagerServer(
                 replica_id=replica_id,
                 lighthouse_addr=lighthouse_addr,
@@ -403,6 +407,9 @@ class Manager:
             allow_heal=allow_heal,
             shrink_only=shrink_only,
             quorum_timeout=timeout or self._quorum_timeout,
+            curr_device=(
+                torch.cuda.current_device() if torch.cuda.is_available() else -1
+            ),
         )
         if not self._use_async_quorum:
             self.wait_quorum()
@@ -427,8 +434,14 @@ class Manager:
         self._quorum_future.result()
 
     def _async_quorum(
-        self, allow_heal: bool, shrink_only: bool, quorum_timeout: timedelta
+        self,
+        allow_heal: bool,
+        shrink_only: bool,
+        quorum_timeout: timedelta,
+        curr_device: int,
     ) -> None:
+        if curr_device >= 0 and torch.cuda.is_available():
+            torch.cuda.set_device(curr_device)
         quorum = self._client._quorum(
             rank=self._rank,
             step=self._step,

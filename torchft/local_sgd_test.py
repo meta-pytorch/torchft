@@ -46,9 +46,6 @@ class LocalSGDTest(TestCase):
         manager = create_autospec(Manager)
         with LocalSGD(manager, model, optimizer, sync_every=2) as local_sgd:
             self.assertEqual(local_sgd._local_step, 0)
-            torch.testing.assert_close(
-                local_sgd._backup_parameters, _params_dict(model)
-            )
             inp = torch.rand(2, 3)
             loss = model(inp).mean()
             loss.backward()
@@ -63,9 +60,6 @@ class LocalSGDTest(TestCase):
 
             manager.should_commit.return_value = True
             self.assertEqual(local_sgd._local_step, 0)
-            torch.testing.assert_close(
-                local_sgd._backup_parameters, _params_dict(model)
-            )
             self.assertEqual(manager.should_commit.call_count, 1)
             self.assertEqual(manager.allreduce.call_count, 4)
 
@@ -75,11 +69,7 @@ class LocalSGDTest(TestCase):
         manager = create_autospec(Manager)
 
         with LocalSGD(manager, model, optimizer, sync_every=2) as local_sgd:
-            torch.testing.assert_close(
-                local_sgd._backup_parameters, _params_dict(model)
-            )
             og_state_dict = _copy_state_dict(model.state_dict())
-            print(og_state_dict)
 
             inp = torch.rand(2, 3)
 
@@ -95,11 +85,6 @@ class LocalSGDTest(TestCase):
                     f"Parameter {name} did not change.",
                 )
             self.assertEqual(local_sgd._local_step, 1)
-
-            local_sgd._restore_parameters()
-            torch.testing.assert_close(
-                local_sgd._backup_parameters, _params_dict(model)
-            )
 
 
 class DiLoCoTest(TestCase):
@@ -124,7 +109,7 @@ class DiLoCoTest(TestCase):
             self.assertEqual(initial_outer_opt_state["state"], {})
 
             self.assertEqual(diloco._local_step, 0)
-            torch.testing.assert_close(diloco._backup_parameters, _params_dict(model))
+            torch.testing.assert_close(diloco.original_parameters, _params_dict(model))
             inp = torch.rand(2, 3)
             loss = model(inp).mean()
             loss.backward()
@@ -139,7 +124,7 @@ class DiLoCoTest(TestCase):
 
             manager.should_commit.return_value = True
             self.assertEqual(diloco._local_step, 0)
-            torch.testing.assert_close(diloco._backup_parameters, _params_dict(model))
+            torch.testing.assert_close(diloco.original_parameters, _params_dict(model))
             self.assertEqual(manager.should_commit.call_count, 1)
             self.assertEqual(manager.allreduce.call_count, parameter_count)
 

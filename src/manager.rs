@@ -37,6 +37,21 @@ use log::{info, warn};
 #[cfg(test)]
 use std::{println as info, println as warn};
 
+// The replica_id string is of the form {replica_name}:{uuid} or just {uuid} (see torchft/manager.py)
+// We can parse the replica_id if it exists, otherwise we just use the uuid
+macro_rules! info_with_replica {
+    ($replica_id:expr, $($arg:tt)*) => {{
+        let parts: Vec<&str> = $replica_id.splitn(2, ':').collect();
+        let formatted_message = if parts.len() == 2 {
+            // If there are two parts, use the replica name
+            info!("[Replica {}] {}", parts[0], format!($($arg)*))
+        } else {
+            // Otherwise, just use the UUID
+            info!("[Replica {}] {}", $replica_id, format!($($arg)*))
+        };
+    }};
+}
+
 struct ManagerState {
     checkpoint_metadata: HashMap<i64, String>,
     channel: broadcast::Sender<Quorum>,
@@ -63,7 +78,10 @@ pub async fn manager_client_new(
     addr: String,
     connect_timeout: Duration,
 ) -> Result<ManagerServiceClient<Channel>> {
-    info!("ManagerClient: establishing connection to {}", &addr);
+    info!(
+        "Creating ManagerClient: establishing connection to {}",
+        &addr
+    );
     let conn = connect(addr, connect_timeout).await?;
     Ok(ManagerServiceClient::new(conn))
 }
@@ -72,7 +90,10 @@ pub async fn lighthouse_client_new(
     addr: String,
     connect_timeout: Duration,
 ) -> Result<LighthouseServiceClient<Channel>> {
-    info!("LighthouseClient: establishing connection to {}", &addr);
+    info!(
+        "Creating LighthouseClient: establishing connection to {}",
+        &addr
+    );
     let conn = connect(addr, connect_timeout).await?;
     Ok(LighthouseServiceClient::new(conn))
 }
@@ -135,11 +156,7 @@ impl Manager {
     }
 
     async fn _run_grpc(self: Arc<Self>) -> Result<()> {
-        info!(
-            "Manager {} listening on {}",
-            self.replica_id,
-            self.address()
-        );
+        info_with_replica!(self.replica_id, "Manager listening on {}", self.address());
 
         let listener = self.listener.lock().await.take().unwrap();
         let incoming =
@@ -176,7 +193,7 @@ impl Manager {
         }
 
         state.participants.clear();
-        info!("all workers joined -- starting quorum");
+        info_with_replica!(self.replica_id, "All workers joined - starting quorum");
 
         // TODO: don't hold the lock during quorum
 
@@ -197,7 +214,7 @@ impl Manager {
             })?;
         let resp = response.into_inner();
 
-        info!("got lighthouse quorum {:?}", resp);
+        info_with_replica!(self.replica_id, "got lighthouse quorum {:?}", resp);
 
         state
             .channel
@@ -220,7 +237,7 @@ impl ManagerService for Arc<Manager> {
         let req = request.get_ref();
         let rank = req.rank;
 
-        info!("got quorum request for rank {}", rank);
+        info_with_replica!(self.replica_id, "Start quorum for rank {}", rank);
 
         let timeout = try_parse_grpc_timeout(&request.metadata())
             .map_err(|e| {
@@ -266,7 +283,7 @@ impl ManagerService for Arc<Manager> {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!("returning quorum for rank {}", rank);
+        info_with_replica!(self.replica_id, "Finished quorum for rank {}", rank);
 
         let reply = compute_quorum_results(&self.replica_id, rank, &quorum)?;
 
@@ -299,9 +316,11 @@ impl ManagerService for Arc<Manager> {
         let req = request.into_inner();
         let rank = req.rank;
 
-        info!(
+        info_with_replica!(
+            self.replica_id,
             "should_commit request from {} should_commit={}",
-            rank, req.should_commit
+            rank,
+            req.should_commit
         );
 
         // TODO: check step count
@@ -318,7 +337,11 @@ impl ManagerService for Arc<Manager> {
 
             if state.should_commit_count.len() == self.world_size as usize {
                 let decision = state.should_commit_failures.len() == 0;
-                info!("should_commit completed should_commit={}", decision);
+                info_with_replica!(
+                    self.replica_id,
+                    "should_commit completed should_commit={}",
+                    decision
+                );
 
                 state
                     .should_commit_channel
@@ -448,7 +471,8 @@ fn compute_quorum_results(
 
     let heal = recover_src_rank.is_some();
     if heal {
-        info!(
+        info_with_replica!(
+            replica_id,
             "healing is required step={}, max_step={}, recover_src_rank={}",
             step,
             max_step,
