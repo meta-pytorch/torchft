@@ -848,11 +848,13 @@ class _BabyWork(Work):
         self,
         pg: "ProcessGroupBaby",
         op_id: int,
+        stream: Optional[torch.cuda.Stream],
     ) -> None:
         super().__init__()
 
         self._pg = pg
         self._op_id = op_id
+        self._stream = stream
 
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
         return self._pg._wait(self._op_id, timeout)
@@ -864,7 +866,7 @@ class _BabyWork(Work):
         raise NotImplementedError("not implemented")
 
     def get_future(self) -> Future[object]:
-        return self._pg._get_future(self._op_id)
+        return self._pg._get_future(self._op_id, self._stream)
 
     def __del__(self) -> None:
         self._pg._del(self._op_id)
@@ -882,6 +884,20 @@ def _is_any_cuda(obj: object) -> bool:
 @dataclass
 class _OpMetadata:
     work: Work
+    stream: Optional[torch.cuda.Stream]
+
+    @contextmanager
+    def set_stream(self) -> Generator[None, None, None]:
+        if self.stream is not None:
+            with torch.cuda.stream(self.stream):
+                yield
+        else:
+            yield
+
+
+@dataclass
+class _FutureMetadata:
+    future: Future[object]
     stream: Optional[torch.cuda.Stream]
 
     @contextmanager
@@ -930,7 +946,7 @@ class ProcessGroupBaby(ProcessGroup):
         self._pipe: Optional[_MonitoredPipe] = None
         self._future_pipe: Optional[_MonitoredPipe] = None
         self._future_thread: Optional[threading.Thread] = None
-        self._futures: Dict[int, Future[object]] = {}
+        self._futures: Dict[int, _FutureMetadata] = {}
         self._futures_lock = threading.Lock()
 
         self._next_op_id = 0
@@ -1173,23 +1189,26 @@ class ProcessGroupBaby(ProcessGroup):
                     Tuple[int, str, object, Optional[torch.cuda.Event]], cmd
                 )
                 with self._futures_lock:
-                    fut = self._futures[op_id]
+                    meta = self._futures[op_id]
                     del self._futures[op_id]
-                if mode == _FUTURE_RESULT:
-                    if event is not None:
-                        event.wait()
-                    fut.set_result(data)
-                elif mode == _FUTURE_EXCEPTION:
-                    fut.set_exception(data)
-                else:
-                    raise ValueError(f"unknown mode {mode}")
+                with meta.set_stream():
+                    if mode == _FUTURE_RESULT:
+                        if event is not None:
+                            event.wait()
+                        meta.future.set_result(data)
+                    elif mode == _FUTURE_EXCEPTION:
+                        meta.future.set_exception(data)
+                    else:
+                        raise ValueError(f"unknown mode {mode}")
         except Exception as e:
             logger.exception(f"got unexpected error in future handler: {e}")
 
-    def _get_future(self, op_id: int) -> Future[object]:
+    def _get_future(
+        self, op_id: int, stream: Optional[torch.cuda.Stream]
+    ) -> Future[object]:
         with self._futures_lock:
             fut = Future()  # pyre-fixme[29]: is not a function
-            self._futures[op_id] = fut
+            self._futures[op_id] = _FutureMetadata(future=fut, stream=stream)
             assert self._pipe is not None
             self._pipe.send(("future", op_id))
 
@@ -1247,7 +1266,11 @@ class ProcessGroupBaby(ProcessGroup):
             ),
         )
 
-        return _BabyWork(pg=self, op_id=op_id)
+        return _BabyWork(
+            pg=self,
+            op_id=op_id,
+            stream=torch.cuda.current_stream() if is_cuda else None,
+        )
 
     def allgather(
         self,
