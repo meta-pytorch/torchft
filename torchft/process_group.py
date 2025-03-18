@@ -67,6 +67,7 @@ from torch.distributed.distributed_c10d import (
 from torch.futures import Future
 from torch.utils._pytree import tree_any
 
+from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
 
 if TYPE_CHECKING:
@@ -330,6 +331,12 @@ class ProcessGroup(BaseProcessGroup):
         """
         dist.destroy_process_group(self)
 
+    def abort(self) -> None:
+        """
+        Aborts the process group.
+        """
+        pass
+
     def shutdown(self) -> None:
         """
         Shuts down the process group.
@@ -355,14 +362,29 @@ class ProcessGroupWrapper(ProcessGroup):
             pg.configure(store_addr, rank, world_size)
             return
 
-        if pg is not None:
-            if hasattr(pg, "abort"):
-                pg.abort()  # pyre-fixme[16]: no attribute abort
-            self._pg = None
+        # abort if already initialized
+        self.abort()
 
         store = create_store_client(store_addr)
 
         self._pg = self._create_pg(store, rank, world_size)
+
+    def abort(self) -> None:
+        pg = self._pg
+        if pg is not None:
+            if hasattr(pg, "abort"):
+                # pyre-fixme[16]: has no attribute abort
+                pg.abort()
+            else:
+                try:
+                    backend = pg._get_backend(torch.device("cuda"))
+                except RuntimeError:
+                    backend = None
+                if backend is not None and hasattr(backend, "abort"):
+                    # pyre-fixme[16]: no attribute abort
+                    backend.abort()
+
+            self._pg = None
 
     def shutdown(self) -> None:
         # TODO: abort PG if possible
@@ -371,13 +393,22 @@ class ProcessGroupWrapper(ProcessGroup):
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         raise NotImplementedError("not implemented")
 
+    def _wrap_work(self, work: Work, opts: object) -> Work:
+        return work
+
+    def _opts_hook(self, opts: T) -> T:
+        return opts
+
     def allgather(
         self,
         output_tensors: List[List[torch.Tensor]],
         input_tensor: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self.parent.allgather(output_tensors, input_tensor, opts)
+        return self._wrap_work(
+            self.parent.allgather(output_tensors, input_tensor, self._opts_hook(opts)),
+            opts,
+        )
 
     def allgather_into_tensor_coalesced(
         self,
@@ -385,17 +416,24 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self.parent.allgather_into_tensor_coalesced(
-            output_tensors, input_tensors, opts
+        return self._wrap_work(
+            self.parent.allgather_into_tensor_coalesced(
+                output_tensors, input_tensors, self._opts_hook(opts)
+            ),
+            opts,
         )
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
-        return self.parent.allreduce(tensors, opts)
+        return self._wrap_work(
+            self.parent.allreduce(tensors, self._opts_hook(opts)), opts
+        )
 
     def allreduce_coalesced(
         self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
     ) -> Work:
-        return self.parent.allreduce_coalesced(tensors, opts)
+        return self._wrap_work(
+            self.parent.allreduce_coalesced(tensors, self._opts_hook(opts)), opts
+        )
 
     def alltoall_base(
         self,
@@ -405,18 +443,27 @@ class ProcessGroupWrapper(ProcessGroup):
         input_split_sizes: List[int],
         opts: AllToAllOptions,
     ) -> Work:
-        return self.parent.alltoall_base(
-            output_buffer, input_buffer, output_split_sizes, input_split_sizes, opts
+        return self._wrap_work(
+            self.parent.alltoall_base(
+                output_buffer,
+                input_buffer,
+                output_split_sizes,
+                input_split_sizes,
+                self._opts_hook(opts),
+            ),
+            opts,
         )
 
     def barrier(self, opts: BarrierOptions) -> Work:
-        return self.parent.barrier(opts)
+        return self._wrap_work(self.parent.barrier(self._opts_hook(opts)), opts)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
-        return self.parent.broadcast(tensor_list, opts)
+        return self._wrap_work(
+            self.parent.broadcast(tensor_list, self._opts_hook(opts)), opts
+        )
 
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
-        return self.parent.recv(tensors, src_rank, tag)
+        return self._wrap_work(self.parent.recv(tensors, src_rank, tag), None)
 
     def reduce_scatter(
         self,
@@ -424,7 +471,12 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[List[torch.Tensor]],
         opts: object,
     ) -> Work:
-        return self.parent.reduce_scatter(output_tensors, input_tensors, opts)
+        return self._wrap_work(
+            self.parent.reduce_scatter(
+                output_tensors, input_tensors, self._opts_hook(opts)
+            ),
+            opts,
+        )
 
     def reduce_scatter_tensor_coalesced(
         self,
@@ -432,12 +484,15 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: ReduceScatterOptions,
     ) -> Work:
-        return self.parent.reduce_scatter_tensor_coalesced(
-            output_tensors, input_tensors, opts
+        return self._wrap_work(
+            self.parent.reduce_scatter_tensor_coalesced(
+                output_tensors, input_tensors, self._opts_hook(opts)
+            ),
+            opts,
         )
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
-        return self.parent.send(tensors, dst_rank, tag)
+        return self._wrap_work(self.parent.send(tensors, dst_rank, tag), None)
 
     def size(self) -> int:
         return self.parent.size()
@@ -516,16 +571,107 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         )
 
 
+class _WorkCUDATimeout(Work):
+    def __init__(self, pg: ProcessGroup, work: Work, timeout: timedelta) -> None:
+        super().__init__()
+        self._pg = pg
+        self._work = work
+        self._timeout = timeout
+
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
+        with self._stream_timeout(self._pg, self._timeout):
+            # not async, just return
+            if self._work is None:
+                return True
+
+            if timeout is not None:
+                return self._work.wait(timeout)
+
+            return self._work.wait()
+
+    @classmethod
+    @contextmanager
+    def _stream_timeout(
+        cls, pg: ProcessGroup, timeout: timedelta
+    ) -> Generator[None, None, None]:
+        """
+        Set a timeout on the CUDA stream for the given process group.
+
+        This does not hold a reference to self to avoid holding the work
+        object/tensors longer than necessary.
+
+        Args:
+            pg: The process group to call abort on.
+            timeout: The timeout to set on the CUDA stream.
+        """
+
+        def callback() -> None:
+            logger.error(f"aborting after {timeout}!")
+            pg.abort()
+
+        # make sure .wait() can be cancelled if it blocks i.e. in barrier
+        with context_timeout(callback, timeout):
+            yield
+
+        # Cancel work if the cuda stream doesn't complete
+        stream_timeout(callback, timeout)
+
+    def get_future(self) -> torch.futures.Future[object]:
+        fut = self._work.get_future()
+
+        def done_callback(fut: torch.futures.Future[object]) -> None:
+            fut.wait()
+
+            self._stream_timeout(self._pg, self._timeout)
+
+        fut.add_done_callback(done_callback)
+        return fut
+
+
 class ProcessGroupNCCL(ProcessGroupWrapper):
     """
     This is a reconfigurable version of ProcessGroupNCCL.
 
-    WARNING: this may result in deadlocks due to NCCL error handling. This is
-    provided for completeness but your mileage may vary.
+    If you are using a supported version of NCCL (NCCL >= 2.26, torch >= 2.7)
+    this will attempt to use ncclCommAbort to recover from any timeouts.
 
-    TODO: verify shutdown correctness with latest NCCL. This currently will call
-    abort when reconfiguring, we need to ensure this is safe.
+    This uses a Python user space event loop to asynchronously wait for the NCCL
+    operations to complete. This should not be used with very long timeouts as
+    the timeout entries are not cleaned up until the elapsed duration completes
+    which may result in slowness or excess memory usage.
+
+    WARNING: this may result in deadlocks due to NCCL error handling and on old
+    versions of torch/NCCL will result in deadlocks.
+
+    Args:
+        timeout: the timeout to use for NCCL operations.
     """
+
+    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
+        super().__init__()
+        self._timeout = timeout
+        self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
+
+    def _opts_hook(self, opts: T) -> T:
+        if not self._use_abort:
+            return opts
+
+        # We need to clear the timeout to apply our own timeout that doesn't
+        # crash the whole program.
+        if hasattr(opts, "timeout"):
+            # apply default timeout to disable
+            opts.timeout = AllgatherOptions().timeout
+        return opts
+
+    def _wrap_work(self, work: Work, opts: object) -> Work:
+        if not self._use_abort:
+            return work
+
+        timeout = self._timeout
+        # pyre-fixme[16]: no attribute timeout
+        if hasattr(opts, "timeout") and opts.timeout.total_seconds() > 0:
+            timeout = opts.timeout
+        return _WorkCUDATimeout(self, work, timeout)
 
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         pg = BaseProcessGroup(store, rank, world_size)
@@ -1184,6 +1330,9 @@ class ProcessGroupBaby(ProcessGroup):
                     cmd = future_pipe.recv(timedelta(seconds=10))
                 except TimeoutError:
                     continue
+                except OSError:
+                    # subprocess exited
+                    break
 
                 op_id, mode, data, event = cast(
                     Tuple[int, str, object, Optional[torch.cuda.Event]], cmd
@@ -1232,7 +1381,11 @@ class ProcessGroupBaby(ProcessGroup):
 
     def _del(self, op_id: int) -> None:
         assert self._pipe is not None
-        self._pipe.send(("del", op_id))
+        try:
+            self._pipe.send(("del", op_id))
+        except OSError:
+            # if pipe is closed we can safely do nothing
+            pass
 
     def _run_func(self, func: str, *args: object, **kwargs: object) -> Work:
         pipe = self._pipe
@@ -1524,6 +1677,11 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
 
     WARNING: If the child process is killed while an operation is running, CUDA
     tensors may leak in the current PyTorch implementation. TODO fix
+
+    WARNING: As this uses a separate CUDA context for the subprocess, performance
+    may be slower than using NCCL directly. Separate CUDA contexts can not run
+    at the same time so network and compute kernels will not overlap execution
+    and instead do time sharing which may reduce GPU utilization.
     """
 
     @classmethod

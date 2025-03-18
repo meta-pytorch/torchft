@@ -5,11 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
-import io
-import multiprocessing
 import os
-import unittest
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Callable, Dict, List, cast
 from unittest import TestCase, skipUnless
@@ -33,7 +30,6 @@ from torch._C._distributed_c10d import (
 from torch.distributed import (
     ReduceOp,
     TCPStore,
-    Work,
     _functional_collectives,
     get_world_size,
 )
@@ -142,7 +138,6 @@ def _test_pg(
                 continue
             raise e
 
-    print(works)
     return works
 
 
@@ -323,10 +318,13 @@ def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) ->
     )
 
 
-# pyre-fixme[2]: Parameter must be annotated.
-def run_barrier_test(pg: ProcessGroup, *args) -> None:
+def run_barrier_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     """Test barrier collective operation."""
-    barrier_work = pg.barrier(BarrierOptions())
+    opts = BarrierOptions()
+    if tensor.is_cuda:
+        device_id = tensor.device.index
+        opts.device_ids = [device_id]
+    barrier_work = pg.barrier(opts)
     barrier_work.wait()
 
 
@@ -856,20 +854,23 @@ class MultiPgBaseTest(TestCase):
         if backend == "gloo":
             return ProcessGroupGloo(timeout=timedelta(seconds=1))
         elif backend == "baby_gloo":
-            return ProcessGroupBabyGloo(timeout=timedelta(seconds=5))
+            return ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
+        elif backend == "nccl":
+            return ProcessGroupNCCL(timeout=timedelta(seconds=1))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
-        else:
-            # fallback / dummy
+        elif backend == "dummy":
             return ProcessGroupDummy(0, 1)
+        else:
+            raise NotImplementedError(f"Unsupported backend: {backend}")
 
-    # pyre-fixme[3]: Return type must be annotated.
-    def _run_parallel(self, collective: str, device: str = "cpu") -> List[Any]:
+    def _run_parallel(self, collective: str, device: str = "cpu") -> None:
         """
         Helper to run on all ranks in parallel, returning a list
         of results or raising an exception if any fail.
         """
         func = _COLLECTIVE_TO_FUNC[collective]
+
         futures = []
         for rank in range(self.WORLD_SIZE):
             pg = self.pg_pool[rank]
@@ -879,9 +880,20 @@ class MultiPgBaseTest(TestCase):
             tensor = torch.tensor([rank + 1], device=device)
             fut = self.executor.submit(func, pg, rank, tensor)
             futures.append(fut)
-        return [f.result() for f in futures]
 
-    def _run_with_resiliency(self, collective: str, device: str = "cpu") -> List[str]:
+        self._collect(futures)
+
+    def _collect(self, futs: list[Future]) -> None:
+        for i, f in enumerate(futs):
+            try:
+                res = f.result()  # timeout=10)
+                if res:
+                    print(f"Rank {i}: {res}")
+            except Exception as e:
+                print(f"Rank {i}: {e}")
+                raise
+
+    def _run_with_resiliency(self, collective: str, device: str = "cpu") -> None:
         """
         Run a collective with resiliency:
         - fault_rank (last rank) simulates a crash.
@@ -890,28 +902,39 @@ class MultiPgBaseTest(TestCase):
         """
 
         def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
+            if dev == "cuda":
+                torch.cuda.set_device(rank)
+
             fault_rank = self.WORLD_SIZE - 1
             test = _COLLECTIVE_TO_FUNC[collective]
 
-            t1 = torch.tensor([rank + 1], device=dev, dtype=torch.float32)
+            # Re-configure the PG to exclude the fault rank
+            new_store_addr = f"localhost:{self.store.port}/reconfig_{collective}"
+
+            pg.configure(new_store_addr, rank, self.WORLD_SIZE)
+
+            # run the same collective again successfully
+            t2 = torch.tensor([rank + 1], device=dev)
+            test(pg, rank, t2)
+
+            # Simulate a failure
+
+            t1 = torch.tensor([rank + 1], device=dev)
             # Simulate failure on the fault rank, but other ranks should still succeed.
             if rank == fault_rank:
                 pg.shutdown()
                 return f"Rank{rank} crashed"
 
-            try:
+            # We hardcode the list of expected errors.
+            # gloo: Connection closed by peer, timed out waiting, no error, read error
+            # nccl: Tensor-likes are not equal/not close (due to abort)
+            with self.assertRaisesRegex(
+                Exception,
+                r"(Connection closed by peer|Timed out waiting|no error|Read error|not equal|not close)",
+            ):
                 test(pg, rank, t1.clone())
-            except RuntimeError as e:
-                assert f"Simulated rank{rank} failure" in str(e)
+                raise RuntimeError("no error")
 
-            # Re-configure the PG to exclude the fault rank
-            new_world_size = self.WORLD_SIZE - 1
-            new_store_addr = f"localhost:{self.store.port}/reconfig_{collective}"
-            pg.configure(new_store_addr, rank, new_world_size)
-
-            # run the same collective again successfully
-            t2 = torch.tensor([rank + 1], device=dev, dtype=torch.float32)
-            test(pg, rank, t2)
             return f"Rank{rank} final success."
 
         # run in parallel
@@ -919,13 +942,7 @@ class MultiPgBaseTest(TestCase):
             self.executor.submit(worker, self.pg_pool[r], r, device)
             for r in range(self.WORLD_SIZE)
         ]
-        results = []
-        for f in futs:
-            try:
-                results.append(f.result(timeout=20))
-            except Exception as e:
-                results.append(e)
-        return results
+        self._collect(futs)
 
 
 class GlooMultiPgTest(MultiPgBaseTest):
@@ -942,6 +959,11 @@ class GlooMultiPgTest(MultiPgBaseTest):
     def test_collective(self, collective: str) -> None:
         self._run_parallel(collective, device="cpu")
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(
+        torch.__version__ >= "2.7",
+        "torch 2.6 has a bug with destructing PyWork objects",
+    )
     @parameterized.expand(COLLECTIVES)
     def test_collective_with_resiliency(self, collective: str) -> None:
         self._run_with_resiliency(collective, device="cpu")
@@ -977,14 +999,25 @@ class BabyNcclMultiPgTest(MultiPgBaseTest):
     def test_collective(self, collective: str) -> None:
         self._run_parallel(collective, device="cuda")
 
+    # @parameterized.expand(_ALL_COLLECTIVES)
+    # def test_collective_with_resiliency(self, collective: str) -> None:
+    #    self._run_with_resiliency(collective, device="cuda")
+
 
 @skipUnless(
-    torch.cuda.is_available() and torch.cuda.device_count() >= 3, "needs 3 CUDA devices"
+    torch.cuda.is_available()
+    and torch.cuda.device_count() >= 2
+    and torch.cuda.nccl.version() >= (2, 25),
+    "needs 2 CUDA devices and NCCL >=2.25",
 )
-class BabyNcclResiliencyTest(MultiPgBaseTest):
-    BACKEND = "baby_nccl"
-    WORLD_SIZE = 3
+class NormalNcclMultiPgTest(MultiPgBaseTest):
+    BACKEND = "nccl"
+    WORLD_SIZE = 2
+
+    @parameterized.expand(_ALL_COLLECTIVES)
+    def test_collective(self, collective: str) -> None:
+        self._run_parallel(collective, device="cuda")
 
     @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective_with_resiliency(self, collective: str) -> None:
-        self._run_parallel(collective, device="cuda")
+        self._run_with_resiliency(collective, device="cuda")

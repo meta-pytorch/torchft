@@ -1,9 +1,11 @@
 import asyncio
 import threading
+from contextlib import contextmanager
 from datetime import timedelta
-from typing import Optional, TypeVar
+from typing import Callable, Generator, Optional, TypeVar
 from unittest.mock import Mock
 
+import torch
 from torch.futures import Future
 
 T = TypeVar("T")
@@ -12,20 +14,24 @@ T = TypeVar("T")
 class _TimerHandle:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._lock.acquire()
         self._timer_handle: Optional[asyncio.TimerHandle] = None
+        self._cancelled = False
 
-    def set_timer(self, timer_handle: asyncio.TimerHandle) -> None:
-        assert self._lock.locked()
-
-        self._timer_handle = timer_handle
-        self._lock.release()
+    def set_timer_handle(self, timer_handle: asyncio.TimerHandle) -> None:
+        with self._lock:
+            if self._cancelled:
+                timer_handle.cancel()
+                self._timer_handle = None
+            else:
+                self._timer_handle = timer_handle
 
     def cancel(self) -> None:
         with self._lock:
-            assert self._timer_handle is not None
-            self._timer_handle.cancel()
-            self._timer_handle = None
+            assert not self._cancelled, "timer can only be cancelled once"
+            self._cancelled = True
+            if self._timer_handle is not None:
+                self._timer_handle.cancel()
+                self._timer_handle = None
 
 
 class _TimeoutManager:
@@ -81,8 +87,16 @@ class _TimeoutManager:
         # pyre-fixme[29]: Future is not a function
         timed_fut: Future[T] = Future()
         handle: _TimerHandle = _TimerHandle()
-        # pyre-fixme[6]: *args
-        loop.call_soon_threadsafe(self._register, loop, timed_fut, timeout, handle)
+        loop.call_soon_threadsafe(
+            self._register_callback,
+            loop,
+            lambda: timed_fut.set_exception(
+                # pyre-fixme[6]: e is not T
+                TimeoutError(f"future did not complete within {timeout}")
+            ),
+            timeout,
+            handle,
+        )
 
         def callback(fut: Future[T]) -> None:
             handle.cancel()
@@ -99,22 +113,48 @@ class _TimeoutManager:
         fut.add_done_callback(callback)
         return timed_fut
 
+    def stream_timeout(self, callback: Callable[[], None], timeout: timedelta) -> None:
+        loop = self._maybe_start_event_loop()
+
+        event: torch.cuda.Event = torch.cuda.Event()
+        event.record()
+
+        def handler() -> None:
+            if not event.query():
+                callback()
+
+        loop.call_soon_threadsafe(
+            self._register_callback, loop, handler, timeout, _TimerHandle()
+        )
+
     @classmethod
-    def _register(
+    def _register_callback(
         cls,
         loop: asyncio.AbstractEventLoop,
-        fut: Future[T],
+        callback: Callable[[], None],
         timeout: timedelta,
         handle: _TimerHandle,
     ) -> None:
         timer_handle = loop.call_later(
             timeout.total_seconds(),
-            lambda: fut.set_exception(
-                # pyre-fixme[6]: e is not T
-                TimeoutError(f"future did not complete within {timeout}")
-            ),
+            callback,
         )
-        handle.set_timer(timer_handle)
+        handle.set_timer_handle(timer_handle)
+
+    @contextmanager
+    def context_timeout(
+        self, callback: Callable[[], None], timeout: timedelta
+    ) -> Generator[None, None, None]:
+        loop = self._maybe_start_event_loop()
+        handle = _TimerHandle()
+
+        loop.call_soon_threadsafe(
+            self._register_callback, loop, callback, timeout, handle
+        )
+
+        yield
+
+        handle.cancel()
 
 
 _TIMEOUT_MANAGER = _TimeoutManager()
@@ -163,3 +203,35 @@ def future_wait(fut: Future[T], timeout: timedelta) -> T:
         raise TimeoutError(f"future did not complete within {timeout}")
 
     return fut.wait()
+
+
+def stream_timeout(callback: Callable[[], None], timeout: timedelta) -> None:
+    """
+    Registers a callback that will be called after the specified timeout if
+    the current stream doesn't complete in time.
+
+    This uses a cuda Event to track the completion of the current stream. If
+    the stream is not complete after the timeout, the callback is called.
+
+    Args:
+        callback: The callback to call if the stream doesn't complete in time.
+        timeout: The timeout to wait for the stream to complete.
+    """
+    _TIMEOUT_MANAGER.stream_timeout(callback, timeout)
+
+
+@contextmanager
+def context_timeout(
+    callback: Callable[[], None], timeout: timedelta
+) -> Generator[None, None, None]:
+    """
+    Registers a callback that will be called after the specified timeout if
+    the current contextmanager doesn't exit in time.
+
+    Args:
+        callback: The callback to call if we time out.
+        timeout: How long to wait for the contextmanager to exit.
+    """
+
+    with _TIMEOUT_MANAGER.context_timeout(callback, timeout):
+        yield
