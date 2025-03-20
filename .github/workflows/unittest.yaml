@@ -35,7 +35,7 @@ jobs:
         set -ex
 
         # install python and protobuf
-        conda create -n venv python=3.12 protobuf -y
+        conda create -n venv python=3.12 libprotobuf -y
         conda activate venv
         python -m pip install --upgrade pip
 
