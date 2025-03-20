@@ -552,6 +552,23 @@ class ProcessGroupTest(TestCase):
 
         torch.cuda.synchronize()
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(
+        torch.cuda.is_available(),
+        "needs CUDA",
+    )
+    def test_nccl_init_timeout(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+        del store
+
+        pg = ProcessGroupNCCL(timeout=timedelta(seconds=0.01))
+
+        with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
+            pg.configure(store_addr, 0, 2)
+
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
@@ -710,7 +727,7 @@ class ProcessGroupTest(TestCase):
 
     def test_process_group_wrapper(self) -> None:
         pg = ProcessGroupDummy(0, 1)
-        wrapper = ProcessGroupWrapper(pg)
+        wrapper = ProcessGroupWrapper(pg=pg)
         self.assertIs(wrapper.parent, pg)
 
         wrapper.configure("addr", 0, 1)

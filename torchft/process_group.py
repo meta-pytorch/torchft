@@ -84,7 +84,7 @@ _FUTURE_EXCEPTION = "fut_exception"
 T = TypeVar("T")
 
 
-def create_store_client(store_addr: str) -> Store:
+def create_store_client(store_addr: str, timeout: timedelta) -> Store:
     """
     Creates a PrefixStore(TCPStore(...)) client from an address in the format:
 
@@ -100,6 +100,7 @@ def create_store_client(store_addr: str) -> Store:
         port=int(port),
         is_master=False,
         wait_for_workers=False,
+        timeout=timeout,
     )
     store = PrefixStore(prefix, store)
     return store
@@ -350,11 +351,20 @@ class ProcessGroup(BaseProcessGroup):
 class ProcessGroupWrapper(ProcessGroup):
     """
     This is a wrapper around any ProcessGroup with a reconfiguration method.
+
+    Args:
+        timeout: timeout for reconfiguration for TCPStore
+        pg: optional ProcessGroup to use, if None a new one will be created
     """
 
-    def __init__(self, pg: Optional[ProcessGroup] = None) -> None:
+    def __init__(
+        self,
+        timeout: timedelta = timedelta(seconds=60),
+        pg: Optional[ProcessGroup] = None,
+    ) -> None:
         super().__init__(0, 1)
         self._pg: Optional[BaseProcessGroup] = pg
+        self._timeout = timeout
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         pg = self._pg
@@ -365,7 +375,7 @@ class ProcessGroupWrapper(ProcessGroup):
         # abort if already initialized
         self.abort()
 
-        store = create_store_client(store_addr)
+        store = create_store_client(store_addr, timeout=self._timeout)
 
         self._pg = self._create_pg(store, rank, world_size)
 
@@ -511,10 +521,6 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     This is a reconfigurable version of ProcessGroupGloo.
     """
 
-    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
-        super().__init__()
-        self._timeout = timeout
-
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.GLOO)
@@ -648,8 +654,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     """
 
     def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
-        super().__init__()
-        self._timeout = timeout
+        super().__init__(timeout)
         self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
 
     def _opts_hook(self, opts: T) -> T:
@@ -877,7 +882,7 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
     """
 
     def __init__(self, pg: ProcessGroup) -> None:
-        super().__init__(pg)
+        super().__init__(pg=pg)
 
         self._error: Optional[Exception] = None
 
@@ -958,7 +963,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
     """
 
     def __init__(self, manager: "Manager") -> None:
-        super().__init__(manager._pg)
+        super().__init__(pg=manager._pg)
 
         self._manager = manager
 
@@ -1195,7 +1200,11 @@ class ProcessGroupBaby(ProcessGroup):
             if curr_device >= 0 and torch.cuda.is_available():
                 torch.cuda.set_device(curr_device)
 
-            store = create_store_client(store_addr)
+            store = create_store_client(
+                store_addr,
+                # default TCPStore timeout is 5 minutes
+                timeout=timedelta(minutes=5),
+            )
 
             try:
                 pg = cls._create_pg(store, rank, world_size)
