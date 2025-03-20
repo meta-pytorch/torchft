@@ -1,4 +1,6 @@
 import asyncio
+import queue
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import timedelta
@@ -36,8 +38,13 @@ class _TimerHandle:
 
 class _TimeoutManager:
     """
-    This class manages timeouts for futures. It uses a background thread with an
-    event loop to schedule the timeouts.
+    This class manages timeouts for code blocks, futures and CUDA events. It
+    uses a background thread with an event loop to schedule the timeouts and
+    call the callback function when the timeout is reached.
+
+    Generally there is a single instance of this class that is used for all
+    timeouts. The callbacks should not block otherwise other timeouts may not
+    be processed.
     """
 
     def __init__(self) -> None:
@@ -45,6 +52,10 @@ class _TimeoutManager:
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._event_loop_thread: Optional[threading.Thread] = None
         self._next_timer_id = 0
+
+        # This queue is used to delete events on the main thread as cudaEventDestroy
+        # can block if the CUDA queue is full.
+        self._del_queue: queue.SimpleQueue[object] = queue.SimpleQueue()
 
     def _maybe_start_event_loop(self) -> asyncio.AbstractEventLoop:
         """
@@ -82,6 +93,8 @@ class _TimeoutManager:
         if isinstance(fut, Mock):
             return fut
 
+        self._clear_del_queue()
+
         loop = self._maybe_start_event_loop()
 
         # pyre-fixme[29]: Future is not a function
@@ -114,6 +127,8 @@ class _TimeoutManager:
         return timed_fut
 
     def stream_timeout(self, callback: Callable[[], None], timeout: timedelta) -> None:
+        self._clear_del_queue()
+
         loop = self._maybe_start_event_loop()
 
         event: torch.cuda.Event = torch.cuda.Event()
@@ -122,6 +137,11 @@ class _TimeoutManager:
         def handler() -> None:
             if not event.query():
                 callback()
+
+            # cudaEventDestroy can block so we never want to delete in the event
+            # loop. Put it on the del queue so we can delete it in the main
+            # thread.
+            self._del_queue.put(event)
 
         loop.call_soon_threadsafe(
             self._register_callback, loop, handler, timeout, _TimerHandle()
@@ -145,6 +165,8 @@ class _TimeoutManager:
     def context_timeout(
         self, callback: Callable[[], None], timeout: timedelta
     ) -> Generator[None, None, None]:
+        self._clear_del_queue()
+
         loop = self._maybe_start_event_loop()
         handle = _TimerHandle()
 
@@ -155,6 +177,31 @@ class _TimeoutManager:
         yield
 
         handle.cancel()
+
+    def _clear_del_queue(self) -> int:
+        """
+        Clear the queue of futures to be deleted.
+
+        Returns the number of items deleted.
+        """
+        count = 0
+        while True:
+            try:
+                # get and immediately discard item
+                item = self._del_queue.get_nowait()
+                refcount = sys.getrefcount(item)
+                assert (
+                    # 1 from item, 1 from getrefcount
+                    refcount
+                    == 2
+                ), f"items in del_queue reference should not have other references, found {refcount=}"
+                del item
+
+                count += 1
+            except queue.Empty:
+                break
+
+        return count
 
 
 _TIMEOUT_MANAGER = _TimeoutManager()

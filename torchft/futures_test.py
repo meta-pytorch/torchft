@@ -1,9 +1,17 @@
+import threading
 from datetime import timedelta
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 
+import torch
 from torch.futures import Future
 
-from torchft.futures import future_timeout, future_wait
+from torchft.futures import (
+    _TIMEOUT_MANAGER,
+    context_timeout,
+    future_timeout,
+    future_wait,
+    stream_timeout,
+)
 
 
 class FuturesTest(TestCase):
@@ -45,3 +53,39 @@ class FuturesTest(TestCase):
         fut.set_exception(RuntimeError("test"))
         with self.assertRaisesRegex(RuntimeError, "test"):
             timed_fut.wait()
+
+    def test_context_timeout(self) -> None:
+        barrier: threading.Barrier = threading.Barrier(2)
+
+        def callback() -> None:
+            barrier.wait()
+
+        with context_timeout(callback, timedelta(seconds=0.01)):
+            # block until timeout fires
+            barrier.wait()
+
+        def fail() -> None:
+            self.fail("timeout should be cancelled")
+
+        with context_timeout(fail, timedelta(seconds=10)):
+            pass
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of decorator
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for this test")
+    def test_stream_timeout(self) -> None:
+        torch.cuda.synchronize()
+
+        def callback() -> None:
+            self.fail()
+
+        stream_timeout(callback, timeout=timedelta(seconds=0.01))
+
+        # make sure event completes
+        torch.cuda.synchronize()
+
+        # make sure that event is deleted on the deletion queue
+        item = _TIMEOUT_MANAGER._del_queue.get(timeout=10.0)
+        _TIMEOUT_MANAGER._del_queue.put(item)
+        del item
+
+        self.assertEqual(_TIMEOUT_MANAGER._clear_del_queue(), 1)
