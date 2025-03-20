@@ -42,7 +42,7 @@ use std::{println as info, println as warn};
 macro_rules! info_with_replica {
     ($replica_id:expr, $($arg:tt)*) => {{
         let parts: Vec<&str> = $replica_id.splitn(2, ':').collect();
-        let formatted_message = if parts.len() == 2 {
+        if parts.len() == 2 {
             // If there are two parts, use the replica name
             info!("[Replica {}] {}", parts[0], format!($($arg)*))
         } else {
