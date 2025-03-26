@@ -1,11 +1,11 @@
 import time
-from unittest import TestCase
 from datetime import timedelta
+from unittest import TestCase
 
 import torch.distributed as dist
 
 from torchft import Manager, ProcessGroupGloo
-from torchft._torchft import LighthouseServer, LighthouseClient
+from torchft._torchft import LighthouseClient, LighthouseServer
 
 
 class TestLighthouse(TestCase):
@@ -97,14 +97,15 @@ class TestLighthouse(TestCase):
                 world_size=1,
                 shrink_only=False,
                 timeout=timedelta(seconds=1),
-                data={"my_data": 1234}
+                data={"my_data": 1234},
             )
             assert result is not None
-            print(result)
             assert len(result.participants) == 1
             for member in result.participants:
                 assert member.replica_id == "lighthouse_test"
                 assert member.data is not None
+                assert "my_data" in member.data
+                assert member.data["my_data"] == 1234
 
         finally:
             # Cleanup

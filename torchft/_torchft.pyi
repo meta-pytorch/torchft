@@ -1,5 +1,6 @@
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Optional
+from typing import Hashable, List, Optional
 
 class ManagerClient:
     def __init__(self, addr: str, connect_timeout: timedelta) -> None: ...
@@ -60,6 +61,27 @@ class LighthouseServer:
     def address(self) -> str: ...
     def shutdown(self) -> None: ...
 
+@dataclass
+class PyQuorumMember:
+    replica_id: str
+    address: str
+    store_address: str
+    step: int
+    world_size: int
+    shrink_only: bool
+    data: Optional[dict[Hashable, object]] = None
+
+@dataclass
+class PyTimestamp:
+    seconds: int
+    nanos: int
+
+@dataclass
+class PyQuorum:
+    quorum_id: str
+    participants: List[PyQuorumMember]
+    created: PyTimestamp
+
 class LighthouseClient:
     def __init__(
         self,
@@ -75,5 +97,5 @@ class LighthouseClient:
         world_size: int,
         shrink_only: bool,
         timeout: timedelta,
-        data: Optional[dict] = None,
-    ) -> object: ...
+        data: Optional[dict[Hashable, object]] = None,
+    ) -> "PyQuorum": ...

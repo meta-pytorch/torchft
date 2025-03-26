@@ -39,6 +39,7 @@ use crate::torchftpb::{
     ShouldCommitRequest,
 };
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyString};
 
 // Get the number of threads to use for the tokio runtime
 fn num_threads() -> usize {
@@ -342,7 +343,6 @@ async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
 }
 
 #[pyclass(get_all, set_all)]
-#[derive(Clone)]
 pub struct PyQuorumMember {
     replica_id: String,
     address: String,
@@ -350,7 +350,27 @@ pub struct PyQuorumMember {
     step: i64,
     world_size: u64,
     shrink_only: bool,
-    data: String,
+    data: Option<Py<PyDict>>,
+}
+
+impl PyQuorumMember {
+    pub fn clone_with_py(&self, py: Python) -> Self {
+        PyQuorumMember {
+            replica_id: self.replica_id.clone(),
+            address: self.address.clone(),
+            store_address: self.store_address.clone(),
+            step: self.step,
+            world_size: self.world_size,
+            shrink_only: self.shrink_only,
+            data: self.data.as_ref().map(|d| d.clone_ref(py)),
+        }
+    }
+}
+
+impl Clone for PyQuorumMember {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| self.clone_with_py(py))
+    }
 }
 
 #[pyclass(get_all, set_all)]
@@ -376,32 +396,53 @@ impl From<prost_types::Timestamp> for PyTimestamp {
     }
 }
 
-impl From<QuorumMember> for PyQuorumMember {
-    fn from(q: QuorumMember) -> Self {
-        PyQuorumMember {
-            replica_id: q.replica_id,
-            address: q.address,
-            store_address: q.store_address,
-            step: q.step,
-            world_size: q.world_size,
-            shrink_only: q.shrink_only,
-            data: q.data,
+fn pydict_to_string<'py>(py: Python, data: Option<&Bound<'_, PyDict>>) -> PyResult<String> {
+    match data {
+        Some(d) => {
+            let json = py.import("json")?;
+            let json_obj = json.call_method1("dumps", (d,))?;
+            let py_str: &Bound<PyString> = json_obj.downcast()?;
+            Ok(py_str.to_str()?.to_owned())
         }
+        None => Ok(String::new()),
     }
 }
 
-impl From<Quorum> for PyQuorum {
-    fn from(q: Quorum) -> Self {
-        PyQuorum {
-            quorum_id: q.quorum_id,
-            participants: q
-                .participants
-                .into_iter()
-                .map(PyQuorumMember::from)
-                .collect(),
-            created: PyTimestamp::from(q.created.unwrap()),
-        }
+fn string_to_pydict(py: Python, s: &str) -> PyResult<Option<Py<PyDict>>> {
+    if s.is_empty() {
+        return Ok(None); // Treat empty string as None
     }
+
+    let json = py.import("json")?;
+    let obj = json.call_method1("loads", (s,))?;
+    let dict: &Bound<PyDict> = obj.downcast()?;
+    Ok(Some(dict.to_owned().into())) // convert Bound<PyDict> -> Py<PyDict>
+}
+
+fn convert_quorum_member(py: Python, m: &QuorumMember) -> PyResult<PyQuorumMember> {
+    Ok(PyQuorumMember {
+        replica_id: m.replica_id.clone(),
+        address: m.address.clone(),
+        store_address: m.store_address.clone(),
+        step: m.step.clone(),
+        world_size: m.world_size.clone(),
+        shrink_only: m.shrink_only.clone(),
+        data: string_to_pydict(py, &m.data)?,
+    })
+}
+
+fn convert_quorum(py: Python, q: &Quorum) -> PyResult<PyQuorum> {
+    let participants: Vec<PyQuorumMember> = q
+        .participants
+        .iter()
+        .map(|m| convert_quorum_member(py, m)) // this expects &m
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PyQuorum {
+        quorum_id: q.quorum_id,
+        participants: participants,
+        created: PyTimestamp::from(q.created.unwrap()),
+    })
 }
 
 /// LighthouseClient is a GRPC client to the lighthouse service.
@@ -417,8 +458,6 @@ struct LighthouseClient {
     runtime: Runtime,
 }
 
-use pyo3::types::PyString;
-use pyo3::types::PyDict;
 #[pymethods]
 impl LighthouseClient {
     #[new]
@@ -451,14 +490,8 @@ impl LighthouseClient {
         timeout: Duration,
         data: Option<&Bound<'_, PyDict>>,
     ) -> Result<PyQuorum, StatusError> {
-        let data_string = match data {
-            Some(d) => {
-                let py_str: &Bound<PyString> = &d.str()?;
-                py_str.to_str()?.to_owned()
-            }
-            None => String::new(),
-        };
-        py.allow_threads(move || {
+        let data_string = pydict_to_string(py, data)?;
+        let quorum: Result<Quorum, StatusError> = py.allow_threads(move || {
             let mut request = tonic::Request::new(LighthouseQuorumRequest {
                 requester: Some(QuorumMember {
                     replica_id: replica_id,
@@ -480,8 +513,9 @@ impl LighthouseClient {
             let quorum = resp
                 .quorum
                 .ok_or_else(|| Status::internal("missing quorum"))?;
-            Ok(PyQuorum::from(quorum))
-        })
+            Ok(quorum)
+        });
+        Ok(convert_quorum(py, &quorum?)?)
     }
 }
 
