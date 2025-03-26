@@ -1,10 +1,11 @@
+import re
 import time
 from unittest import TestCase
 
 import torch.distributed as dist
 
 from torchft import Manager, ProcessGroupGloo
-from torchft._torchft import LighthouseServer
+from torchft._torchft import LighthouseServer, LighthouseClient
 
 
 class TestLighthouse(TestCase):
@@ -65,3 +66,45 @@ class TestLighthouse(TestCase):
             heartbeat_timeout_ms=100,
         )
         lighthouse.shutdown()
+
+    def test_lighthouse_client_behavior(self) -> None:
+        """Test that using LighthouseClient with a generic quorum behavior"""
+        # To test, we create a lighthouse with 100ms and 400ms join timeouts
+        # and measure the time taken to validate the quorum.
+        lighthouse = LighthouseServer(
+            bind="[::]:0",
+            min_replicas=1,
+            join_timeout_ms=100,
+        )
+
+        # Create a manager that tries to join
+        try:
+            client = LighthouseClient(
+                addr=lighthouse.address(),
+                connect_timeout=100,
+            )
+            store = dist.TCPStore(
+                host_name="localhost",
+                port=0,
+                is_master=True,
+                wait_for_workers=False,
+            )
+            result = client.quorum(
+                replica_id="lighthouse_test",
+                address="localhost",
+                store_addr="localhost",
+                step=1,
+                world_size=1,
+                shrink_only=False,
+                timeout=100,
+                data={"my_data": 1234}
+            )
+            assert result is not None
+            assert len(result) == 1
+            for member in result:
+                assert member.replica_id == "lighthouse_test"
+                assert member.data is not None
+
+        finally:
+            # Cleanup
+            lighthouse.shutdown()
