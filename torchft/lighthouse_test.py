@@ -1,6 +1,6 @@
-import re
 import time
 from unittest import TestCase
+from datetime import timedelta
 
 import torch.distributed as dist
 
@@ -81,7 +81,7 @@ class TestLighthouse(TestCase):
         try:
             client = LighthouseClient(
                 addr=lighthouse.address(),
-                connect_timeout=100,
+                connect_timeout=timedelta(seconds=1),
             )
             store = dist.TCPStore(
                 host_name="localhost",
@@ -92,16 +92,17 @@ class TestLighthouse(TestCase):
             result = client.quorum(
                 replica_id="lighthouse_test",
                 address="localhost",
-                store_addr="localhost",
+                store_address=f"localhost:{store.port}",
                 step=1,
                 world_size=1,
                 shrink_only=False,
-                timeout=100,
+                timeout=timedelta(seconds=1),
                 data={"my_data": 1234}
             )
             assert result is not None
-            assert len(result) == 1
-            for member in result:
+            print(result)
+            assert len(result.participants) == 1
+            for member in result.participants:
                 assert member.replica_id == "lighthouse_test"
                 assert member.data is not None
 

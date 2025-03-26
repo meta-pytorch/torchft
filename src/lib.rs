@@ -417,6 +417,8 @@ struct LighthouseClient {
     runtime: Runtime,
 }
 
+use pyo3::types::PyString;
+use pyo3::types::PyDict;
 #[pymethods]
 impl LighthouseClient {
     #[new]
@@ -437,7 +439,7 @@ impl LighthouseClient {
         })
     }
 
-    fn quorum(
+    fn quorum<'py>(
         &self,
         py: Python<'_>,
         replica_id: String,
@@ -447,10 +449,13 @@ impl LighthouseClient {
         world_size: u64,
         shrink_only: bool,
         timeout: Duration,
-        data: Option<PyObject>,
+        data: Option<&Bound<'_, PyDict>>,
     ) -> Result<PyQuorum, StatusError> {
         let data_string = match data {
-            Some(obj) => obj.extract(py)?,
+            Some(d) => {
+                let py_str: &Bound<PyString> = &d.str()?;
+                py_str.to_str()?.to_owned()
+            }
             None => String::new(),
         };
         py.allow_threads(move || {

@@ -59,3 +59,21 @@ class LighthouseServer:
     ) -> None: ...
     def address(self) -> str: ...
     def shutdown(self) -> None: ...
+
+class LighthouseClient:
+    def __init__(
+        self,
+        addr: str,
+        connect_timeout: timedelta,
+    ) -> None: ...
+    def quorum(
+        self,
+        replica_id: str,
+        address: str,
+        store_address: str,
+        step: int,
+        world_size: int,
+        shrink_only: bool,
+        timeout: timedelta,
+        data: Optional[dict] = None,
+    ) -> object: ...
