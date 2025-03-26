@@ -638,6 +638,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -654,6 +655,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -709,6 +711,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -747,6 +750,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -793,6 +797,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -813,6 +818,7 @@ mod tests {
                 step: 1,
                 world_size: 1,
                 shrink_only: false,
+                data: String::new(),
             }],
             created: Some(SystemTime::now().into()),
         });
@@ -831,6 +837,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -874,6 +881,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "b".to_string(),
@@ -882,6 +890,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             ],
             created: Some(SystemTime::now().into()),
@@ -898,6 +907,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: true,
+                    data: String::new(),
                 },
             },
         );
@@ -915,6 +925,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: true,
+                    data: String::new(),
                 },
             },
         );
@@ -963,6 +974,7 @@ mod tests {
                     step: 10,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 }),
             });
 
@@ -1008,6 +1020,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             },
         );
@@ -1033,6 +1046,7 @@ mod tests {
             step: 1,
             world_size: 1,
             shrink_only: false,
+            data: String::new(),
         }];
         let b = vec![QuorumMember {
             replica_id: "1".to_string(),
@@ -1041,6 +1055,7 @@ mod tests {
             step: 1000,
             world_size: 1,
             shrink_only: false,
+            data: String::new(),
         }];
 
         // replica_id is the same
@@ -1053,6 +1068,7 @@ mod tests {
             step: 1,
             world_size: 1,
             shrink_only: false,
+            data: String::new(),
         }];
         // replica_id changed
         assert!(quorum_changed(&a, &c));
@@ -1068,6 +1084,7 @@ mod tests {
                 step,
                 world_size: 1,
                 shrink_only,
+                data: String::new(),
             }
         }
 

@@ -32,8 +32,12 @@ pub mod torchftpb {
     tonic::include_proto!("torchft");
 }
 
+use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
-use crate::torchftpb::{CheckpointMetadataRequest, ManagerQuorumRequest, ShouldCommitRequest};
+use crate::torchftpb::{
+    CheckpointMetadataRequest, LighthouseQuorumRequest, ManagerQuorumRequest, Quorum, QuorumMember,
+    ShouldCommitRequest,
+};
 use pyo3::prelude::*;
 
 // Get the number of threads to use for the tokio runtime
@@ -304,7 +308,7 @@ impl QuorumResult {
 fn reset_python_signals(py: Python<'_>) -> PyResult<()> {
     // clear python signal handlers
     // signal.signal(signal.SIGINT, signal.SIG_DFL)
-    let signal = py.import_bound("signal")?;
+    let signal = py.import("signal")?;
     let set_signal = signal.getattr("signal")?;
     let args = (signal.getattr("SIGINT")?, signal.getattr("SIG_DFL")?);
     set_signal.call1(args)?;
@@ -335,6 +339,145 @@ async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
     lighthouse.run().await?;
 
     Ok(())
+}
+
+#[pyclass(get_all, set_all)]
+#[derive(Clone)]
+pub struct PyQuorumMember {
+    replica_id: String,
+    address: String,
+    store_address: String,
+    step: i64,
+    world_size: u64,
+    shrink_only: bool,
+    data: String,
+}
+
+#[pyclass(get_all, set_all)]
+#[derive(Clone)]
+pub struct PyTimestamp {
+    pub seconds: i64,
+    pub nanos: i32,
+}
+
+#[pyclass(get_all, set_all)]
+struct PyQuorum {
+    quorum_id: i64,
+    participants: Vec<PyQuorumMember>,
+    created: PyTimestamp,
+}
+
+impl From<prost_types::Timestamp> for PyTimestamp {
+    fn from(ts: prost_types::Timestamp) -> Self {
+        PyTimestamp {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        }
+    }
+}
+
+impl From<QuorumMember> for PyQuorumMember {
+    fn from(q: QuorumMember) -> Self {
+        PyQuorumMember {
+            replica_id: q.replica_id,
+            address: q.address,
+            store_address: q.store_address,
+            step: q.step,
+            world_size: q.world_size,
+            shrink_only: q.shrink_only,
+            data: q.data,
+        }
+    }
+}
+
+impl From<Quorum> for PyQuorum {
+    fn from(q: Quorum) -> Self {
+        PyQuorum {
+            quorum_id: q.quorum_id,
+            participants: q
+                .participants
+                .into_iter()
+                .map(PyQuorumMember::from)
+                .collect(),
+            created: PyTimestamp::from(q.created.unwrap()),
+        }
+    }
+}
+
+/// LighthouseClient is a GRPC client to the lighthouse service.
+///
+/// It is used to directly communicate with the lighthouse Server.
+///
+/// Args:
+///     addr (str): The HTTP address of the lighthouse server.
+///     connect_timeout (timedelta): The timeout for connecting to the lighthouse server.
+#[pyclass]
+struct LighthouseClient {
+    client: LighthouseServiceClient<Channel>,
+    runtime: Runtime,
+}
+
+#[pymethods]
+impl LighthouseClient {
+    #[new]
+    fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
+        py.allow_threads(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(num_threads())
+                .thread_name("torchft-lhclnt")
+                .enable_all()
+                .build()?;
+            let client = runtime
+                .block_on(manager::lighthouse_client_new(addr, connect_timeout))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            Ok(Self {
+                client: client,
+                runtime: runtime,
+            })
+        })
+    }
+
+    fn quorum(
+        &self,
+        py: Python<'_>,
+        replica_id: String,
+        address: String,
+        store_address: String,
+        step: i64,
+        world_size: u64,
+        shrink_only: bool,
+        timeout: Duration,
+        data: Option<PyObject>,
+    ) -> Result<PyQuorum, StatusError> {
+        let data_string = match data {
+            Some(obj) => obj.extract(py)?,
+            None => String::new(),
+        };
+        py.allow_threads(move || {
+            let mut request = tonic::Request::new(LighthouseQuorumRequest {
+                requester: Some(QuorumMember {
+                    replica_id: replica_id,
+                    address: address,
+                    store_address: store_address,
+                    step: step,
+                    world_size: world_size,
+                    shrink_only: shrink_only,
+                    data: data_string,
+                }),
+            });
+
+            // This timeout is processed on the server side so we also enable
+            // keep alives to detect server health.
+            request.set_timeout(timeout);
+
+            let response = self.runtime.block_on(self.client.clone().quorum(request))?;
+            let resp = response.into_inner();
+            let quorum = resp
+                .quorum
+                .ok_or_else(|| Status::internal("missing quorum"))?;
+            Ok(PyQuorum::from(quorum))
+        })
+    }
 }
 
 /// LighthouseServer is a GRPC server for the lighthouse service.
@@ -428,6 +571,12 @@ impl From<StatusError> for PyErr {
     }
 }
 
+impl From<pyo3::PyErr> for StatusError {
+    fn from(err: pyo3::PyErr) -> Self {
+        StatusError(Status::internal(err.to_string()))
+    }
+}
+
 impl From<Status> for StatusError {
     fn from(other: Status) -> Self {
         Self(other)
@@ -482,7 +631,11 @@ fn _torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ManagerServer>()?;
     m.add_class::<ManagerClient>()?;
     m.add_class::<LighthouseServer>()?;
+    m.add_class::<LighthouseClient>()?;
     m.add_class::<QuorumResult>()?;
+    m.add_class::<PyQuorumMember>()?;
+    m.add_class::<PyQuorum>()?;
+    m.add_class::<PyTimestamp>()?;
     m.add_function(wrap_pyfunction!(lighthouse_main, m)?)?;
 
     Ok(())

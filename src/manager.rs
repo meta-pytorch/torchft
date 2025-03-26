@@ -270,6 +270,7 @@ impl ManagerService for Arc<Manager> {
                     step: req.step,
                     world_size: self.world_size,
                     shrink_only: req.shrink_only,
+                    data: String::new(),
                 },
                 timeout,
             )
@@ -753,6 +754,7 @@ mod tests {
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -761,6 +763,7 @@ mod tests {
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             ],
             created: None,
@@ -803,6 +806,7 @@ mod tests {
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -811,6 +815,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "replica_2".to_string(),
@@ -819,6 +824,7 @@ mod tests {
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "replica_3".to_string(),
@@ -827,6 +833,7 @@ mod tests {
                     step: 1,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "replica_4".to_string(),
@@ -835,6 +842,7 @@ mod tests {
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
             ],
             created: None,

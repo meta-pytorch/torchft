@@ -42,6 +42,7 @@ message QuorumMember {
     int64 step = 4;
     uint64 world_size = 5;
     bool shrink_only = 6;
+    string data = 7;
 }
 
 message Quorum {
