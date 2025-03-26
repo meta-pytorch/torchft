@@ -342,6 +342,7 @@ async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
     Ok(())
 }
 
+// struct used to pass data back to the python side
 #[pyclass(get_all, set_all)]
 pub struct PyQuorumMember {
     replica_id: String,
@@ -354,6 +355,7 @@ pub struct PyQuorumMember {
 }
 
 impl PyQuorumMember {
+    // PyDict has not implemeted Clone, so we need to implement it manually
     pub fn clone_with_py(&self, py: Python) -> Self {
         PyQuorumMember {
             replica_id: self.replica_id.clone(),
@@ -396,6 +398,7 @@ impl From<prost_types::Timestamp> for PyTimestamp {
     }
 }
 
+// Util functions to convert between python dict and rust string using json.
 fn pydict_to_string<'py>(py: Python, data: Option<&Bound<'_, PyDict>>) -> PyResult<String> {
     match data {
         Some(d) => {
