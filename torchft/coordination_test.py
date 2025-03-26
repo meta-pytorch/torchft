@@ -1,7 +1,12 @@
 import inspect
 from unittest import TestCase
 
-from torchft.coordination import LighthouseServer, ManagerClient, ManagerServer
+from torchft.coordination import (
+    LighthouseClient,
+    LighthouseServer,
+    ManagerClient,
+    ManagerServer,
+)
 
 
 class TestCoordination(TestCase):
@@ -10,6 +15,7 @@ class TestCoordination(TestCase):
             ManagerClient,
             ManagerServer,
             LighthouseServer,
+            LighthouseClient,
         ]
         for cls in classes:
             self.assertIn("Args:", str(cls.__doc__), cls)
