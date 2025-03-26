@@ -62,7 +62,7 @@ class LighthouseServer:
     def shutdown(self) -> None: ...
 
 @dataclass
-class PyQuorumMember:
+class QuorumMember:
     replica_id: str
     address: str
     store_address: str
@@ -72,15 +72,15 @@ class PyQuorumMember:
     data: Optional[dict[Hashable, object]] = None
 
 @dataclass
-class PyTimestamp:
+class Timestamp:
     seconds: int
     nanos: int
 
 @dataclass
-class PyQuorum:
+class Quorum:
     quorum_id: str
-    participants: List[PyQuorumMember]
-    created: PyTimestamp
+    participants: List[QuorumMember]
+    created: Timestamp
 
 class LighthouseClient:
     def __init__(
@@ -98,4 +98,4 @@ class LighthouseClient:
         shrink_only: bool,
         timeout: timedelta,
         data: Optional[dict[Hashable, object]] = None,
-    ) -> "PyQuorum": ...
+    ) -> "Quorum": ...

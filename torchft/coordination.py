@@ -14,9 +14,15 @@ torchft.
 This provides direct access to the Lighthouse and Manager servers and clients.
 """
 
-from torchft._torchft import LighthouseServer, ManagerClient, ManagerServer
+from torchft._torchft import (
+    LighthouseClient,
+    LighthouseServer,
+    ManagerClient,
+    ManagerServer,
+)
 
 __all__ = [
+    "LighthouseClient",
     "LighthouseServer",
     "ManagerServer",
     "ManagerClient",
