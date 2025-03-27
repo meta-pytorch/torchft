@@ -6,6 +6,8 @@ from torchft.coordination import (
     LighthouseServer,
     ManagerClient,
     ManagerServer,
+    Quorum,
+    QuorumMember,
 )
 
 
@@ -16,6 +18,8 @@ class TestCoordination(TestCase):
             ManagerServer,
             LighthouseServer,
             LighthouseClient,
+            Quorum,
+            QuorumMember,
         ]
         for cls in classes:
             self.assertIn("Args:", str(cls.__doc__), cls)

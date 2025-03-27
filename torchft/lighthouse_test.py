@@ -5,7 +5,7 @@ from unittest import TestCase
 import torch.distributed as dist
 
 from torchft import Manager, ProcessGroupGloo
-from torchft._torchft import LighthouseClient, LighthouseServer
+from torchft._torchft import LighthouseClient, LighthouseServer, Quorum, QuorumMember
 
 
 class TestLighthouse(TestCase):
@@ -100,8 +100,10 @@ class TestLighthouse(TestCase):
                 data={"my_data": 1234},
             )
             assert result is not None
+            assert isinstance(result, Quorum)
             assert len(result.participants) == 1
             for member in result.participants:
+                assert isinstance(member, QuorumMember)
                 assert member.replica_id == "lighthouse_test"
                 assert member.data is not None
                 assert "my_data" in member.data

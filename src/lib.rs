@@ -35,8 +35,7 @@ pub mod torchftpb {
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
-    CheckpointMetadataRequest, LighthouseQuorumRequest, ManagerQuorumRequest, Quorum, QuorumMember,
-    ShouldCommitRequest,
+    CheckpointMetadataRequest, LighthouseQuorumRequest, ManagerQuorumRequest, ShouldCommitRequest,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -342,9 +341,19 @@ async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
     Ok(())
 }
 
-// struct used to pass data back to the python side
+/// quorum member of one quorum.
+///
+/// Args:
+///     replica_id (str): The string id of the replica calling quorum.
+///     address (str): The address of the replica calling quorum.
+///     store_address (str): The address of the store.
+///     step (int): The step of the replica calling quorum.
+///     world_size (int): The world size of the replica calling quorum.
+///     shrink_only (bool): Whether the quorum is for shrinking only.
+///     timeout (timedelta): The timeout for quorum.
+///     data (dict or None): The data to be passed with quorum.
 #[pyclass(get_all, set_all)]
-pub struct PyQuorumMember {
+pub struct QuorumMember {
     replica_id: String,
     address: String,
     store_address: String,
@@ -354,10 +363,10 @@ pub struct PyQuorumMember {
     data: Option<Py<PyDict>>,
 }
 
-impl PyQuorumMember {
+impl QuorumMember {
     // PyDict has not implemeted Clone, so we need to implement it manually
     pub fn clone_with_py(&self, py: Python) -> Self {
-        PyQuorumMember {
+        QuorumMember {
             replica_id: self.replica_id.clone(),
             address: self.address.clone(),
             store_address: self.store_address.clone(),
@@ -369,7 +378,7 @@ impl PyQuorumMember {
     }
 }
 
-impl Clone for PyQuorumMember {
+impl Clone for QuorumMember {
     fn clone(&self) -> Self {
         Python::with_gil(|py| self.clone_with_py(py))
     }
@@ -377,21 +386,27 @@ impl Clone for PyQuorumMember {
 
 #[pyclass(get_all, set_all)]
 #[derive(Clone)]
-pub struct PyTimestamp {
+pub struct Timestamp {
     pub seconds: i64,
     pub nanos: i32,
 }
 
+/// quorum result.
+///
+/// Args:
+///     quorum_id (int): The id of current quorum.
+///     participants (list[QuorumMember]): All members within the quorum.
+///     created (timedelta): Time of quorum created in server.
 #[pyclass(get_all, set_all)]
-struct PyQuorum {
+struct Quorum {
     quorum_id: i64,
-    participants: Vec<PyQuorumMember>,
-    created: PyTimestamp,
+    participants: Vec<QuorumMember>,
+    created: Timestamp,
 }
 
-impl From<prost_types::Timestamp> for PyTimestamp {
+impl From<prost_types::Timestamp> for Timestamp {
     fn from(ts: prost_types::Timestamp) -> Self {
-        PyTimestamp {
+        Timestamp {
             seconds: ts.seconds,
             nanos: ts.nanos,
         }
@@ -422,8 +437,8 @@ fn string_to_pydict(py: Python, s: &str) -> PyResult<Option<Py<PyDict>>> {
     Ok(Some(dict.to_owned().into())) // convert Bound<PyDict> -> Py<PyDict>
 }
 
-fn convert_quorum_member(py: Python, m: &QuorumMember) -> PyResult<PyQuorumMember> {
-    Ok(PyQuorumMember {
+fn convert_quorum_member(py: Python, m: &torchftpb::QuorumMember) -> PyResult<QuorumMember> {
+    Ok(QuorumMember {
         replica_id: m.replica_id.clone(),
         address: m.address.clone(),
         store_address: m.store_address.clone(),
@@ -434,17 +449,17 @@ fn convert_quorum_member(py: Python, m: &QuorumMember) -> PyResult<PyQuorumMembe
     })
 }
 
-fn convert_quorum(py: Python, q: &Quorum) -> PyResult<PyQuorum> {
-    let participants: Vec<PyQuorumMember> = q
+fn convert_quorum(py: Python, q: &torchftpb::Quorum) -> PyResult<Quorum> {
+    let participants: Vec<QuorumMember> = q
         .participants
         .iter()
         .map(|m| convert_quorum_member(py, m)) // this expects &m
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(PyQuorum {
+    Ok(Quorum {
         quorum_id: q.quorum_id,
         participants: participants,
-        created: PyTimestamp::from(q.created.unwrap()),
+        created: Timestamp::from(q.created.unwrap()),
     })
 }
 
@@ -463,6 +478,7 @@ struct LighthouseClient {
 
 #[pymethods]
 impl LighthouseClient {
+    #[pyo3(signature = (addr, connect_timeout))]
     #[new]
     fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
         py.allow_threads(move || {
@@ -481,6 +497,20 @@ impl LighthouseClient {
         })
     }
 
+    /// quorum sends a request to the lighthouse server to form a quorum.
+    ///
+    /// Args:
+    ///     replica_id (str): The string id of the replica calling quorum.
+    ///     address (str): The address of the replica calling quorum.
+    ///     store_address (str): The address of the store.
+    ///     step (int): The step of the replica calling quorum.
+    ///     world_size (int): The world size of the replica calling quorum.
+    ///     shrink_only (bool): Whether the quorum is for shrinking only.
+    ///     timeout (timedelta): The timeout for quorum.
+    ///     data (Optional[dict]): The data to be passed with quorum.
+    ///
+    /// Returns:
+    ///     Quorum: Current quorum if successful.
     fn quorum<'py>(
         &self,
         py: Python<'_>,
@@ -492,11 +522,11 @@ impl LighthouseClient {
         shrink_only: bool,
         timeout: Duration,
         data: Option<&Bound<'_, PyDict>>,
-    ) -> Result<PyQuorum, StatusError> {
+    ) -> Result<Quorum, StatusError> {
         let data_string = pydict_to_string(py, data)?;
-        let quorum: Result<Quorum, StatusError> = py.allow_threads(move || {
+        let quorum: Result<torchftpb::Quorum, StatusError> = py.allow_threads(move || {
             let mut request = tonic::Request::new(LighthouseQuorumRequest {
-                requester: Some(QuorumMember {
+                requester: Some(torchftpb::QuorumMember {
                     replica_id: replica_id,
                     address: address,
                     store_address: store_address,
@@ -670,14 +700,14 @@ fn _torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // setup logging on import
     setup_logging().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
+    m.add_class::<Timestamp>()?;
+    m.add_class::<QuorumMember>()?;
+    m.add_class::<Quorum>()?;
     m.add_class::<ManagerServer>()?;
     m.add_class::<ManagerClient>()?;
     m.add_class::<LighthouseServer>()?;
     m.add_class::<LighthouseClient>()?;
     m.add_class::<QuorumResult>()?;
-    m.add_class::<PyQuorumMember>()?;
-    m.add_class::<PyQuorum>()?;
-    m.add_class::<PyTimestamp>()?;
     m.add_function(wrap_pyfunction!(lighthouse_main, m)?)?;
 
     Ok(())

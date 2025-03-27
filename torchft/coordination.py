@@ -19,6 +19,8 @@ from torchft._torchft import (
     LighthouseServer,
     ManagerClient,
     ManagerServer,
+    Quorum,
+    QuorumMember,
 )
 
 __all__ = [
@@ -26,4 +28,6 @@ __all__ = [
     "LighthouseServer",
     "ManagerServer",
     "ManagerClient",
+    "Quorum",
+    "QuorumMember",
 ]

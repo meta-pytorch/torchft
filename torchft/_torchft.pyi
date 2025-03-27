@@ -82,12 +82,11 @@ class Quorum:
     participants: List[QuorumMember]
     created: Timestamp
 
+@dataclass
 class LighthouseClient:
-    def __init__(
-        self,
-        addr: str,
-        connect_timeout: timedelta,
-    ) -> None: ...
+    addr: str
+    connect_timeout: timedelta
+
     def quorum(
         self,
         replica_id: str,
@@ -98,4 +97,4 @@ class LighthouseClient:
         shrink_only: bool,
         timeout: timedelta,
         data: Optional[dict[Hashable, object]] = None,
-    ) -> "Quorum": ...
+    ) -> Quorum: ...
