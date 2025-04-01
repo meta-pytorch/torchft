@@ -30,7 +30,7 @@ This repository implements techniques for doing a per-step fault tolerance so
 you can keep training if errors occur without interrupting the entire training
 job.
 
-[This is based off of the large scale training techniques presented at PyTorch
+[This is based on the large scale training techniques presented at PyTorch
 Conference 2024.](./media/fault_tolerance_poster.pdf)
 
 ## Overview
