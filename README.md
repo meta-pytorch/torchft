@@ -30,14 +30,72 @@ This repository implements techniques for doing a per-step fault tolerance so
 you can keep training if errors occur without interrupting the entire training
 job.
 
-This is based off of the large scale training techniques presented at PyTorch
-Conference 2024.
+[This is based off of the large scale training techniques presented at PyTorch
+Conference 2024.](./media/fault_tolerance_poster.pdf)
 
-[![](./media/fault_tolerance_poster.png)](./media/fault_tolerance_poster.pdf)
+## Overview
+
+torchft is designed to provide the primitives required to implement fault
+tolerance in any application/train script as well as the primitives needed to
+implement custom fault tolerance strategies.
+
+Out of the box torchft provides the following algorithms:
+
+* Fault Tolerant DDP
+* Fault Tolerant HSDP: fault tolerance across the replicated dimension with any mix of FSDP/TP/PP/CP/EP across the other dimensions.
+* LocalSGD
+* DiLoCo
+
+To implement these, torchft provides some key reusable components:
+
+1. Coordination primitives that can determine which workers are healthy via
+  heartbeating on a per-step basis
+2. Fault tolerant ProcessGroup implementations that report errors sanely and be
+  reinitialized gracefully.
+3. Checkpoint transports that can be used to do live recovery from a healthy
+  peer when doing scale up operations.
+
+The following component diagram shows the high level components and how they
+relate to each other:
+
+![Component Diagram](./media/overview.mmd.svg)
+
+See [torchft's documentation](https://pytorch.org/torchft) for more details.
+
+## Examples
+
+### torchtitan (Fault Tolerant HSDP)
+
+torchtitan provides an out of the box fault tolerant HSDP training loop built on
+top of torchft that can be used to train models such as Llama 3 70B.
+
+It also serves as a good example of how you can integrate torchft into your own training script for use with HSDP.
+
+See [torchtitan's documentation for end to end usage](https://github.com/pytorch/torchtitan/blob/main/docs/torchft.md).
+
+### Fault Tolerant DDP
+
+We have a minimal DDP train loop that highlights all of the key components in torchft.
+
+See [train_ddp.py](./train_ddp.py) for more info.
+
+
+### DiLoCo
+
+LocalSGD and DiLoCo are currently experimental.
+
+See
+[the diloco_train_loop/local_sgd_train_loop tests](./torchft/local_sgd_integ_test.py)
+for an example on how to integrate these algorithms into your training loop.
+
 
 ## Design
 
 torchft is designed to allow for fault tolerance when using training with replicated weights such as in DDP or HSDP (FSDP with DDP).
+
+See the [design doc](https://docs.google.com/document/d/1OZsOsz34gRDSxYXiKkj4WqcD9x0lP9TcsfBeu_SsOY4/edit) for the most detailed explanation.
+
+### Lighthouse
 
 torchft implements a lighthouse server that coordinates across the different
 replica groups and then a per replica group manager and fault tolerance library
@@ -46,7 +104,17 @@ that can be used in a standard PyTorch training loop.
 This allows for membership changes at the training step granularity which can
 greatly improve efficiency by avoiding stopping the world training on errors.
 
-![](./media/torchft-overview.png)
+![Lighthouse Diagram](./media/torchft-overview.png)
+
+### Fault Tolerant HSDP Algorithm
+
+torchft provides an implementation of a fault tolerant HSDP/DDP algorithm. The
+following diagram shows the high level operations that need to happen in the
+train loop to ensure everything stays consistent during a healing operation.
+
+![HSDP Diagram](./media/hsdp_train_loop.png)
+
+See the design doc linked above for more details.
 
 ## Prerequisites
 
@@ -82,10 +150,10 @@ This uses pyo3+maturin to build the package, you'll need maturin installed.
 
 If the installation command fails to invoke `cargo update` due to an inability to fetch the manifest, it may be caused by the `proxy`, `proxySSLCert`, and `proxySSLKey` settings in your .`gitconfig` file affecting the `cargo` command. To resolve this issue, try temporarily removing these fields from your `.gitconfig` before running the installation command.
 
-To install in editable mode w/ the Rust extensions you can use the normal pip install command:
+To install in editable mode w/ the Rust extensions and development dependencies, you can use the normal pip install command:
 
 ```sh
-pip install -e .
+pip install -e '.[dev]'
 ```
 
 ## Usage
