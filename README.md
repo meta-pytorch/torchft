@@ -42,7 +42,7 @@ implement custom fault tolerance strategies.
 Out of the box, torchft provides the following algorithms:
 
 * Fault Tolerant DDP
-* Fault Tolerant HSDP: fault tolerance across the replicated dimension with any mix of FSDP/TP/PP/CP/EP across the other dimensions.
+* Fault Tolerant HSDP: fault tolerance across the replicated dimension with any mix of FSDP/TP/etc across the other dimensions.
 * LocalSGD
 * DiLoCo
 
