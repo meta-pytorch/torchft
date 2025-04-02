@@ -64,6 +64,7 @@ from torch.distributed.distributed_c10d import (
     ReduceScatterOptions,
     Work,
 )
+from torch.distributed.tensor.device_mesh import _mesh_resources
 from torch.futures import Future
 from torch.utils._pytree import tree_any
 
@@ -1790,6 +1791,7 @@ class ManagedDeviceMesh(DeviceMesh):
             self.device_type = parent.device_type
         self._flatten_mesh_list: Tuple[DeviceMesh, ...] = tuple()
         self._thread_id: Optional[int] = None
+        self._hash: Optional[int] = None
 
     def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()
@@ -1804,7 +1806,7 @@ class ManagedDeviceMesh(DeviceMesh):
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
         if isinstance(mesh_dim_names, str):
             if mesh_dim_names == self.replicate_dim_name:
-                return ManagedDeviceMesh(
+                res_submesh = ManagedDeviceMesh(
                     mesh=None,
                     mesh_dim_names=(mesh_dim_names,),
                     replicate_pg=self.replicate_pg,
@@ -1812,27 +1814,34 @@ class ManagedDeviceMesh(DeviceMesh):
                     parent=self,
                 )
             elif mesh_dim_names in self.flatten_meshes:
-                return self.flatten_meshes[mesh_dim_names]
+                res_submesh = self.flatten_meshes[mesh_dim_names]
             else:
                 assert self.mesh is not None
-                return self.mesh[mesh_dim_names]
+                res_submesh = self.mesh[mesh_dim_names]
         else:
             assert isinstance(mesh_dim_names, tuple)
             if self.replicate_dim_name not in mesh_dim_names:
                 assert self.mesh is not None
-                return self.mesh[mesh_dim_names]
+                res_submesh = self.mesh[mesh_dim_names]
             else:
                 mesh_dim_names_wo_replicate = tuple(
                     n for n in mesh_dim_names if n != self.replicate_dim_name
                 )
                 assert self.mesh is not None
-                return ManagedDeviceMesh(
+                res_submesh = ManagedDeviceMesh(
                     self.mesh[mesh_dim_names_wo_replicate],
                     mesh_dim_names,
                     self.replicate_pg,
                     mesh_dim_names.index(self.replicate_dim_name),
                     parent=self,
                 )
+
+        # TODO: find a better way to do this that doesn't depend on device mesh
+        # internals
+        root = _mesh_resources.get_root_mesh(self)
+        _mesh_resources.child_to_root_mapping[res_submesh] = root
+
+        return res_submesh
 
     def _real_mesh_dim(self, mesh_dim: int) -> int:
         return mesh_dim - 1 if mesh_dim > self.replicate_dim else mesh_dim
@@ -1936,6 +1945,25 @@ class ManagedDeviceMesh(DeviceMesh):
 
     def get_all_groups(self) -> List[BaseProcessGroup]:
         raise NotImplementedError
+
+    def __repr__(self) -> str:
+        return f"ManagedDeviceMesh(mesh={self.mesh})"
+
+    def __hash__(self) -> int:
+        # lazily compute hash
+        if not self._hash:
+            self._hash = hash(
+                (
+                    self.mesh,
+                    self.mesh_dim_names,
+                    self.replicate_pg,
+                    self.replicate_dim,
+                    self.replicate_dim_name,
+                    self.parent,
+                    self.device_type,
+                )
+            )
+        return self._hash
 
 
 class _FlattenDeviceMesh(DeviceMesh):
