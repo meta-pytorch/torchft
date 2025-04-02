@@ -39,7 +39,6 @@ use crate::torchftpb::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
-use pyo3::wrap_pyfunction;
 
 // Get the number of threads to use for the tokio runtime
 fn num_threads() -> usize {
