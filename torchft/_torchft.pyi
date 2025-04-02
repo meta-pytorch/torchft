@@ -90,11 +90,11 @@ class LighthouseClient:
     def quorum(
         self,
         replica_id: str,
-        address: str,
-        store_address: str,
-        step: int,
-        world_size: int,
-        shrink_only: bool,
-        timeout: timedelta,
+        address: Optional[str] = None,
+        store_address: Optional[str] = None,
+        step: Optional[int] = None,
+        world_size: Optional[int] = None,
+        shrink_only: Optional[bool] = None,
+        timeout: Optional[timedelta] = None,
         data: Optional[dict[Hashable, object]] = None,
     ) -> Quorum: ...

@@ -109,6 +109,14 @@ class TestLighthouse(TestCase):
                 assert "my_data" in member.data
                 assert member.data["my_data"] == 1234
 
+            # Test the optional args
+            result = client.quorum(
+                replica_id="lighthouse_test",
+            )
+            assert result is not None
+            for member in result.participants:
+                assert member.replica_id == "lighthouse_test"
+
         finally:
             # Cleanup
             lighthouse.shutdown()
