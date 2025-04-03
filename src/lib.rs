@@ -501,44 +501,38 @@ impl LighthouseClient {
     ///
     /// Args:
     ///     replica_id (str): The string id of the replica calling quorum.
-    ///     address (Optional[str]): The address of the replica calling quorum.
-    ///     store_address (Optional[str]): The address of the store.
-    ///     step (Optional[int]): The step of the replica calling quorum.
-    ///     world_size (Optional[int]): The world size of the replica calling quorum.
-    ///     shrink_only (Optional[bool]): Whether the quorum is for shrinking only.
-    ///     timeout (Optional[timedelta]): The timeout for quorum.
+    ///     timeout (timedelta): The timeout for quorum.
+    ///     address (str): The address of the replica calling quorum. Default: "".
+    ///     store_address (str): The address of the store. Default: "".
+    ///     step (int): The step of the replica calling quorum. Default: 0.
+    ///     world_size (int): The world size of the replica calling quorum. Default: 0.
+    ///     shrink_only (bool): Whether the quorum is for shrinking only. Default: false.
     ///     data (Optional[dict]): The data to be passed with quorum.
     ///
     /// Returns:
     ///     Quorum: Current quorum if successful.
     #[pyo3(signature = (
         replica_id,
-        address = None,
-        store_address = None,
-        step = None,
-        world_size = None,
-        shrink_only = None,
-        timeout = None,
+        timeout,
+        address = "".to_string(),
+        store_address = "".to_string(),
+        step = 0,
+        world_size = 0,
+        shrink_only = false,
         data = None
     ))]
     fn quorum<'py>(
         &self,
         py: Python<'_>,
         replica_id: String,
-        address: Option<String>,
-        store_address: Option<String>,
-        step: Option<i64>,
-        world_size: Option<u64>,
-        shrink_only: Option<bool>,
-        timeout: Option<Duration>,
+        timeout: Duration,
+        address: String,
+        store_address: String,
+        step: i64,
+        world_size: u64,
+        shrink_only: bool,
         data: Option<&Bound<'_, PyDict>>,
     ) -> Result<Quorum, StatusError> {
-        let address = address.unwrap_or("localhost".to_string());
-        let store_address = store_address.unwrap_or("localhost".to_string());
-        let step = step.unwrap_or(0);
-        let world_size = world_size.unwrap_or(0);
-        let timeout = timeout.unwrap_or(Duration::from_millis(1000));
-        let shrink_only = shrink_only.unwrap_or(false);
         let data_string = pydict_to_string(py, data)?;
         let quorum: Result<torchftpb::Quorum, StatusError> = py.allow_threads(move || {
             let mut request = tonic::Request::new(LighthouseQuorumRequest {

@@ -112,6 +112,7 @@ class TestLighthouse(TestCase):
             # Test the optional args
             result = client.quorum(
                 replica_id="lighthouse_test",
+                timeout=timedelta(seconds=1),
             )
             assert result is not None
             for member in result.participants:
