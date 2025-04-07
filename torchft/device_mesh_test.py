@@ -98,17 +98,18 @@ class DeviceMeshTest(TestCase):
         manager = Mock(spec=Manager)
         manager._pg = ProcessGroupGloo()
 
-        device_mesh = ft_init_device_mesh(
-            device_type="cpu",
-            mesh_shape=(1, 1),
-            mesh_dim_names=("dp_replicate", "dp_shard"),
-            replicate_dim=0,
-            manager=manager,
-        )
+        for container in [tuple, list]:
+            device_mesh = ft_init_device_mesh(
+                device_type="cpu",
+                mesh_shape=container((1, 1)),
+                mesh_dim_names=container((f"dp_replicate_{container}", "dp_shard")),
+                replicate_dim=0,
+                manager=manager,
+            )
 
-        self.assertIsInstance(repr(device_mesh), str)
-        self.assertIsInstance(str(device_mesh), str)
-        self.assertEqual(hash(device_mesh), hash(device_mesh))
-        self.assertIsInstance(hash(device_mesh), int)
+            self.assertIsInstance(repr(device_mesh), str)
+            self.assertIsInstance(str(device_mesh), str)
+            self.assertEqual(hash(device_mesh), hash(device_mesh))
+            self.assertIsInstance(hash(device_mesh), int)
 
-        dist.destroy_process_group()
+            dist.destroy_process_group()
