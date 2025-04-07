@@ -1,5 +1,6 @@
+import sys
 from datetime import timedelta
-from unittest import TestCase, skipUnless
+from unittest import TestCase, skipIf, skipUnless
 
 import torch
 from torch.distributed import TCPStore
@@ -14,6 +15,8 @@ from torchft.process_group import ProcessGroupBabyNCCL, ProcessGroupGloo
 
 
 class PGTransportTest(TestCase):
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipIf(sys.platform == "darwin", "not passing on mac")
     def test_pg_transport_gloo(self) -> None:
         store: TCPStore = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False

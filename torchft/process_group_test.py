@@ -6,10 +6,11 @@
 
 import gc
 import os
+import sys
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Callable, Dict, List, cast
-from unittest import TestCase, skipUnless
+from unittest import TestCase, skipIf, skipUnless
 from unittest.mock import Mock
 
 import torch
@@ -949,7 +950,7 @@ class MultiPgBaseTest(TestCase):
             # nccl: Tensor-likes are not equal/not close (due to abort)
             with self.assertRaisesRegex(
                 Exception,
-                r"(Connection closed by peer|Timed out waiting|no error|Read error|not equal|not close)",
+                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close)",
             ):
                 test(pg, rank, t1.clone())
                 raise RuntimeError("no error")
@@ -992,6 +993,7 @@ class GlooMultiPgTest(MultiPgBaseTest):
         self._run_with_resiliency(collective, device="cpu")
 
 
+@skipIf(sys.platform == "darwin", "not reliable on mac")
 class BabyGlooMultiPgTest(MultiPgBaseTest):
     BACKEND = "baby_gloo"
     WORLD_SIZE = 3

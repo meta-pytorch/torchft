@@ -1,0 +1,70 @@
+name: Unit Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  unittest-mac:
+    runs-on: macos-m2-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup miniconda
+        uses: pytorch/test-infra/.github/actions/setup-miniconda@main
+        with:
+          python-version: 3.12
+
+      - name: Install Rust
+        run: |
+          set -ex
+
+          curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=stable --profile=default -y
+          . "$HOME/.cargo/env"
+
+      - name: Install Dependencies
+        run: |
+          set -ex
+
+          if [[ -n "$CONDA_ENV" ]]; then
+            # Use binaries under conda environment
+            export PATH="$CONDA_ENV/bin":$PATH
+          fi
+          . "$HOME/.cargo/env"
+
+          conda install libprotobuf -y
+
+          python -m pip install --upgrade pip
+
+          pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
+
+          pip install -e .[dev] -v
+
+      - name: Run Python Tests
+        run: |
+          set -ex
+
+          if [[ -n "$CONDA_ENV" ]]; then
+            # Use binaries under conda environment
+            export PATH="$CONDA_ENV/bin":$PATH
+          fi
+
+          # Run tests
+          pytest -v
+
+      - name: Run Rust Tests
+        run: |
+          set -ex
+
+          if [[ -n "$CONDA_ENV" ]]; then
+            # Use binaries under conda environment
+            export PATH="$CONDA_ENV/bin":$PATH
+          fi
+          . "$HOME/.cargo/env"
+
+          export RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
+
+          cargo test -v
