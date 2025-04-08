@@ -175,6 +175,7 @@ impl ManagerClient {
         step: i64,
         checkpoint_metadata: String,
         shrink_only: bool,
+        init_sync: bool,
         timeout: Duration,
     ) -> Result<QuorumResult, StatusError> {
         py.allow_threads(move || {
@@ -183,7 +184,7 @@ impl ManagerClient {
                 step: step,
                 checkpoint_metadata: checkpoint_metadata,
                 shrink_only: shrink_only,
-                init_sync: true,
+                init_sync: init_sync,
             });
 
             // This timeout is processed on the server side so we also enable

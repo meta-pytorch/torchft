@@ -425,24 +425,22 @@ fn compute_quorum_results(
 
     // Compute recovery assignments
 
-    let all_recover_dst_ranks = if init_sync {
-        // Nodes are recovering if
-        // 1. not at the max step
-        // 2. max_step == 0 and not the primary replica
-        participants
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                if p.step != max_step || max_step == 0 && primary.replica_id != p.replica_id {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        Vec::<usize>::new()
-    };
+    let force_recover = init_sync && max_step == 0;
+
+    // Nodes are recovering if
+    // 1. not at the max step (init_sync)
+    // 2. max_step == 0 and not the primary replica
+    let all_recover_dst_ranks: Vec<usize> = participants
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            if p.step != max_step || force_recover && primary.replica_id != p.replica_id {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     let all_recover_dst_ranks_set = all_recover_dst_ranks.iter().collect::<HashSet<_>>();
     let up_to_date_ranks: Vec<usize> = participants
@@ -891,7 +889,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_quorum_results_skip_init_sync() -> Result<()> {
-        let quorum = Quorum {
+        let mut quorum = Quorum {
             quorum_id: 1,
             participants: vec![
                 QuorumMember {
@@ -901,72 +899,36 @@ mod tests {
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
+                    data: String::new(),
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
                     address: "addr_1".to_string(),
                     store_address: "store_addr_1".to_string(),
-                    step: 1,
-                    world_size: 1,
-                    shrink_only: false,
-                },
-                QuorumMember {
-                    replica_id: "replica_2".to_string(),
-                    address: "addr_2".to_string(),
-                    store_address: "store_addr_2".to_string(),
                     step: 0,
                     world_size: 1,
                     shrink_only: false,
-                },
-                QuorumMember {
-                    replica_id: "replica_3".to_string(),
-                    address: "addr_3".to_string(),
-                    store_address: "store_addr_3".to_string(),
-                    step: 1,
-                    world_size: 1,
-                    shrink_only: false,
-                },
-                QuorumMember {
-                    replica_id: "replica_4".to_string(),
-                    address: "addr_4".to_string(),
-                    store_address: "store_addr_4".to_string(),
-                    step: 0,
-                    world_size: 1,
-                    shrink_only: false,
+                    data: String::new(),
                 },
             ],
             created: None,
         };
 
-        // rank 0
-
-        let results = compute_quorum_results("replica_0", 0, &quorum, false)?;
+        // baseline w/ init_sync=true
+        let results = compute_quorum_results("replica_0", 0, &quorum, true)?;
         assert!(!results.heal);
-        assert_eq!(results.recover_src_manager_address, "".to_string());
-        assert_eq!(results.replica_rank, 0);
-        assert_eq!(results.recover_src_rank, None);
-        assert!(results.recover_dst_ranks.is_empty());
 
+        let results = compute_quorum_results("replica_1", 0, &quorum, true)?;
+        assert!(results.heal);
+
+        // init_sync=false
         let results = compute_quorum_results("replica_1", 0, &quorum, false)?;
         assert!(!results.heal);
-        assert_eq!(results.recover_src_manager_address, "".to_string());
-        assert_eq!(results.replica_rank, 1);
-        assert_eq!(results.recover_src_rank, None);
-        assert!(results.recover_dst_ranks.is_empty());
 
-        let results = compute_quorum_results("replica_3", 0, &quorum, false)?;
-        assert!(!results.heal);
-        assert_eq!(results.recover_src_manager_address, "".to_string());
-        assert_eq!(results.replica_rank, 3);
-        assert_eq!(results.recover_src_rank, None);
-        assert!(results.recover_dst_ranks.is_empty());
-
-        let results = compute_quorum_results("replica_1", 1, &quorum, false)?;
-        assert!(!results.heal);
-        assert_eq!(results.recover_src_manager_address, "".to_string());
-        assert_eq!(results.replica_rank, 1);
-        assert_eq!(results.recover_src_rank, None);
-        assert!(results.recover_dst_ranks.is_empty());
+        // init_sync=false, step=1
+        quorum.participants[0].step = 1;
+        let results = compute_quorum_results("replica_1", 0, &quorum, false)?;
+        assert!(results.heal);
 
         Ok(())
     }

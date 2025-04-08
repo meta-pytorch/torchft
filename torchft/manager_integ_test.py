@@ -25,6 +25,8 @@ from torchft.process_group import ProcessGroupBabyNCCL, ProcessGroupGloo
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+INIT_LOCK: threading.Lock = threading.Lock()
+
 
 class MyModel(nn.Module):
     def __init__(self, in_dim: int = 3, out_dim: int = 4) -> None:
@@ -191,7 +193,13 @@ def ddp_train_loop(
         )
         stack.callback(lambda: manager.shutdown(wait=False))
 
-        m: nn.Module = DistributedDataParallel(manager, MyModel())
+        with INIT_LOCK:
+            # We need to lock during init for testing init_sync=False as all
+            # threads share the same RNG
+            torch.manual_seed(42)
+            m: nn.Module = MyModel()
+
+        m: nn.Module = DistributedDataParallel(manager, m)
         optimizer: optim.Optimizer = OptimizerWrapper(
             manager, optim.Adam(m.parameters())
         )
@@ -270,7 +278,11 @@ class ManagerIntegTest(TestCase):
             ),
         ]
     )
-    def test_ddp_recovery(self, name: str, use_async_quorum: bool) -> None:
+    def test_ddp_recovery(
+        self,
+        name: str,
+        use_async_quorum: bool,
+    ) -> None:
         lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=2,
@@ -302,7 +314,11 @@ class ManagerIntegTest(TestCase):
             state_dicts = []
 
             for fut in as_completed(futures):
-                state_dicts.append(fut.result())
+                try:
+                    state_dicts.append(fut.result())
+                except Exception as e:
+                    print(e)
+                    raise
 
         lighthouse.shutdown()
 
@@ -310,6 +326,53 @@ class ManagerIntegTest(TestCase):
             torch.testing.assert_close(state_dict, state_dicts[0])
 
         self.assertEqual(failure_injectors[1].count, 1)
+
+    def test_ddp_skip_init_sync(
+        self,
+    ) -> None:
+        lighthouse = LighthouseServer(
+            bind="[::]:0",
+            min_replicas=2,
+        )
+        num_replicas = 2
+        futures = []
+
+        # no failures
+        failure_injectors = [
+            FailureInjector(),
+            FailureInjector(),
+        ]
+
+        with ThreadPoolExecutor(max_workers=num_replicas) as executor:
+            for replica_id, failure_injector in zip(
+                range(num_replicas), failure_injectors
+            ):
+                runner = Runner(
+                    replica_id=replica_id,
+                    num_replicas=num_replicas,
+                    lighthouse_address=lighthouse.address(),
+                    failure_injector=failure_injector,
+                    manager_args={
+                        "use_async_quorum": False,
+                        "init_sync": False,
+                    },
+                    train_loop=ddp_train_loop,
+                )
+                futures.append(executor.submit(runner.run_replica))
+
+            state_dicts = []
+
+            for fut in as_completed(futures):
+                try:
+                    state_dicts.append(fut.result())
+                except Exception as e:
+                    print(e)
+                    raise
+
+        lighthouse.shutdown()
+
+        for state_dict in state_dicts:
+            torch.testing.assert_close(state_dict, state_dicts[0])
 
     def test_ddp_recovery_multi_rank(self) -> None:
         lighthouse = LighthouseServer(

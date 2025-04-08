@@ -40,6 +40,7 @@ class TestManager(TestCase):
         min_replica_size: int = 2,
         world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
         timeout: timedelta = timedelta(seconds=10),
+        init_sync: bool = True,
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         pg.errored.return_value = None
@@ -67,6 +68,7 @@ class TestManager(TestCase):
                 use_async_quorum=use_async_quorum,
                 world_size_mode=world_size_mode,
                 timeout=timeout,
+                init_sync=init_sync,
             )
             self.manager = manager
         return manager
@@ -617,7 +619,12 @@ class TestManager(TestCase):
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_skip_init(self, client_mock: MagicMock) -> None:
-        manager = self._create_manager(use_async_quorum=False)
+        manager = self._create_manager(
+            use_async_quorum=False,
+            init_sync=False,
+        )
+
+        self.assertFalse(manager._init_sync)
 
         quorum = QuorumResult()
         quorum.quorum_id = 123
@@ -633,16 +640,8 @@ class TestManager(TestCase):
         client_mock()._quorum.return_value = quorum
 
         manager.start_quorum()
-        self.assertEqual(
-            client_mock()._quorum.call_args.kwargs["init_sync"], True
-        )
+        self.assertEqual(client_mock()._quorum.call_args.kwargs["init_sync"], False)
 
-        manager.start_quorum(init_sync=True)
-        self.assertEqual(
-            client_mock()._quorum.call_args.kwargs["init_sync"], True
-        )
-        
-        manager.start_quorum(init_sync=False)
-        self.assertEqual(
-            client_mock()._quorum.call_args.kwargs["init_sync"], False
-        )
+        manager._init_sync = True
+        manager.start_quorum()
+        self.assertEqual(client_mock()._quorum.call_args.kwargs["init_sync"], True)

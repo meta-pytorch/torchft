@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import timedelta
 from enum import Enum
-from typing import Callable, cast, Dict, List, Optional, TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
@@ -106,6 +106,7 @@ class Manager:
         hostname: str = socket.gethostname(),
         heartbeat_interval: timedelta = timedelta(milliseconds=100),
         checkpoint_transport: Optional[CheckpointTransport[Dict[str, T]]] = None,
+        init_sync: bool = True,
     ) -> None:
         """
         Args:
@@ -143,6 +144,9 @@ class Manager:
             hostname: if rank==0, the hostname to advertise to the lighthouse server
             checkpoint_transport: the checkpoint transport to use for
                 transfering checkpoints to recovering replicas, defaults to HTTPTransport
+            init_sync: whether to synchronize the model weights on step 0. If
+                all of the model weights are initialized identically via
+                ``torch.set_seed`` you should set this to False.
         """
         self._load_state_dict = load_state_dict
         self._user_state_dict = state_dict
@@ -152,6 +156,7 @@ class Manager:
         self._quorum_timeout = quorum_timeout
         self._connect_timeout = connect_timeout
         self._world_size_mode = world_size_mode
+        self._init_sync = init_sync
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
         store_port = store_port or int(os.environ["MASTER_PORT"])
@@ -455,7 +460,7 @@ class Manager:
             checkpoint_metadata=self._checkpoint_transport.metadata(),
             shrink_only=shrink_only,
             timeout=quorum_timeout,
-            init_sync=self.init_sync,
+            init_sync=self._init_sync,
         )
 
         quorum_id = quorum.quorum_id
