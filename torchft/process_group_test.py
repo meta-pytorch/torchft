@@ -997,7 +997,7 @@ class MultiPgBaseTest(TestCase):
         self._collect(futs)
 
 
-class GlooMultiPgTest(MultiPgBaseTest):
+class NormalGlooMultiPgTest(MultiPgBaseTest):
     BACKEND = "gloo"
     WORLD_SIZE = 3
     SKIP = [
