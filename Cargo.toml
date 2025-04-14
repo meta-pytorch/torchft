@@ -14,7 +14,7 @@ gethostname = "0.5.0"
 log = "0.4.22"
 prost = "0.13.3"
 prost-types = "0.13.3"
-pyo3 = {version = "0.22.3", features = ["extension-module"]}
+pyo3 = {version = "0.24", features = ["extension-module"]}
 rand = "0.8.5"
 slog = "2.7.0"
 slog-stdlog = "4.1.1"

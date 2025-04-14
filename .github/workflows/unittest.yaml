@@ -9,16 +9,23 @@ on:
 jobs:
   unittest:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runs-on: "linux.2xlarge"
             gpu-arch-type: "cpu"
             gpu-arch-version: ""
-          - runs-on: "linux.4xlarge.nvidia.gpu"
+            torch-version: "stable"
+          - runs-on: "linux.g5.12xlarge.nvidia.gpu"
             gpu-arch-type: "cuda"
-            gpu-arch-version: "12.1"
+            gpu-arch-version: "12.4"
+            torch-version: "stable"
+          - runs-on: "linux.g5.12xlarge.nvidia.gpu"
+            gpu-arch-type: "cuda"
+            gpu-arch-version: "12.4"
+            torch-version: "nightly"
 
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       timeout: 120
       runner: ${{ matrix.runs-on }}
@@ -28,7 +35,7 @@ jobs:
         set -ex
 
         # install python and protobuf
-        conda create -n venv python=3.10 protobuf -y
+        conda create -n venv python=3.12 libprotobuf -y
         conda activate venv
         python -m pip install --upgrade pip
 
@@ -36,7 +43,14 @@ jobs:
         curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=stable --profile=default -y
         . "$HOME/.cargo/env"
 
+        # Optionally install torch nightly, pulls latest CUDA from pip otherwise
+        if [ "${{ matrix.torch-version }}" = "nightly" ]; then
+          pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+        fi
+
+        # Install dependencies
         pip install -e .[dev] -v
 
+        # Run tests
         pytest -v
         cargo test -v

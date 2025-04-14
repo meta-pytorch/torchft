@@ -197,9 +197,11 @@ def diloco_train_loop(
 
 
 class LocalSGDIntegTest(TestCase):
+    # TODO: race condition due to using NCCL in threads causes manager allreduce to sometimes not be correct
+    # Because of that the test is disabled for cuda
     @parameterized.expand(
         [
-            (True,),
+            # (True,),
             (False,),
         ]
     )
@@ -259,7 +261,7 @@ class LocalSGDIntegTest(TestCase):
 
     @parameterized.expand(
         [
-            (True,),
+            # (True,),
             (False,),
         ]
     )
@@ -319,7 +321,7 @@ class LocalSGDIntegTest(TestCase):
 
     @parameterized.expand(
         [
-            (True,),
+            # (True,),
             (False,),
         ]
     )

@@ -1,10 +1,11 @@
 import time
+from datetime import timedelta
 from unittest import TestCase
 
 import torch.distributed as dist
 
 from torchft import Manager, ProcessGroupGloo
-from torchft._torchft import LighthouseServer
+from torchft._torchft import LighthouseClient, LighthouseServer, Quorum, QuorumMember
 
 
 class TestLighthouse(TestCase):
@@ -65,3 +66,58 @@ class TestLighthouse(TestCase):
             heartbeat_timeout_ms=100,
         )
         lighthouse.shutdown()
+
+    def test_lighthouse_client_behavior(self) -> None:
+        """Test that using LighthouseClient with a generic quorum behavior"""
+        # To test, we create a lighthouse with 100ms and 400ms join timeouts
+        # and measure the time taken to validate the quorum.
+        lighthouse = LighthouseServer(
+            bind="[::]:0",
+            min_replicas=1,
+            join_timeout_ms=100,
+        )
+
+        # Create a manager that tries to join
+        try:
+            client = LighthouseClient(
+                addr=lighthouse.address(),
+                connect_timeout=timedelta(seconds=1),
+            )
+            store = dist.TCPStore(
+                host_name="localhost",
+                port=0,
+                is_master=True,
+                wait_for_workers=False,
+            )
+            result = client.quorum(
+                replica_id="lighthouse_test",
+                address="localhost",
+                store_address=f"localhost:{store.port}",
+                step=1,
+                world_size=1,
+                shrink_only=False,
+                timeout=timedelta(seconds=1),
+                data={"my_data": 1234},
+            )
+            assert result is not None
+            assert isinstance(result, Quorum)
+            assert len(result.participants) == 1
+            for member in result.participants:
+                assert isinstance(member, QuorumMember)
+                assert member.replica_id == "lighthouse_test"
+                assert member.data is not None
+                assert "my_data" in member.data
+                assert member.data["my_data"] == 1234
+
+            # Test the optional args
+            result = client.quorum(
+                replica_id="lighthouse_test",
+                timeout=timedelta(seconds=1),
+            )
+            assert result is not None
+            for member in result.participants:
+                assert member.replica_id == "lighthouse_test"
+
+        finally:
+            # Cleanup
+            lighthouse.shutdown()

@@ -40,18 +40,14 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-# pyre-fixme[21]: no attribute ProcessGroupNCCL
 # pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
     DeviceMesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
-    ProcessGroupNCCL as BaseProcessGroupNCCL,
     Store,
     TCPStore,
-    get_rank,
-    init_device_mesh,
 )
 from torch.distributed.distributed_c10d import (
     AllgatherOptions,
@@ -67,6 +63,9 @@ from torch.distributed.distributed_c10d import (
 from torch.futures import Future
 from torch.utils._pytree import tree_any
 
+# We import these for backwards compatibility
+from torchft.device_mesh import *  # noqa: F401
+from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
 
 if TYPE_CHECKING:
@@ -83,7 +82,7 @@ _FUTURE_EXCEPTION = "fut_exception"
 T = TypeVar("T")
 
 
-def create_store_client(store_addr: str) -> Store:
+def create_store_client(store_addr: str, timeout: timedelta) -> Store:
     """
     Creates a PrefixStore(TCPStore(...)) client from an address in the format:
 
@@ -99,6 +98,7 @@ def create_store_client(store_addr: str) -> Store:
         port=int(port),
         is_master=False,
         wait_for_workers=False,
+        timeout=timeout,
     )
     store = PrefixStore(prefix, store)
     return store
@@ -330,11 +330,23 @@ class ProcessGroup(BaseProcessGroup):
         """
         dist.destroy_process_group(self)
 
+    def abort(self) -> None:
+        """
+        Aborts the process group.
+        """
+        pass
+
     def shutdown(self) -> None:
         """
         Shuts down the process group.
         """
         pass
+
+    def errored(self) -> Optional[Exception]:
+        """
+        Whether an async error occured that requires reconfiguration.
+        """
+        return None
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
@@ -343,11 +355,20 @@ class ProcessGroup(BaseProcessGroup):
 class ProcessGroupWrapper(ProcessGroup):
     """
     This is a wrapper around any ProcessGroup with a reconfiguration method.
+
+    Args:
+        timeout: timeout for reconfiguration for TCPStore
+        pg: optional ProcessGroup to use, if None a new one will be created
     """
 
-    def __init__(self, pg: Optional[ProcessGroup] = None) -> None:
+    def __init__(
+        self,
+        timeout: timedelta = timedelta(seconds=60),
+        pg: Optional[ProcessGroup] = None,
+    ) -> None:
         super().__init__(0, 1)
         self._pg: Optional[BaseProcessGroup] = pg
+        self._timeout = timeout
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         pg = self._pg
@@ -355,14 +376,29 @@ class ProcessGroupWrapper(ProcessGroup):
             pg.configure(store_addr, rank, world_size)
             return
 
-        if pg is not None:
-            if hasattr(pg, "abort"):
-                pg.abort()  # pyre-fixme[16]: no attribute abort
-            self._pg = None
+        # abort if already initialized
+        self.abort()
 
-        store = create_store_client(store_addr)
+        store = create_store_client(store_addr, timeout=self._timeout)
 
         self._pg = self._create_pg(store, rank, world_size)
+
+    def abort(self) -> None:
+        pg = self._pg
+        if pg is not None:
+            if hasattr(pg, "abort"):
+                # pyre-fixme[16]: has no attribute abort
+                pg.abort()
+            else:
+                try:
+                    backend = pg._get_backend(torch.device("cuda"))
+                except RuntimeError:
+                    backend = None
+                if backend is not None and hasattr(backend, "abort"):
+                    # pyre-fixme[16]: no attribute abort
+                    backend.abort()
+
+            self._pg = None
 
     def shutdown(self) -> None:
         # TODO: abort PG if possible
@@ -371,13 +407,22 @@ class ProcessGroupWrapper(ProcessGroup):
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         raise NotImplementedError("not implemented")
 
+    def _wrap_work(self, work: Work, opts: object) -> Work:
+        return work
+
+    def _opts_hook(self, opts: T) -> T:
+        return opts
+
     def allgather(
         self,
         output_tensors: List[List[torch.Tensor]],
         input_tensor: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self.parent.allgather(output_tensors, input_tensor, opts)
+        return self._wrap_work(
+            self.parent.allgather(output_tensors, input_tensor, self._opts_hook(opts)),
+            opts,
+        )
 
     def allgather_into_tensor_coalesced(
         self,
@@ -385,17 +430,24 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self.parent.allgather_into_tensor_coalesced(
-            output_tensors, input_tensors, opts
+        return self._wrap_work(
+            self.parent.allgather_into_tensor_coalesced(
+                output_tensors, input_tensors, self._opts_hook(opts)
+            ),
+            opts,
         )
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
-        return self.parent.allreduce(tensors, opts)
+        return self._wrap_work(
+            self.parent.allreduce(tensors, self._opts_hook(opts)), opts
+        )
 
     def allreduce_coalesced(
         self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
     ) -> Work:
-        return self.parent.allreduce_coalesced(tensors, opts)
+        return self._wrap_work(
+            self.parent.allreduce_coalesced(tensors, self._opts_hook(opts)), opts
+        )
 
     def alltoall_base(
         self,
@@ -405,18 +457,27 @@ class ProcessGroupWrapper(ProcessGroup):
         input_split_sizes: List[int],
         opts: AllToAllOptions,
     ) -> Work:
-        return self.parent.alltoall_base(
-            output_buffer, input_buffer, output_split_sizes, input_split_sizes, opts
+        return self._wrap_work(
+            self.parent.alltoall_base(
+                output_buffer,
+                input_buffer,
+                output_split_sizes,
+                input_split_sizes,
+                self._opts_hook(opts),
+            ),
+            opts,
         )
 
     def barrier(self, opts: BarrierOptions) -> Work:
-        return self.parent.barrier(opts)
+        return self._wrap_work(self.parent.barrier(self._opts_hook(opts)), opts)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
-        return self.parent.broadcast(tensor_list, opts)
+        return self._wrap_work(
+            self.parent.broadcast(tensor_list, self._opts_hook(opts)), opts
+        )
 
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
-        return self.parent.recv(tensors, src_rank, tag)
+        return self._wrap_work(self.parent.recv(tensors, src_rank, tag), None)
 
     def reduce_scatter(
         self,
@@ -424,7 +485,12 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[List[torch.Tensor]],
         opts: object,
     ) -> Work:
-        return self.parent.reduce_scatter(output_tensors, input_tensors, opts)
+        return self._wrap_work(
+            self.parent.reduce_scatter(
+                output_tensors, input_tensors, self._opts_hook(opts)
+            ),
+            opts,
+        )
 
     def reduce_scatter_tensor_coalesced(
         self,
@@ -432,12 +498,15 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: ReduceScatterOptions,
     ) -> Work:
-        return self.parent.reduce_scatter_tensor_coalesced(
-            output_tensors, input_tensors, opts
+        return self._wrap_work(
+            self.parent.reduce_scatter_tensor_coalesced(
+                output_tensors, input_tensors, self._opts_hook(opts)
+            ),
+            opts,
         )
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
-        return self.parent.send(tensors, dst_rank, tag)
+        return self._wrap_work(self.parent.send(tensors, dst_rank, tag), None)
 
     def size(self) -> int:
         return self.parent.size()
@@ -455,10 +524,6 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     """
     This is a reconfigurable version of ProcessGroupGloo.
     """
-
-    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
-        super().__init__()
-        self._timeout = timeout
 
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         pg = BaseProcessGroup(store, rank, world_size)
@@ -516,18 +581,115 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         )
 
 
+class _WorkCUDATimeout(Work):
+    def __init__(self, pg: ProcessGroup, work: Work, timeout: timedelta) -> None:
+        super().__init__()
+        self._pg = pg
+        self._work = work
+        self._timeout = timeout
+
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
+        with self._stream_timeout(self._pg, self._timeout):
+            # not async, just return
+            if self._work is None:
+                return True
+
+            if timeout is not None:
+                return self._work.wait(timeout)
+
+            return self._work.wait()
+
+    @classmethod
+    @contextmanager
+    def _stream_timeout(
+        cls, pg: ProcessGroup, timeout: timedelta
+    ) -> Generator[None, None, None]:
+        """
+        Set a timeout on the CUDA stream for the given process group.
+
+        This does not hold a reference to self to avoid holding the work
+        object/tensors longer than necessary.
+
+        Args:
+            pg: The process group to call abort on.
+            timeout: The timeout to set on the CUDA stream.
+        """
+
+        def callback() -> None:
+            logger.error(f"aborting after {timeout}!")
+            pg.abort()
+
+        # make sure .wait() can be cancelled if it blocks i.e. in barrier
+        with context_timeout(callback, timeout):
+            yield
+
+        # Cancel work if the cuda stream doesn't complete
+        stream_timeout(callback, timeout)
+
+    def get_future(self) -> torch.futures.Future[object]:
+        fut = self._work.get_future()
+
+        def done_callback(fut: torch.futures.Future[object]) -> None:
+            fut.wait()
+
+            self._stream_timeout(self._pg, self._timeout)
+
+        fut.add_done_callback(done_callback)
+        return fut
+
+
 class ProcessGroupNCCL(ProcessGroupWrapper):
     """
     This is a reconfigurable version of ProcessGroupNCCL.
 
-    WARNING: this may result in deadlocks due to NCCL error handling. This is
-    provided for completeness but your mileage may vary.
+    If you are using a supported version of NCCL (NCCL >= 2.26, torch >= 2.7)
+    this will attempt to use ncclCommAbort to recover from any timeouts.
 
-    TODO: verify shutdown correctness with latest NCCL. This currently will call
-    abort when reconfiguring, we need to ensure this is safe.
+    This uses a Python user space event loop to asynchronously wait for the NCCL
+    operations to complete. This should not be used with very long timeouts as
+    the timeout entries are not cleaned up until the elapsed duration completes
+    which may result in slowness or excess memory usage.
+
+    WARNING: this may result in deadlocks due to NCCL error handling and on old
+    versions of torch/NCCL will result in deadlocks.
+
+    Args:
+        timeout: the timeout to use for NCCL operations.
     """
 
+    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
+        super().__init__(timeout)
+        self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
+
+        self._errored: Optional[Exception] = None
+
+    def _opts_hook(self, opts: T) -> T:
+        if not self._use_abort:
+            return opts
+
+        # We need to clear the timeout to apply our own timeout that doesn't
+        # crash the whole program.
+        if hasattr(opts, "timeout"):
+            # apply default timeout to disable
+            opts.timeout = AllgatherOptions().timeout
+        return opts
+
+    def _wrap_work(self, work: Work, opts: object) -> Work:
+        if not self._use_abort:
+            return work
+
+        timeout = self._timeout
+        # pyre-fixme[16]: no attribute timeout
+        if hasattr(opts, "timeout") and opts.timeout.total_seconds() > 0:
+            timeout = opts.timeout
+        return _WorkCUDATimeout(self, work, timeout)
+
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        # pyre-fixme[21]: no attribute ProcessGroupNCCL
+        from torch.distributed import ProcessGroupNCCL as BaseProcessGroupNCCL
+
+        self._errored = None
+
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
@@ -537,6 +699,18 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
         )
         return pg
+
+    def abort(self) -> None:
+        super().abort()
+
+        self._errored = RuntimeError("aborted")
+
+    def errored(self) -> Optional[Exception]:
+        pg = self._pg
+        if pg is not None:
+            pg._wait_for_pending_works()
+
+        return self._errored
 
     def getBackendName(self) -> str:
         return "torchft-nccl"
@@ -731,7 +905,7 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
     """
 
     def __init__(self, pg: ProcessGroup) -> None:
-        super().__init__(pg)
+        super().__init__(pg=pg)
 
         self._error: Optional[Exception] = None
 
@@ -812,7 +986,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
     """
 
     def __init__(self, manager: "Manager") -> None:
-        super().__init__(manager._pg)
+        super().__init__(pg=manager._pg)
 
         self._manager = manager
 
@@ -848,11 +1022,13 @@ class _BabyWork(Work):
         self,
         pg: "ProcessGroupBaby",
         op_id: int,
+        stream: Optional[torch.cuda.Stream],
     ) -> None:
         super().__init__()
 
         self._pg = pg
         self._op_id = op_id
+        self._stream = stream
 
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
         return self._pg._wait(self._op_id, timeout)
@@ -864,7 +1040,7 @@ class _BabyWork(Work):
         raise NotImplementedError("not implemented")
 
     def get_future(self) -> Future[object]:
-        return self._pg._get_future(self._op_id)
+        return self._pg._get_future(self._op_id, self._stream)
 
     def __del__(self) -> None:
         self._pg._del(self._op_id)
@@ -882,6 +1058,20 @@ def _is_any_cuda(obj: object) -> bool:
 @dataclass
 class _OpMetadata:
     work: Work
+    stream: Optional[torch.cuda.Stream]
+
+    @contextmanager
+    def set_stream(self) -> Generator[None, None, None]:
+        if self.stream is not None:
+            with torch.cuda.stream(self.stream):
+                yield
+        else:
+            yield
+
+
+@dataclass
+class _FutureMetadata:
+    future: Future[object]
     stream: Optional[torch.cuda.Stream]
 
     @contextmanager
@@ -930,7 +1120,7 @@ class ProcessGroupBaby(ProcessGroup):
         self._pipe: Optional[_MonitoredPipe] = None
         self._future_pipe: Optional[_MonitoredPipe] = None
         self._future_thread: Optional[threading.Thread] = None
-        self._futures: Dict[int, Future[object]] = {}
+        self._futures: Dict[int, _FutureMetadata] = {}
         self._futures_lock = threading.Lock()
 
         self._next_op_id = 0
@@ -1033,7 +1223,11 @@ class ProcessGroupBaby(ProcessGroup):
             if curr_device >= 0 and torch.cuda.is_available():
                 torch.cuda.set_device(curr_device)
 
-            store = create_store_client(store_addr)
+            store = create_store_client(
+                store_addr,
+                # default TCPStore timeout is 5 minutes
+                timeout=timedelta(minutes=5),
+            )
 
             try:
                 pg = cls._create_pg(store, rank, world_size)
@@ -1168,28 +1362,34 @@ class ProcessGroupBaby(ProcessGroup):
                     cmd = future_pipe.recv(timedelta(seconds=10))
                 except TimeoutError:
                     continue
+                except OSError:
+                    # subprocess exited
+                    break
 
                 op_id, mode, data, event = cast(
                     Tuple[int, str, object, Optional[torch.cuda.Event]], cmd
                 )
                 with self._futures_lock:
-                    fut = self._futures[op_id]
+                    meta = self._futures[op_id]
                     del self._futures[op_id]
-                if mode == _FUTURE_RESULT:
-                    if event is not None:
-                        event.wait()
-                    fut.set_result(data)
-                elif mode == _FUTURE_EXCEPTION:
-                    fut.set_exception(data)
-                else:
-                    raise ValueError(f"unknown mode {mode}")
+                with meta.set_stream():
+                    if mode == _FUTURE_RESULT:
+                        if event is not None:
+                            event.wait()
+                        meta.future.set_result(data)
+                    elif mode == _FUTURE_EXCEPTION:
+                        meta.future.set_exception(data)
+                    else:
+                        raise ValueError(f"unknown mode {mode}")
         except Exception as e:
             logger.exception(f"got unexpected error in future handler: {e}")
 
-    def _get_future(self, op_id: int) -> Future[object]:
+    def _get_future(
+        self, op_id: int, stream: Optional[torch.cuda.Stream]
+    ) -> Future[object]:
         with self._futures_lock:
             fut = Future()  # pyre-fixme[29]: is not a function
-            self._futures[op_id] = fut
+            self._futures[op_id] = _FutureMetadata(future=fut, stream=stream)
             assert self._pipe is not None
             self._pipe.send(("future", op_id))
 
@@ -1213,7 +1413,11 @@ class ProcessGroupBaby(ProcessGroup):
 
     def _del(self, op_id: int) -> None:
         assert self._pipe is not None
-        self._pipe.send(("del", op_id))
+        try:
+            self._pipe.send(("del", op_id))
+        except OSError:
+            # if pipe is closed we can safely do nothing
+            pass
 
     def _run_func(self, func: str, *args: object, **kwargs: object) -> Work:
         pipe = self._pipe
@@ -1247,7 +1451,11 @@ class ProcessGroupBaby(ProcessGroup):
             ),
         )
 
-        return _BabyWork(pg=self, op_id=op_id)
+        return _BabyWork(
+            pg=self,
+            op_id=op_id,
+            stream=torch.cuda.current_stream() if is_cuda else None,
+        )
 
     def allgather(
         self,
@@ -1501,10 +1709,17 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
 
     WARNING: If the child process is killed while an operation is running, CUDA
     tensors may leak in the current PyTorch implementation. TODO fix
+
+    WARNING: As this uses a separate CUDA context for the subprocess, performance
+    may be slower than using NCCL directly. Separate CUDA contexts can not run
+    at the same time so network and compute kernels will not overlap execution
+    and instead do time sharing which may reduce GPU utilization.
     """
 
     @classmethod
     def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        from torch.distributed import ProcessGroupNCCL as BaseProcessGroupNCCL
+
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
@@ -1517,280 +1732,3 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
 
     def getBackendName(self) -> str:
         return "torchft-baby-nccl"
-
-
-def extend_device_mesh(
-    mesh: DeviceMesh, pg: ProcessGroup, name: str = "dp", dim: int = 0
-) -> DeviceMesh:
-    """
-    This is a helper method to extend a traditional DeviceMesh with a torchft ProcessGroup for usage with DeviceMesh based APIs such as FSDPv2 with hybrid sharding.
-
-    Resizable PGs aren't natively supported by DeviceMesh so we lie to
-    DeviceMesh and say the PG is world size 1. This is fine as long as any
-    numeric scaling is handled at the PG level.
-
-    Args:
-        mesh: The DeviceMesh to extend
-        pg: The ProcessGroup to add to the mesh
-        name: The name of the new dimension
-        dim: The dimension to add the ProcessGroup to
-    """
-    groups = mesh.get_all_groups()
-    groups.insert(dim, pg)
-    mesh_dim_names = list(mesh.mesh_dim_names or [])
-    mesh_dim_names.insert(dim, name)
-
-    return DeviceMesh.from_group(
-        group=groups,
-        device_type=mesh.device_type,
-        mesh=mesh.mesh.unsqueeze(dim),
-        mesh_dim_names=tuple(mesh_dim_names),
-    )
-
-
-class ManagedDeviceMesh(DeviceMesh):
-    replicate_pg_singleton: Optional["ManagedProcessGroup"] = None
-
-    def __init__(
-        self,
-        mesh: Optional[DeviceMesh],
-        mesh_dim_names: Tuple[str, ...],
-        replicate_pg: ManagedProcessGroup,
-        replicate_dim: int,
-        parent: Optional["ManagedDeviceMesh"],
-    ) -> None:
-        if mesh is None and parent is None:
-            raise ValueError(
-                "ManagedDeviceMesh doesn't support both mesh and parent are None."
-            )
-        self.mesh = mesh
-        self.mesh_dim_names = mesh_dim_names
-        self.replicate_pg = replicate_pg
-        self.replicate_dim = replicate_dim
-        self.replicate_dim_name: str = mesh_dim_names[replicate_dim]
-        self.parent = parent
-        self.flatten_meshes: Dict[str, DeviceMesh] = {}
-        self.device_type: str
-        if mesh is not None:
-            self.device_type = mesh.device_type
-        else:
-            assert parent is not None
-            self.device_type = parent.device_type
-        self._flatten_mesh_list: Tuple[DeviceMesh, ...] = tuple()
-        self._thread_id: Optional[int] = None
-
-    def __getstate__(self) -> Dict[str, Any]:
-        state = self.__dict__.copy()
-        state["replicate_pg"] = None
-        return state
-
-    def __setstate__(self, state: Dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        assert self.replicate_pg_singleton is not None
-        self.replicate_pg = self.replicate_pg_singleton
-
-    def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
-        if isinstance(mesh_dim_names, str):
-            if mesh_dim_names == self.replicate_dim_name:
-                return ManagedDeviceMesh(
-                    mesh=None,
-                    mesh_dim_names=(mesh_dim_names,),
-                    replicate_pg=self.replicate_pg,
-                    replicate_dim=0,
-                    parent=self,
-                )
-            elif mesh_dim_names in self.flatten_meshes:
-                return self.flatten_meshes[mesh_dim_names]
-            else:
-                assert self.mesh is not None
-                return self.mesh[mesh_dim_names]
-        else:
-            assert isinstance(mesh_dim_names, tuple)
-            if self.replicate_dim_name not in mesh_dim_names:
-                assert self.mesh is not None
-                return self.mesh[mesh_dim_names]
-            else:
-                mesh_dim_names_wo_replicate = tuple(
-                    n for n in mesh_dim_names if n != self.replicate_dim_name
-                )
-                assert self.mesh is not None
-                return ManagedDeviceMesh(
-                    self.mesh[mesh_dim_names_wo_replicate],
-                    mesh_dim_names,
-                    self.replicate_pg,
-                    mesh_dim_names.index(self.replicate_dim_name),
-                    parent=self,
-                )
-
-    def _real_mesh_dim(self, mesh_dim: int) -> int:
-        return mesh_dim - 1 if mesh_dim > self.replicate_dim else mesh_dim
-
-    def get_group(self, mesh_dim: Optional[Union[int, str]] = None) -> BaseProcessGroup:
-        if isinstance(mesh_dim, str):
-            dim = self.mesh_dim_names.index(mesh_dim)
-        else:
-            dim = 0 if mesh_dim is None else int(mesh_dim)
-
-        if mesh_dim is None:
-            return self.replicate_pg
-        elif dim == self.replicate_dim:
-            return self.replicate_pg
-        else:
-            assert self.mesh is not None
-            return self.mesh.get_group(self._real_mesh_dim(dim))
-
-    def _flatten(self, mesh_dim_name: Optional[str]) -> "DeviceMesh":
-        flatten_mesh = _FlattenDeviceMesh(self)
-        if mesh_dim_name is None:
-            raise ValueError("ManagedDeviceMesh._flatten requires `mesh_dim_name`")
-        if self.parent is None:
-            self.flatten_meshes[mesh_dim_name] = flatten_mesh
-        else:
-            self.parent.flatten_meshes[mesh_dim_name] = flatten_mesh
-        return flatten_mesh
-
-    def size(self, mesh_dim: Optional[int] = None) -> int:
-        replicate_pg_size = self.replicate_pg.size()
-        # We have to lie to the users if there are zero particpants.
-        # This is possible during the initialization stage of training.
-        replicate_pg_size = 1 if replicate_pg_size == 0 else replicate_pg_size
-        if mesh_dim is None:
-            if self.mesh is None:
-                return replicate_pg_size
-            else:
-                assert self.mesh is not None
-                return self.mesh.size() * replicate_pg_size
-        elif mesh_dim == self.replicate_dim:
-            return replicate_pg_size
-        else:
-            assert self.mesh is not None
-            return self.mesh.size(self._real_mesh_dim(mesh_dim))
-
-    @property
-    def ndim(self) -> int:
-        assert self.mesh is not None
-        return self.mesh.ndim + 1
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        assert self.mesh is not None
-        ret: List[int] = list(self.mesh.shape)
-        ret.insert(self.replicate_dim, self.replicate_pg.size())
-        return tuple(ret)
-
-    def get_rank(self) -> int:
-        assert self.mesh is not None
-        return self.mesh.get_rank()
-
-    def get_local_rank(self, mesh_dim: Optional[Union[int, str]] = None) -> int:
-        if isinstance(mesh_dim, str):
-            dim = self.mesh_dim_names.index(mesh_dim)
-        else:
-            dim = 0 if mesh_dim is None else int(mesh_dim)
-
-        if mesh_dim is None:
-            if self.mesh is None:
-                return get_rank(self.replicate_pg)
-
-            assert self.replicate_dim == 0, "replicate_dim must be the first one"
-            assert self.mesh is not None
-            other_dim_size = self.mesh.size()
-            assert self.mesh is not None
-            other_dim_rank = self.mesh.get_local_rank()
-            replicate_pg_rank = get_rank(self.replicate_pg)
-            return other_dim_size * replicate_pg_rank + other_dim_rank
-        elif dim == self.replicate_dim:
-            return get_rank(self.replicate_pg)
-        else:
-            assert self.mesh is not None
-            return self.mesh.get_local_rank(self._real_mesh_dim(dim))
-
-    def get_coordinate(self) -> Optional[List[int]]:
-        """
-        Return the relative indices of this rank relative to all
-        dimensions of the mesh. If this rank is not part of the mesh, return None.
-        """
-        assert self.mesh is not None
-        coordinate = (
-            self.mesh._coordinate_on_dim if self.mesh._coordinate_on_dim else None
-        )
-        if not coordinate:
-            return coordinate
-
-        # We need to copy be cause we are going to modify the coordinate.
-        coordinate = coordinate.copy()
-        coordinate.insert(get_rank(self.replicate_pg), self.replicate_dim)
-        return coordinate
-
-    def get_all_groups(self) -> List[BaseProcessGroup]:
-        raise NotImplementedError
-
-
-class _FlattenDeviceMesh(DeviceMesh):
-    def __init__(self, managed_mesh: ManagedDeviceMesh) -> None:
-        self.managed_mesh = managed_mesh
-
-    def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
-        raise NotImplementedError
-
-    def get_group(self, mesh_dim: Optional[Union[int, str]] = None) -> BaseProcessGroup:
-        raise NotImplementedError
-
-    def _flatten(self, mesh_dim_name: Optional[str]) -> "DeviceMesh":
-        raise NotImplementedError
-
-    def size(self, mesh_dim: Optional[int] = None) -> int:
-        assert mesh_dim is None
-        return self.managed_mesh.size()
-
-    @property
-    def ndim(self) -> int:
-        raise NotImplementedError
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        raise NotImplementedError
-
-    def get_rank(self) -> int:
-        raise NotImplementedError
-
-    def get_local_rank(self, mesh_dim: Optional[Union[int, str]] = None) -> int:
-        assert mesh_dim is None
-        return self.managed_mesh.get_local_rank()
-
-    def get_all_groups(self) -> List[BaseProcessGroup]:
-        raise NotImplementedError
-
-
-def ft_init_device_mesh(
-    *,
-    device_type: str,
-    mesh_shape: Tuple[int, ...],
-    mesh_dim_names: Tuple[str, ...],
-    replicate_dim: int,
-    manager: "Manager",
-) -> "ManagedDeviceMesh":
-    # We need to mislead DeviceMesh into thinking that replicate_dim has only
-    # 1 rank.
-    _mesh_shape = list(mesh_shape)
-    _mesh_shape.pop(replicate_dim)
-    _mesh_dim_names = list(mesh_dim_names)
-    _mesh_dim_names.pop(replicate_dim)
-    mesh = init_device_mesh(
-        device_type,
-        mesh_shape=tuple(_mesh_shape),
-        mesh_dim_names=tuple(_mesh_dim_names),
-    )
-
-    replicate_pg = ManagedProcessGroup(manager)
-    replicate_pg.register(mesh_dim_names[replicate_dim])
-
-    ManagedDeviceMesh.replicate_pg_singleton = replicate_pg
-
-    return ManagedDeviceMesh(
-        mesh=mesh,
-        mesh_dim_names=mesh_dim_names,
-        replicate_pg=replicate_pg,
-        replicate_dim=replicate_dim,
-        parent=None,
-    )

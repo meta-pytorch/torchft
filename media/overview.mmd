@@ -1,0 +1,46 @@
+block-beta
+  columns 6
+
+  space
+  title["<b>torchft</b>\nFault Tolerance for PyTorch"]:5
+
+  a["Applications"]
+  torchtitan:2
+  custom["Your Train Script"]:2
+  space
+
+  b["Algorithms"]
+  ddp["Fault Tolerant\n DDP"]
+  ft["Fault Tolerant\n HSDP"]
+  LocalSGD
+  DiLoCo
+  customalg["Custom Algorithms"]
+
+  c["Model State Management"]
+  Manager:5
+
+  d["Reusable Primitives"]
+
+  Coordination
+  checkpoint["Checkpoint\nTransports"]:2
+  pgs("Fault Tolerant\nProcessGroups"):2
+
+  space
+
+  block:coordgroup:1
+    Lighthouse["Lighthouse\n(quorum)"]
+  end
+
+  block:checkpoint_transports:2
+    HTTP
+    PG/NCCL/RDMA
+  end
+
+  block:pggroup:2
+    NCCL
+    Gloo
+  end
+
+  style title fill:#DE3412,font-weight:bold,color:white
+  classDef category font-weight:bold,stroke-width:0,fill:transparent
+  class a,b,c,d category

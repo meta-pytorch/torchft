@@ -25,7 +25,10 @@ class MultiprocessingTest(TestCase):
 
         mq = _MonitoredPipe(local)
         mq.send(1)
-        with self.assertRaisesRegex(ConnectionResetError, "Connection reset by peer"):
+        with self.assertRaisesRegex(
+            (ConnectionResetError, BrokenPipeError),
+            "(Connection reset by peer|Broken pipe)",
+        ):
             while True:
                 mq.send(1)
 

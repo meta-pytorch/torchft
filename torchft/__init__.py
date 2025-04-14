@@ -8,13 +8,18 @@ from torchft.data import DistributedSampler
 from torchft.ddp import DistributedDataParallel
 from torchft.manager import Manager
 from torchft.optim import OptimizerWrapper as Optimizer
-from torchft.process_group import ProcessGroupBabyNCCL, ProcessGroupGloo
+from torchft.process_group import (
+    ProcessGroupBabyNCCL,
+    ProcessGroupGloo,
+    ProcessGroupNCCL,
+)
 
 __all__ = (
     "DistributedDataParallel",
     "DistributedSampler",
     "Manager",
     "Optimizer",
+    "ProcessGroupNCCL",
     "ProcessGroupBabyNCCL",
     "ProcessGroupGloo",
 )

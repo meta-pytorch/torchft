@@ -23,6 +23,7 @@ Issues = "https://github.com/pytorch-labs/torchft/issues"
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "pytest-timeout",
     "black",
     "pyre-check",
     "parameterized",
@@ -41,3 +42,10 @@ torchft_lighthouse = "torchft._torchft:lighthouse_main"
 [tool.isort]
 multi_line_output = 3
 combine_as_imports = true
+
+[tool.pytest.ini_options]
+log_format = "%(asctime)s %(levelname)s %(message)s"
+log_date_format = "%Y-%m-%d %H:%M:%S"
+log_level = "INFO"
+timeout = 60
+timeout_method = "thread"

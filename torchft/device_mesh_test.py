@@ -75,6 +75,9 @@ class DeviceMeshTest(TestCase):
         torch.load(buffer, weights_only=False)
 
     def test_init_device_mesh(self) -> None:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
         with ProcessPoolExecutor(max_workers=4) as executor:
             futures = []
             for i in range(4):
@@ -82,3 +85,31 @@ class DeviceMeshTest(TestCase):
                 futures.append(future)
             for f in futures:
                 f.result()
+
+    def test_repr_hash(self) -> None:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(12346)
+        os.environ["RANK"] = str(0)
+        os.environ["WORLD_SIZE"] = str(1)
+
+        manager = Mock(spec=Manager)
+        manager._pg = ProcessGroupGloo()
+
+        for container in [tuple, list]:
+            device_mesh = ft_init_device_mesh(
+                device_type="cpu",
+                mesh_shape=container((1, 1)),
+                mesh_dim_names=container((f"dp_replicate_{container}", "dp_shard")),
+                replicate_dim=0,
+                manager=manager,
+            )
+
+            self.assertIsInstance(repr(device_mesh), str)
+            self.assertIsInstance(str(device_mesh), str)
+            self.assertEqual(hash(device_mesh), hash(device_mesh))
+            self.assertIsInstance(hash(device_mesh), int)
+
+            dist.destroy_process_group()

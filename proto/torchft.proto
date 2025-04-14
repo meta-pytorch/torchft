@@ -42,6 +42,8 @@ message QuorumMember {
     int64 step = 4;
     uint64 world_size = 5;
     bool shrink_only = 6;
+    // User passing in data stored as JSON string.
+    string data = 7;
 }
 
 message Quorum {
@@ -74,6 +76,7 @@ message ManagerQuorumRequest {
     int64 step = 2;
     string checkpoint_metadata = 3;
     bool shrink_only = 4;
+    bool init_sync = 5;
 }
 
 message ManagerQuorumResponse {

@@ -1,5 +1,6 @@
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Optional
+from typing import Hashable, List, Optional
 
 class ManagerClient:
     def __init__(self, addr: str, connect_timeout: timedelta) -> None: ...
@@ -10,6 +11,7 @@ class ManagerClient:
         checkpoint_metadata: str,
         shrink_only: bool,
         timeout: timedelta,
+        init_sync: bool = True,
     ) -> QuorumResult: ...
     def _checkpoint_metadata(self, rank: int, timeout: timedelta) -> str: ...
     def should_commit(
@@ -59,3 +61,41 @@ class LighthouseServer:
     ) -> None: ...
     def address(self) -> str: ...
     def shutdown(self) -> None: ...
+
+@dataclass
+class QuorumMember:
+    replica_id: str
+    address: str
+    store_address: str
+    step: int
+    world_size: int
+    shrink_only: bool
+    data: Optional[dict[Hashable, object]] = None
+
+@dataclass
+class Timestamp:
+    seconds: int
+    nanos: int
+
+@dataclass
+class Quorum:
+    quorum_id: str
+    participants: List[QuorumMember]
+    created: Timestamp
+
+@dataclass
+class LighthouseClient:
+    addr: str
+    connect_timeout: timedelta
+
+    def quorum(
+        self,
+        replica_id: str,
+        timeout: timedelta,
+        address: Optional[str] = None,
+        store_address: Optional[str] = None,
+        step: Optional[int] = None,
+        world_size: Optional[int] = None,
+        shrink_only: Optional[bool] = None,
+        data: Optional[dict[Hashable, object]] = None,
+    ) -> Quorum: ...
