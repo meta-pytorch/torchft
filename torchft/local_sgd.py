@@ -191,7 +191,7 @@ class DiLoCo:
             self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
 
         self.use_bucketization = use_bucketization
-        
+
         self.original_parameters: Dict[str, torch.Tensor] = {}
         for name, p in self._model.named_parameters():
             t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=self._backup_device)
