@@ -299,43 +299,59 @@ class DiLoCo:
         for work in works:
             work.wait()
 
-    def _allreduce_bucketized(self) -> None:
+    def bucketize_and_allreduce(
+        self,
+        tensors: List[torch.Tensor],
+        allreduce_fn: Callable[[torch.Tensor], Any],
+        bucket_size_bytes: int,
+    ) -> None:
         """
-        Averages gradients using bucketized allreduce with a fixed 32MB buffer.
-        """
+        Applies allreduce on a list of tensors using bucketization.
 
-        grads = [p.grad for p in self._model.parameters() if p.grad is not None]
-        if not grads:
+        Args:
+            tensors: List of torch tensors (e.g., gradients).
+            allreduce_fn: Function that takes a tensor and performs allreduce (e.g., manager.allreduce).
+            bucket_size_bytes: Max size of each bucket in bytes.
+        """
+        if not tensors:
             return
 
-        # Compute total size and allocate a flat buffer
-        total_size = sum(g.numel() for g in grads)
-        dtype, device = grads[0].dtype, grads[0].device
+        total_size = sum(t.numel() for t in tensors)
+        dtype, device = tensors[0].dtype, tensors[0].device
 
-        # Process in fixed 32MB chunks
         offset = 0
+        flat_index = 0
         while offset < total_size:
-            # Compute chunk size
             chunk_size = min(
-                self.BUCKET_SIZE_BYTES // grads[0].element_size(), total_size - offset
+                bucket_size_bytes // tensors[0].element_size(), total_size - offset
             )
-
             flat_buffer = torch.zeros(chunk_size, dtype=dtype, device=device)
 
-            # Pack gradients into buffer
             pack_offset, bucket_tensors = 0, []
-            for g in grads:
-                numel = g.numel()
+            for t in tensors[flat_index:]:
+                numel = t.numel()
                 if pack_offset + numel > chunk_size:
                     break
-                flat_buffer[pack_offset : pack_offset + numel].copy_(g.view(-1))
-                bucket_tensors.append((g, pack_offset, numel))
+                flat_buffer[pack_offset : pack_offset + numel].copy_(t.view(-1))
+                bucket_tensors.append((t, pack_offset, numel))
                 pack_offset += numel
+                flat_index += 1
 
-            work = self._manager.allreduce(flat_buffer)
+            work = allreduce_fn(flat_buffer)
             work.wait()
 
-            for g, pack_offset, numel in bucket_tensors:
-                g.copy_(flat_buffer[pack_offset : pack_offset + numel].view_as(g))
+            for t, pack_offset, numel in bucket_tensors:
+                t.copy_(flat_buffer[pack_offset : pack_offset + numel].view_as(t))
 
-            offset += chunk_size  # Move to next chunk
+            offset += chunk_size
+
+    def _allreduce_bucketized(self) -> None:
+        """
+        Averages gradients using bucketized allreduce with a fixed buffer.
+        """
+        grads = [p.grad for p in self._model.parameters() if p.grad is not None]
+        self.bucketize_and_allreduce(
+            grads,
+            allreduce_fn=self._manager.allreduce,
+            bucket_size_bytes=self.bucket_cap_mb,
+        )
