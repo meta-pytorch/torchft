@@ -569,6 +569,66 @@ class ProcessGroupTest(TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
             pg.configure(store_addr, 0, 2)
+            
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(
+        torch.cuda.is_available(),
+        "needs CUDA",
+    )
+    def test_nccl_watchdog(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        device = "cuda"
+
+        store_addr = f"localhost:{store.port}/prefix"
+        
+        # Create a process group with a very short watchdog timeout
+        pg = ProcessGroupNCCL(
+            timeout=timedelta(seconds=1.0),
+            watchdog_timeout=timedelta(seconds=0.5)
+        )
+        pg.configure(store_addr, 0, 1)
+        
+        # Verify the watchdog is running
+        self.assertIsNotNone(pg._watchdog_thread)
+        self.assertTrue(pg._watchdog_thread.is_alive())
+        
+        # Register an operation
+        op_id = pg._register_op()
+        self.assertGreaterEqual(op_id, 0)
+        
+        # Verify the operation is registered
+        with pg._active_ops_lock:
+            self.assertIn(op_id, pg._active_ops)
+        
+        # Unregister the operation
+        pg._unregister_op(op_id)
+        
+        # Verify the operation is unregistered
+        with pg._active_ops_lock:
+            self.assertNotIn(op_id, pg._active_ops)
+        
+        # Verify the watchdog stops when shutting down
+        pg.shutdown()
+        self.assertIsNone(pg._watchdog_thread)
+        
+        # Test with watchdog disabled
+        pg = ProcessGroupNCCL(
+            timeout=timedelta(seconds=1.0),
+            watchdog_timeout=None
+        )
+        pg.configure(store_addr, 0, 1)
+        
+        # Verify the watchdog is not running
+        self.assertIsNone(pg._watchdog_thread)
+        
+        # Register and unregister operations should not fail
+        op_id = pg._register_op()
+        self.assertEqual(op_id, -1)
+        pg._unregister_op(op_id)
+        
+        pg.shutdown()
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -1046,3 +1106,56 @@ class NormalNcclMultiPgTest(MultiPgBaseTest):
     @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective_with_resiliency(self, collective: str) -> None:
         self._run_with_resiliency(collective, device="cuda")
+        
+    @skipUnless(
+        torch.cuda.is_available() and torch.cuda.device_count() >= 2,
+        "needs at least 2 CUDA devices",
+    )
+    def test_watchdog_abort(self) -> None:
+        """Test that the watchdog can abort a hanging operation."""
+        
+        def worker_with_stuck_op(pg: ProcessGroup, rank: int) -> str:
+            # Use a short watchdog timeout
+            pg = ProcessGroupNCCL(
+                timeout=timedelta(seconds=10.0),
+                watchdog_timeout=timedelta(seconds=0.5)
+            )
+            
+            try:
+                # Configure the process group
+                new_store_addr = f"localhost:{self.store.port}/watchdog_test"
+                pg.configure(new_store_addr, rank, self.WORLD_SIZE)
+                
+                # Simulate a hung operation by registering one but never completing it
+                op_id = pg._register_op()
+                
+                # Wait for the watchdog to trigger and abort the process group
+                time.sleep(1.0)
+                
+                # Check if the process group was aborted
+                err = pg.errored()
+                if err is not None:
+                    return f"Rank{rank} detected abort: {err}"
+                
+                return f"Rank{rank} watchdog didn't abort"
+            finally:
+                pg.shutdown()
+        
+        # Run the test with 2 ranks
+        futs = [
+            self.executor.submit(worker_with_stuck_op, ProcessGroupNCCL(), r)
+            for r in range(self.WORLD_SIZE)
+        ]
+        
+        # Collect results and verify the abort happened
+        results = []
+        for fut in futs:
+            try:
+                result = fut.result()
+                results.append(result)
+            except Exception as e:
+                results.append(f"Error: {e}")
+        
+        # At least one rank should detect the abort
+        abort_detected = any("detected abort" in r for r in results)
+        self.assertTrue(abort_detected, f"No abort detected. Results: {results}")
