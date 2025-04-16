@@ -31,7 +31,7 @@ class TestManager(TestCase):
 
     def tearDown(self) -> None:
         # Manager cleanup might be handled by _create_manager
-        if hasattr(self, 'manager') and self.manager is not None:
+        if hasattr(self, "manager") and self.manager is not None:
             self.manager.shutdown(wait=False)
 
     def _create_manager(
@@ -652,12 +652,12 @@ class TestManager(TestCase):
         manager._init_sync = True
         manager.start_quorum()
         self.assertEqual(client_mock()._quorum.call_args.kwargs["init_sync"], True)
-        
+
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_max_retries(self, client_mock: MagicMock) -> None:
         # Create a manager with max_retries=2
         manager = self._create_manager(max_retries=2)
-        
+
         # Setup quorum for testing
         quorum = QuorumResult()
         quorum.quorum_id = 123
@@ -670,59 +670,54 @@ class TestManager(TestCase):
         quorum.max_world_size = 2
         quorum.heal = False
         client_mock()._quorum.return_value = quorum
-        
+
         # Make should_commit always return False to simulate failures
         client_mock().should_commit = MagicMock(return_value=False)
-        
+
         # Start quorum
         manager.start_quorum()
-        
+
         # First failure
         self.assertFalse(manager.should_commit())
         self.assertEqual(manager._commit_failures, 1)
-        
+
         # Second failure
         self.assertFalse(manager.should_commit())
         self.assertEqual(manager._commit_failures, 2)
-        
+
         # Third failure - should raise exception
         with self.assertRaises(RuntimeError) as context:
             manager.should_commit()
-        
+
         self.assertIn("exceeding max_retries=2", str(context.exception))
         self.assertEqual(manager._commit_failures, 3)
-        
+
         # Now test that success resets the counter
         manager._commit_failures = 2  # Reset to just before failure threshold
         client_mock().should_commit = MagicMock(return_value=True)  # Now succeed
-        
+
         # This should succeed and reset the counter
         self.assertTrue(manager.should_commit())
         self.assertEqual(manager._commit_failures, 0)
-        
+
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_state_dict_includes_commit_failures(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(max_retries=5)
-        
+
         # Set up initial state
         manager._commit_failures = 3
-        
+
         # Verify state_dict contains commit_failures
         state_dict = manager.state_dict()
         self.assertEqual(state_dict["commit_failures"], 3)
-        
+
         # Test loading state dict
         manager._commit_failures = 0
-        manager.load_state_dict({
-            "step": 10,
-            "batches_committed": 20,
-            "commit_failures": 4
-        })
+        manager.load_state_dict(
+            {"step": 10, "batches_committed": 20, "commit_failures": 4}
+        )
         self.assertEqual(manager._commit_failures, 4)
-        
+
         # Test backward compatibility - missing commit_failures
-        manager.load_state_dict({
-            "step": 10,
-            "batches_committed": 20
-        })
+        manager.load_state_dict({"step": 10, "batches_committed": 20})
         self.assertEqual(manager._commit_failures, 0)
