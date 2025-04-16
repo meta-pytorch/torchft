@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
+from typing import Callable, cast, Dict, List, Optional, TYPE_CHECKING, TypeVar
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
@@ -652,7 +652,10 @@ class Manager:
         else:
             self._commit_failures += 1
             # Check if we've hit max retries
-            if self._max_retries is not None and self._commit_failures > self._max_retries:
+            if (
+                self._max_retries is not None
+                and self._commit_failures > self._max_retries
+            ):
                 self._logger.exception(
                     f"should_commit failed {self._commit_failures} times (max_retries={self._max_retries})"
                 )
@@ -693,9 +696,9 @@ class Manager:
             the state dict for this manager
         """
         return {
-            "step": self._step, 
+            "step": self._step,
             "batches_committed": self._batches_committed,
-            "commit_failures": self._commit_failures
+            "commit_failures": self._commit_failures,
         }
 
     def current_step(self) -> int:
