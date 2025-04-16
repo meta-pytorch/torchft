@@ -107,6 +107,7 @@ class Manager:
         heartbeat_interval: timedelta = timedelta(milliseconds=100),
         checkpoint_transport: Optional[CheckpointTransport[Dict[str, T]]] = None,
         init_sync: bool = True,
+        max_retries: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -147,6 +148,8 @@ class Manager:
             init_sync: whether to synchronize the model weights on step 0. If
                 all of the model weights are initialized identically via
                 ``torch.set_seed`` you should set this to False.
+            max_retries: maximum number of times to retry should_commit before 
+                giving up and throwing an exception. If None, will retry indefinitely.
         """
         self._load_state_dict = load_state_dict
         self._user_state_dict = state_dict
@@ -234,6 +237,8 @@ class Manager:
         self._healing = False
         self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
+        self._max_retries = max_retries
+        self._should_commit_failures = 0
 
         # first step is 1
         self._participating_rank: Optional[int] = None
@@ -408,6 +413,8 @@ class Manager:
 
         self._errored = None
         self._healing = False
+        # Reset failure counter when starting a new quorum
+        self._should_commit_failures = 0
 
         # TODO: we should really be wrapping this whole section in a try-except
         # block to allow gracefully recovering from issues in PG setup and quorum.
@@ -638,6 +645,20 @@ class Manager:
         if should_commit:
             self._step += 1
             self._batches_committed += self.num_participants()
+            # Reset failure counter on successful commit
+            self._should_commit_failures = 0
+        else:
+            # Increment failure counter
+            self._should_commit_failures += 1
+            
+            # Check if we've exceeded max retries
+            if (self._max_retries is not None and 
+                self._should_commit_failures > self._max_retries):
+                raise RuntimeError(
+                    f"should_commit failed {self._should_commit_failures} times, "
+                    f"exceeding max_retries={self._max_retries}. "
+                    f"Stopping to avoid livelock."
+                )
 
         return should_commit
 
@@ -652,6 +673,9 @@ class Manager:
         """
         self._step = state_dict["step"]
         self._batches_committed = state_dict["batches_committed"]
+        # Load should_commit_failures if present in state_dict (for backward compatibility)
+        if "should_commit_failures" in state_dict:
+            self._should_commit_failures = state_dict["should_commit_failures"]
 
     def _manager_state_dict(self) -> Dict[str, object]:
         assert self._user_state_dict is not None, "user state_dict is not initialized."
@@ -670,7 +694,11 @@ class Manager:
         Returns:
             the state dict for this manager
         """
-        return {"step": self._step, "batches_committed": self._batches_committed}
+        return {
+            "step": self._step, 
+            "batches_committed": self._batches_committed,
+            "should_commit_failures": self._should_commit_failures,
+        }
 
     def current_step(self) -> int:
         """

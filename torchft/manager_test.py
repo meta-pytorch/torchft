@@ -88,6 +88,7 @@ class TestManager(TestCase):
             {
                 "step": 0,
                 "batches_committed": 0,
+                "should_commit_failures": 0,
             },
         )
 
@@ -95,10 +96,24 @@ class TestManager(TestCase):
             {
                 "step": 1234,
                 "batches_committed": 2345,
+                "should_commit_failures": 3,
             }
         )
         self.assertEqual(manager.current_step(), 1234)
         self.assertEqual(manager.batches_committed(), 2345)
+        self.assertEqual(manager._should_commit_failures, 3)
+        
+        # Test backward compatibility - missing should_commit_failures
+        manager.load_state_dict(
+            {
+                "step": 5678,
+                "batches_committed": 6789,
+            }
+        )
+        self.assertEqual(manager.current_step(), 5678)
+        self.assertEqual(manager.batches_committed(), 6789)
+        # should_commit_failures should remain unchanged
+        self.assertEqual(manager._should_commit_failures, 3)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_user_state_dict(self, client_mock: MagicMock) -> None:
@@ -111,6 +126,7 @@ class TestManager(TestCase):
                 "torchft": {
                     "step": 0,
                     "batches_committed": 0,
+                    "should_commit_failures": 0,
                 },
             },
         )
@@ -127,6 +143,7 @@ class TestManager(TestCase):
                 "torchft": {
                     "step": 0,
                     "batches_committed": 0,
+                    "should_commit_failures": 0,
                 },
             },
         )
@@ -616,6 +633,66 @@ class TestManager(TestCase):
             client_mock().should_commit.call_args.kwargs["timeout"],
             timedelta(seconds=23),
         )
+        
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_max_retries(self, client_mock: MagicMock) -> None:
+        # Test with max_retries=2
+        manager = self._create_manager(max_retries=2)
+        
+        # Mock client to return False for should_commit
+        client_mock().should_commit.return_value = False
+        
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+        
+        client_mock()._quorum.return_value = quorum
+        
+        # First attempt
+        manager.start_quorum()
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._should_commit_failures, 1)
+        
+        # Second attempt
+        manager.start_quorum()
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._should_commit_failures, 2)
+        
+        # Third attempt should raise an exception
+        manager.start_quorum()
+        with self.assertRaisesRegex(RuntimeError, "should_commit failed 3 times, exceeding max_retries=2"):
+            manager.should_commit()
+        
+        # Test recovery after successful commit
+        manager = self._create_manager(max_retries=2)
+        client_mock().should_commit.side_effect = [False, False, True, False]
+        
+        # First failure
+        manager.start_quorum()
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._should_commit_failures, 1)
+        
+        # Second failure
+        manager.start_quorum()
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._should_commit_failures, 2)
+        
+        # Success - should reset counter
+        manager.start_quorum()
+        self.assertTrue(manager.should_commit())
+        self.assertEqual(manager._should_commit_failures, 0)
+        
+        # First failure after recovery
+        manager.start_quorum()
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._should_commit_failures, 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_skip_init(self, client_mock: MagicMock) -> None:
