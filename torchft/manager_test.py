@@ -30,9 +30,9 @@ class TestManager(TestCase):
     manager: Optional[Manager]  # pyre-fixme[13]: never initialized
 
     def tearDown(self) -> None:
-        manager = self.manager
-        if manager is not None:
-            manager.shutdown(wait=False)
+        # Manager cleanup might be handled by _create_manager
+        if hasattr(self, 'manager') and self.manager is not None:
+            self.manager.shutdown(wait=False)
 
     def _create_manager(
         self,
@@ -41,6 +41,7 @@ class TestManager(TestCase):
         world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
         timeout: timedelta = timedelta(seconds=10),
         init_sync: bool = True,
+        max_retries: Optional[int] = None,
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         pg.errored.return_value = None
@@ -69,6 +70,7 @@ class TestManager(TestCase):
                 world_size_mode=world_size_mode,
                 timeout=timeout,
                 init_sync=init_sync,
+                max_retries=max_retries,
             )
             self.manager = manager
         return manager
