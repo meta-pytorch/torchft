@@ -736,14 +736,10 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
                 # Check for operations that have exceeded the timeout
                 with self._active_ops_lock:
                     for op_id, start_time in list(self._active_ops.items()):
-<<<<<<< HEAD
-                        if current_time - start_time > self._watchdog_timeout.total_seconds():  # type: ignore
-=======
                         if (
                             current_time - start_time
                             > self._watchdog_timeout.total_seconds()
                         ):
->>>>>>> e55bbf16233cbd4c8d4056db0d95e782057aa9b1
                             ops_to_abort.append(op_id)
                             del self._active_ops[op_id]
 

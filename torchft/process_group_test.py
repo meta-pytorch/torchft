@@ -591,13 +591,8 @@ class ProcessGroupTest(TestCase):
 
         # Verify the watchdog is running
         self.assertIsNotNone(pg._watchdog_thread)
-<<<<<<< HEAD
-        self.assertTrue(pg._watchdog_thread is not None and pg._watchdog_thread.is_alive())
-        
-=======
         self.assertTrue(pg._watchdog_thread.is_alive())
 
->>>>>>> e55bbf16233cbd4c8d4056db0d95e782057aa9b1
         # Register an operation
         op_id = pg._register_op()
         self.assertGreaterEqual(op_id, 0)
