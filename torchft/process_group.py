@@ -718,7 +718,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         """Stop the watchdog thread."""
         if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
             self._watchdog_stop_event.set()
-            self._watchdog_thread.join(timeout=1.0)
+            self._watchdog_thread.join(timeout=1.0)  # type: ignore
             self._watchdog_stop_event.clear()
             self._watchdog_thread = None
             logger.debug("Stopped NCCL watchdog thread")
@@ -736,7 +736,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
                 # Check for operations that have exceeded the timeout
                 with self._active_ops_lock:
                     for op_id, start_time in list(self._active_ops.items()):
-                        if current_time - start_time > self._watchdog_timeout.total_seconds():
+                        if current_time - start_time > self._watchdog_timeout.total_seconds():  # type: ignore
                             ops_to_abort.append(op_id)
                             del self._active_ops[op_id]
                 
@@ -1530,11 +1530,11 @@ class ProcessGroupBaby(ProcessGroup):
         self._pipe.send(("wait", op_id, timeout))
 
         assert self._pipe is not None
-        op_id, event = cast(
+        received_op_id, event = cast(
             Tuple[int, Optional[torch.cuda.Event]],
             self._pipe.recv(timeout or self._timeout),
         )
-        assert op_id == op_id
+        assert received_op_id == op_id
         if event is not None:
             event.wait()
 

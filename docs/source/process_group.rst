@@ -10,12 +10,6 @@ The ``ProcessGroupNCCL`` class includes a watchdog feature for fast aborts of NC
 This is particularly useful in distributed training scenarios where NCCL operations might hang 
 indefinitely, causing the entire training job to stall.
 
-Key features:
-  
-* Monitors operations: A background thread tracks all active NCCL operations
-* Fast abort: Promptly aborts operations that exceed the configured timeout
-* Configurable: Can be enabled or disabled with a custom timeout
-
 Usage example::
 
     from datetime import timedelta

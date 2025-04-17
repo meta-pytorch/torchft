@@ -592,7 +592,7 @@ class ProcessGroupTest(TestCase):
         
         # Verify the watchdog is running
         self.assertIsNotNone(pg._watchdog_thread)
-        self.assertTrue(pg._watchdog_thread.is_alive())
+        self.assertTrue(pg._watchdog_thread is not None and pg._watchdog_thread.is_alive())
         
         # Register an operation
         op_id = pg._register_op()
@@ -1109,7 +1109,7 @@ class NormalNcclMultiPgTest(MultiPgBaseTest):
         
     @skipUnless(
         torch.cuda.is_available() and torch.cuda.device_count() >= 2,
-        "needs at least 2 CUDA devices",
+        reason="needs at least 2 CUDA devices",
     )
     def test_watchdog_abort(self) -> None:
         """Test that the watchdog can abort a hanging operation."""
@@ -1130,6 +1130,7 @@ class NormalNcclMultiPgTest(MultiPgBaseTest):
                 op_id = pg._register_op()
                 
                 # Wait for the watchdog to trigger and abort the process group
+                import time
                 time.sleep(1.0)
                 
                 # Check if the process group was aborted
