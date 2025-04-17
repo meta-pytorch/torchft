@@ -584,12 +584,12 @@ class ProcessGroupGloo(ProcessGroupWrapper):
 
 class _WorkCUDATimeout(Work):
     def __init__(
-        self, 
-        pg: ProcessGroup, 
-        work: Work, 
+        self,
+        pg: ProcessGroup,
+        work: Work,
         timeout: timedelta,
         op_id: int = -1,
-        unregister_op_callback: Optional[Callable[[int], None]] = None
+        unregister_op_callback: Optional[Callable[[int], None]] = None,
     ) -> None:
         super().__init__()
         self._pg = pg
@@ -609,7 +609,7 @@ class _WorkCUDATimeout(Work):
                     result = self._work.wait(timeout)
                 else:
                     result = self._work.wait()
-                
+
                 return result
         finally:
             # Unregister operation from watchdog when wait completes
@@ -684,14 +684,14 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     """
 
     def __init__(
-        self, 
+        self,
         timeout: timedelta = timedelta(seconds=60.0),
-        watchdog_timeout: Optional[timedelta] = timedelta(seconds=5.0)
+        watchdog_timeout: Optional[timedelta] = timedelta(seconds=5.0),
     ) -> None:
         super().__init__(timeout)
         self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
         self._errored: Optional[Exception] = None
-        
+
         # Watchdog setup
         self._watchdog_timeout = watchdog_timeout
         self._watchdog_thread: Optional[threading.Thread] = None
@@ -699,7 +699,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         self._active_ops: Dict[int, float] = {}
         self._active_ops_lock = threading.Lock()
         self._op_counter = 0
-        
+
         # Start watchdog if timeout is provided
         if watchdog_timeout is not None:
             self._start_watchdog()
@@ -727,26 +727,35 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         """Main loop for the watchdog thread."""
         assert self._watchdog_timeout is not None
         check_interval = min(1.0, self._watchdog_timeout.total_seconds() / 2)
-        
+
         while not self._watchdog_stop_event.is_set():
             try:
                 current_time = time.time()
                 ops_to_abort = []
-                
+
                 # Check for operations that have exceeded the timeout
                 with self._active_ops_lock:
                     for op_id, start_time in list(self._active_ops.items()):
+<<<<<<< HEAD
                         if current_time - start_time > self._watchdog_timeout.total_seconds():  # type: ignore
+=======
+                        if (
+                            current_time - start_time
+                            > self._watchdog_timeout.total_seconds()
+                        ):
+>>>>>>> e55bbf16233cbd4c8d4056db0d95e782057aa9b1
                             ops_to_abort.append(op_id)
                             del self._active_ops[op_id]
-                
+
                 # Abort operations that have exceeded the timeout
                 if ops_to_abort:
-                    logger.error(f"NCCL watchdog detected {len(ops_to_abort)} stuck operations, aborting")
+                    logger.error(
+                        f"NCCL watchdog detected {len(ops_to_abort)} stuck operations, aborting"
+                    )
                     self.abort()
             except Exception as e:
                 logger.exception(f"Error in NCCL watchdog: {e}")
-                
+
             # Sleep for a short time before checking again
             self._watchdog_stop_event.wait(check_interval)
 
@@ -754,7 +763,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         """Register a new operation with the watchdog."""
         if self._watchdog_timeout is None:
             return -1
-            
+
         with self._active_ops_lock:
             op_id = self._op_counter
             self._op_counter += 1
@@ -765,7 +774,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         """Unregister an operation when it completes."""
         if self._watchdog_timeout is None or op_id < 0:
             return
-            
+
         with self._active_ops_lock:
             self._active_ops.pop(op_id, None)
 
@@ -788,7 +797,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         # pyre-fixme[16]: no attribute timeout
         if hasattr(opts, "timeout") and opts.timeout.total_seconds() > 0:
             timeout = opts.timeout
-            
+
         op_id = self._register_op()
         return _WorkCUDATimeout(self, work, timeout, op_id, self._unregister_op)
 
@@ -812,14 +821,14 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         """Reconfigure the process group with a new store, rank, and world size."""
         # Stop the watchdog before reconfiguring
         self._stop_watchdog()
-        
+
         # Clear active operations
         with self._active_ops_lock:
             self._active_ops.clear()
-        
+
         # Call parent configure
         super().configure(store_addr, rank, world_size)
-        
+
         # Restart the watchdog after configuring
         if self._watchdog_timeout is not None:
             self._start_watchdog()
