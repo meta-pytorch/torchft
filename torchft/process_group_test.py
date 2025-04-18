@@ -1126,6 +1126,7 @@ class NormalNcclMultiPgTest(MultiPgBaseTest):
 
                 # Wait for the watchdog to trigger and abort the process group
                 import time
+                
                 time.sleep(1.0)
 
                 # Check if the process group was aborted
