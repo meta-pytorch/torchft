@@ -90,7 +90,6 @@ class TestManager(TestCase):
             {
                 "step": 0,
                 "batches_committed": 0,
-                "commit_failures": 0,
             },
         )
 
@@ -98,12 +97,10 @@ class TestManager(TestCase):
             {
                 "step": 1234,
                 "batches_committed": 2345,
-                "commit_failures": 5,
             }
         )
         self.assertEqual(manager.current_step(), 1234)
         self.assertEqual(manager.batches_committed(), 2345)
-        self.assertEqual(manager._commit_failures, 5)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_user_state_dict(self, client_mock: MagicMock) -> None:
@@ -116,7 +113,6 @@ class TestManager(TestCase):
                 "torchft": {
                     "step": 0,
                     "batches_committed": 0,
-                    "commit_failures": 0,
                 },
             },
         )
@@ -133,7 +129,6 @@ class TestManager(TestCase):
                 "torchft": {
                     "step": 0,
                     "batches_committed": 0,
-                    "commit_failures": 0,
                 },
             },
         )

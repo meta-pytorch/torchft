@@ -692,7 +692,7 @@ class Manager:
         Returns:
             the state dict for this manager
         """
-        return {"step": self._step,"batches_committed": self._batches_committed}
+        return {"step": self._step, "batches_committed": self._batches_committed}
 
     def current_step(self) -> int:
         """
