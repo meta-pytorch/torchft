@@ -673,7 +673,6 @@ class Manager:
         """
         self._step = state_dict["step"]
         self._batches_committed = state_dict["batches_committed"]
-        self._commit_failures = state_dict.get("commit_failures", 0)
 
     def _manager_state_dict(self) -> Dict[str, object]:
         assert self._user_state_dict is not None, "user state_dict is not initialized."
