@@ -656,12 +656,9 @@ class Manager:
                 self._max_retries is not None
                 and self._commit_failures > self._max_retries
             ):
-                self._logger.exception(
-                    f"should_commit failed {self._commit_failures} times (max_retries={self._max_retries})"
-                )
-                raise RuntimeError(
-                    f"should_commit failed {self._commit_failures} times consecutively, exceeding max_retries={self._max_retries}"
-                )
+                msg = f"should_commit failed {self._commit_failures} times consecutively, exceeding max_retries={self._max_retries}"
+                self._logger.exception(msg)
+                raise RuntimeError(msg)
 
         return should_commit
 
@@ -695,11 +692,7 @@ class Manager:
         Returns:
             the state dict for this manager
         """
-        return {
-            "step": self._step,
-            "batches_committed": self._batches_committed,
-            "commit_failures": self._commit_failures,
-        }
+        return {"step": self._step,"batches_committed": self._batches_committed}
 
     def current_step(self) -> int:
         """

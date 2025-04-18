@@ -699,25 +699,3 @@ class TestManager(TestCase):
         # This should succeed and reset the counter
         self.assertTrue(manager.should_commit())
         self.assertEqual(manager._commit_failures, 0)
-
-    @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_state_dict_includes_commit_failures(self, client_mock: MagicMock) -> None:
-        manager = self._create_manager(max_retries=5)
-
-        # Set up initial state
-        manager._commit_failures = 3
-
-        # Verify state_dict contains commit_failures
-        state_dict = manager.state_dict()
-        self.assertEqual(state_dict["commit_failures"], 3)
-
-        # Test loading state dict
-        manager._commit_failures = 0
-        manager.load_state_dict(
-            {"step": 10, "batches_committed": 20, "commit_failures": 4}
-        )
-        self.assertEqual(manager._commit_failures, 4)
-
-        # Test backward compatibility - missing commit_failures
-        manager.load_state_dict({"step": 10, "batches_committed": 20})
-        self.assertEqual(manager._commit_failures, 0)
