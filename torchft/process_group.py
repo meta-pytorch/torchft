@@ -589,15 +589,21 @@ class _WorkCUDATimeout(Work):
         self._timeout = timeout
 
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
-        with self._stream_timeout(self._pg, self._timeout):
-            # not async, just return
-            if self._work is None:
-                return True
+        async_timeout = timeout or self._timeout
+        with self._stream_timeout(self._pg, async_timeout):
+            # In newer versions of PyTorch work may not exist if the call was
+            # not async. In these cases we can just schedule the stream timeout
+            # and return.
+            if self._work is not None:
+                if not self._work.wait():
+                    return False
 
+            # Always use cuda stream for timeout to avoid ProcessGroupNCCL
+            # watchdog firing and crashing the process.
             if timeout is not None:
-                return self._work.wait(timeout)
+                torch.cuda.synchronize()
 
-            return self._work.wait()
+            return True
 
     @classmethod
     @contextmanager
@@ -630,9 +636,12 @@ class _WorkCUDATimeout(Work):
         fut = self._work.get_future()
 
         def done_callback(fut: torch.futures.Future[object]) -> None:
-            fut.wait()
+            try:
+                with self._stream_timeout(self._pg, self._timeout):
+                    fut.wait()
 
-            self._stream_timeout(self._pg, self._timeout)
+            except Exception as e:
+                logger.error(f"done callback failed: {e}")
 
         fut.add_done_callback(done_callback)
         return fut
@@ -701,14 +710,16 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         return pg
 
     def abort(self) -> None:
-        super().abort()
-
+        # We need to set the error before aborting to ensure that errored()
+        # returns the error correctly when NCCL abort fires and unblocks the
+        # stream.
         self._errored = RuntimeError("aborted")
 
+        super().abort()
+
     def errored(self) -> Optional[Exception]:
-        pg = self._pg
-        if pg is not None:
-            pg._wait_for_pending_works()
+        # force a synchronization to ensure all work is complete
+        torch.cuda.synchronize()
 
         return self._errored
 

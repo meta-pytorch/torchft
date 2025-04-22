@@ -9,6 +9,10 @@ import os
 import sys
 from datetime import timedelta
 
+REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
+os.environ["CUDA_VISIBLE_DEVICES"] = str(REPLICA_GROUP_ID % 4)
+os.environ["NCCL_HOSTID"] = str(REPLICA_GROUP_ID)
+
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -22,9 +26,10 @@ from torchft import (
     DistributedSampler,
     Manager,
     Optimizer,
-    ProcessGroupBabyNCCL,
     ProcessGroupGloo,
+    ProcessGroupNCCL,
 )
+from torchft.checkpointing.pg_transport import PGTransport
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,11 +77,17 @@ def main() -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pg = (
-        ProcessGroupBabyNCCL(
-            timeout=timedelta(seconds=5),
+        ProcessGroupNCCL(
+            timeout=timedelta(seconds=30),
         )
         if torch.cuda.is_available()
         else ProcessGroupGloo(timeout=timedelta(seconds=5))
+    )
+
+    transport = PGTransport(
+        pg,
+        timeout=timedelta(seconds=10),
+        device=("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
     manager = Manager(
@@ -85,26 +96,42 @@ def main() -> None:
         load_state_dict=load_state_dict,
         state_dict=state_dict,
         replica_id=f"train_ddp_{REPLICA_GROUP_ID}",
-        timeout=timedelta(seconds=10),
+        timeout=timedelta(seconds=30),
+        checkpoint_transport=transport,
     )
 
     class Net(nn.Module):
         def __init__(self):
             super().__init__()
-            self.conv1 = nn.Conv2d(3, 6, 5)
-            self.pool = nn.MaxPool2d(2, 2)
-            self.conv2 = nn.Conv2d(6, 16, 5)
-            self.fc1 = nn.Linear(16 * 5 * 5, 120)
-            self.fc2 = nn.Linear(120, 84)
-            self.fc3 = nn.Linear(84, 10)
+            self.cnn = nn.Sequential(
+                nn.Conv2d(3, 6, 5),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(6, 16, 5),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),
+            )
+
+            final_dim = 10
+            # We add a useless 1GB intermediate layer so we spend more time in dist
+            # communication so injected failures are more likely to cause issues
+            # if they exist.
+            target_size = 1_000_000_000
+            self.useless = nn.Embedding(target_size // final_dim // 4, final_dim)
+
+            self.classifier = nn.Sequential(
+                nn.Linear(16 * 5 * 5, 120),
+                nn.ReLU(),
+                nn.Linear(120, 84),
+                nn.ReLU(),
+                nn.Linear(84, final_dim),
+            )
 
         def forward(self, x):
-            x = self.pool(F.relu(self.conv1(x)))
-            x = self.pool(F.relu(self.conv2(x)))
+            x = self.cnn(x)
             x = torch.flatten(x, 1)  # flatten all dimensions except batch
-            x = F.relu(self.fc1(x))
-            x = F.relu(self.fc2(x))
-            x = self.fc3(x)
+            x = self.classifier(x)
+            x += self.useless.weight[0]
             return x
 
     m = Net().to(device)
@@ -113,6 +140,8 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss()
 
     print(m)
+    num_params = sum(p.numel() for p in m.parameters())
+    print(f"Total number of parameters: {num_params}")
 
     # You can use an epoch based training but with faults it's easier to use step
     # based training.

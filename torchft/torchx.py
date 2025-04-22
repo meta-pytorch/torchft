@@ -64,7 +64,11 @@ def hsdp(
                 num_replicas=workers_per_replica,
                 resource=specs.resource(cpu=cpu, gpu=gpu, memMB=memMB, h=h),
                 max_retries=0,
-                env=env,
+                env={
+                    "REPLICA_GROUP_ID": str(replica_id),
+                    "NUM_REPLICA_GROUPS": str(replicas),
+                    **env,
+                },
                 entrypoint="torchrun",
                 args=cmd,
             )

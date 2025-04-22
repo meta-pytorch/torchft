@@ -11,7 +11,7 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Callable, Dict, List, cast
 from unittest import TestCase, skipIf, skipUnless
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 import torch.distributed as dist
@@ -552,6 +552,34 @@ class ProcessGroupTest(TestCase):
         _test_pg(pg, torch.tensor([2], device=device))
 
         torch.cuda.synchronize()
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(
+        torch.cuda.is_available() and torch.cuda.nccl.version() >= (2, 25),
+        "needs NCCL >=2.25",
+    )
+    @patch("torchft.process_group.stream_timeout", autospec=True)
+    @patch("torchft.process_group.context_timeout", autospec=True)
+    def test_nccl_timeouts(
+        self, mock_context_timeout: Mock, mock_stream_timeout: Mock
+    ) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        device = "cuda"
+
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = ProcessGroupNCCL()
+        pg.configure(store_addr, 0, 1)
+
+        t = torch.tensor([2], device=device)
+        pg.allreduce([t], ReduceOp.SUM).wait()
+        self.assertEqual(mock_stream_timeout.call_count, 1)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 1)
+
+        pg.allreduce([t], ReduceOp.SUM).get_future().wait()
+        self.assertEqual(mock_stream_timeout.call_count, 2)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 2)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(
