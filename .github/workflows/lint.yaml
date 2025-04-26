@@ -23,9 +23,6 @@ jobs:
 
           sudo apt-get install -y protobuf-compiler
 
-          # use RC build
-          pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
-
           pip install lintrunner lintrunner-adapters
           lintrunner init
 

@@ -47,15 +47,6 @@ class LocalSGD:
     way using a torchft Manager. The allreduce on the parameters will happen
     every sync_every steps after the optimizer.step call.
 
-    To implement safe and fault tolerant, this requires a backup copy of the
-    weights. By default these are stored in CPU memory. If any error occurs
-    during the LocalSGD step, the step will be discarded and the model
-    parameters will reset back to the last time LocalSGD synchronized.
-
-    The backup weights could be eliminated by relaxing the guarantee of exactly
-    `sync_every` steps but that would diverge from the LocalSGD algorithm.
-    DiLoCo also needs this backup copy to compute the delta.
-
     The torchft quorum is computed at the beginning of ``sync_every`` steps. If
     any error occurs, or a worker fails between syncs, ``sync_every`` steps will be
     discarded and a new quorum will be computed on the next step.
@@ -63,9 +54,6 @@ class LocalSGD:
     If running in async mode, on a joining worker the first ``sync_every`` steps
     will discarded as the model will be recovering during that period. When
     using sync mode, the checkpoint will be restored prior to the first step.
-
-    TODO: add a way via Manager to detect workers failing early for shrink only
-    TODO: add DiLoCo support
     """
 
     def __init__(
@@ -81,8 +69,6 @@ class LocalSGD:
             model: The model to wrap.
             optimizer: The optimizer used by the model.
             sync_every: How often to sync the model weights.
-            backup_device: The device to store the backup of the model parameters on. (default cpu)
-            pin_memory: Whether to pin the memory used for the backup of the model parameters.
         """
         super().__init__()
         self._manager = manager
@@ -172,7 +158,12 @@ class DiLoCo:
     DiLoCo is a subclass of LocalSGD that overrides the synchronization
     mechanism to average and synchronize the pseudogradients (delta of the previous global weight and current local weights).
 
-    diloco: https://arxiv.org/pdf/2311.08105
+    This algorithm requires a backup copy of the
+    weights. By default these are stored in CPU memory. If any error occurs
+    during the DiLoCo step, the step will be discarded and the model
+    parameters will reset back to the last time DiLoCo synchronized.
+
+    DiLoCo paper: https://arxiv.org/pdf/2311.08105
     """
 
     def __init__(
@@ -185,6 +176,17 @@ class DiLoCo:
         backup_device: Optional[torch.device] = None,
         pin_memory: bool = True,
     ) -> None:
+        """
+        Args:
+            manager: The manager to use.
+            model: The model to wrap.
+            inner_optimizer: The optimizer used for the local parameters every step.
+            outer_optimizer: The optimizer used for the global parameters updated every "sync_every" steps.
+            sync_every: How often to update the model weights.
+            backup_device: The device to store the backup weights on. If None, the backup weights will be on CPU.
+            pin_memory: Whether to pin the memory for the backup weights (only for CPU device).
+        """
+
         if manager._use_async_quorum:
             raise ValueError(
                 "Using DiLoCo require synchronous quorum to be enabled. "
@@ -206,7 +208,9 @@ class DiLoCo:
         for name, p in self._model.named_parameters():
             if isinstance(p, DTensor):
                 p = extract_local_tensor(p.data)
-            t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=self._backup_device)
+
+            backup_device = self._backup_device or torch.device("cpu")
+            t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=backup_device)
             if (
                 self._pin_memory
                 and t.device == torch.device("cpu")
@@ -287,7 +291,7 @@ class DiLoCo:
         # Set the .grad field of each parameter to its pseudogradient
         for name, p in self._model.named_parameters():
             local_param = extract_local_tensor(p.data)
-            pseudogradient = local_param - self.original_parameters[name]
+            pseudogradient = local_param - self.original_parameters[name].to(p.device)
             if isinstance(p, DTensor):
                 p.grad._local_tensor = pseudogradient
             else:
