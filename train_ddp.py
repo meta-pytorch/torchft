@@ -143,10 +143,30 @@ def main() -> None:
     num_params = sum(p.numel() for p in m.parameters())
     print(f"Total number of parameters: {num_params}")
 
+    sort_by_keyword = "self_" + device + "_time_total"
+
+    def trace_handler(p):
+        output = p.key_averages().table(
+            sort_by=sort_by_keyword,
+            row_limit=100,
+        )
+        print(output)
+        p.export_chrome_trace("/tmp/trace_" + str(p.step_num) + ".json")
+
     # You can use an epoch based training but with faults it's easier to use step
     # based training.
+    prof = torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=5, warmup=1, active=10, repeat=2),
+        on_trace_ready=trace_handler,
+        record_shapes=True,
+        profile_memory=True,
+    )
+
+    prof.start()
     while True:
         for i, (inputs, labels) in enumerate(trainloader):
+            prof.step()
+
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -178,6 +198,7 @@ def main() -> None:
 
             if manager.current_step() >= 10000:
                 # complete training
+                prof.stop()
                 exit()
 
 

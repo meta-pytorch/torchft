@@ -448,6 +448,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
+    @torch.profiler.record_function("torchft::manager::_async_quorum")
     def _async_quorum(
         self,
         allow_heal: bool,
@@ -459,14 +460,17 @@ class Manager:
 
         if curr_device >= 0 and torch.cuda.is_available():
             torch.cuda.set_device(curr_device)
-        quorum = self._client._quorum(
-            rank=self._rank,
-            step=self._step,
-            checkpoint_metadata=self._checkpoint_transport.metadata(),
-            shrink_only=shrink_only,
-            timeout=quorum_timeout,
-            init_sync=self._init_sync,
-        )
+
+        quorum = None
+        with torch.profiler.record_function("torchft::manager::_client::_quorum"):
+            quorum = self._client._quorum(
+                rank=self._rank,
+                step=self._step,
+                checkpoint_metadata=self._checkpoint_transport.metadata(),
+                shrink_only=shrink_only,
+                timeout=quorum_timeout,
+                init_sync=self._init_sync,
+            )
 
         quorum_id = quorum.quorum_id
         replica_rank = quorum.replica_rank
@@ -505,7 +509,10 @@ class Manager:
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
             # TODO: handle configure errors
-            self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
+            with torch.profiler.record_function("torchft::manager::_pg.configure"):
+                self._pg.configure(
+                    store_prefixed_addr, replica_rank, replica_world_size
+                )
             self._quorum_id = quorum_id
 
         if allow_heal:
@@ -520,12 +527,15 @@ class Manager:
                     self._logger.info(
                         f"peers need recovery from us {quorum.recover_dst_ranks}"
                     )
-                    self._checkpoint_transport.send_checkpoint(
-                        dst_ranks=quorum.recover_dst_ranks,
-                        step=max_step,
-                        state_dict=self._manager_state_dict(),
-                        timeout=self._timeout,
-                    )
+                    with torch.profiler.record_function(
+                        "torchft::manager::_checkpoint_transport::send_checkpoint"
+                    ):
+                        self._checkpoint_transport.send_checkpoint(
+                            dst_ranks=quorum.recover_dst_ranks,
+                            step=max_step,
+                            state_dict=self._manager_state_dict(),
+                            timeout=self._timeout,
+                        )
 
                 # See manager.rs for healing conditions
                 if heal:
@@ -551,14 +561,17 @@ class Manager:
 
                     # we apply the user state dict only when safe from the main thread
                     # save it for now
-                    self._pending_state_dict = (
-                        self._checkpoint_transport.recv_checkpoint(
-                            src_rank=recover_src_rank,
-                            metadata=checkpoint_metadata,
-                            step=max_step,
-                            timeout=self._timeout,
+                    with torch.profiler.record_function(
+                        "torchft::manager::_checkpoint_transport::recv_checkpoint"
+                    ):
+                        self._pending_state_dict = (
+                            self._checkpoint_transport.recv_checkpoint(
+                                src_rank=recover_src_rank,
+                                metadata=checkpoint_metadata,
+                                step=max_step,
+                                timeout=self._timeout,
+                            )
                         )
-                    )
 
                     # pyre-fixme[6]: got object
                     self.load_state_dict(self._pending_state_dict["torchft"])
@@ -584,6 +597,7 @@ class Manager:
         self._pending_state_dict = None
         self._logger.info("Loaded state dict.")
 
+    @torch.profiler.record_function("torchft::manager::should_commit")
     def should_commit(self, timeout: Optional[timedelta] = None) -> bool:
         """
         .. note::
