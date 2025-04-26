@@ -121,3 +121,37 @@ class TestLighthouse(TestCase):
         finally:
             # Cleanup
             lighthouse.shutdown()
+
+    def test_heartbeat_round_trip(self):
+        lighthouse = LighthouseServer(
+            bind="[::]:0",
+            min_replicas=1,
+            heartbeat_timeout_ms=200,
+        )
+        try:
+            client = LighthouseClient(
+                addr=lighthouse.address(),
+                connect_timeout=timedelta(seconds=1),
+            )
+
+            client.heartbeat("rep0")
+
+            # (Should still be alive, as sleep time is less than timeout)
+            time.sleep(0.15)
+            q = client.quorum(
+                replica_id="rep0",
+                timeout=timedelta(milliseconds=500),
+            )
+            assert any(m.replica_id == "rep0" for m in q.participants)
+
+            # (Wait long enough for timeout to trigger)
+            time.sleep(0.25)
+            # "Probe" with different replica so we don't revive rep0
+            probe = client.quorum(
+                replica_id="probe",
+                timeout=timedelta(milliseconds=500),
+            )
+            assert all(m.replica_id != "rep0" for m in probe.participants)
+
+        finally:
+            lighthouse.shutdown()
