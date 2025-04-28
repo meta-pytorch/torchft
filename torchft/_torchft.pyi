@@ -99,3 +99,8 @@ class LighthouseClient:
         shrink_only: Optional[bool] = None,
         data: Optional[dict[Hashable, object]] = None,
     ) -> Quorum: ...
+    def heartbeat(
+        self,
+        replica_id: str,
+        timeout: timedelta = timedelta(seconds=5),
+    ) -> None: ...

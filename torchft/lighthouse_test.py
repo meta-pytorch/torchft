@@ -122,7 +122,7 @@ class TestLighthouse(TestCase):
             # Cleanup
             lighthouse.shutdown()
 
-    def test_heartbeat_round_trip(self):
+    def test_heartbeat_round_trip(self) -> None:
         lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=1,
