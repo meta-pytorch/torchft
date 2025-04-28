@@ -17,7 +17,9 @@ runtime users need to take care to not assume a static rank or world size.
 """
 
 import logging
+import os
 import threading
+import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -348,6 +350,12 @@ class ProcessGroup(BaseProcessGroup):
         """
         return None
 
+    def set_timeout(self, timeout: timedelta) -> None:
+        """
+        Sets the default timeout for the process group.
+        """
+        raise NotImplementedError("set_timeout not implemented")
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
@@ -411,16 +419,26 @@ class ProcessGroupWrapper(ProcessGroup):
     def _opts_hook(self, opts: T) -> T:
         return opts
 
+    @contextmanager
+    def _run_context(self) -> Generator[None, None, None]:
+        yield
+
+    def set_timeout(self, timeout: timedelta) -> None:
+        self._timeout = timeout
+
     def allgather(
         self,
         output_tensors: List[List[torch.Tensor]],
         input_tensor: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self._wrap_work(
-            self.parent.allgather(output_tensors, input_tensor, self._opts_hook(opts)),
-            opts,
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.allgather(
+                    output_tensors, input_tensor, self._opts_hook(opts)
+                ),
+                opts,
+            )
 
     def allgather_into_tensor_coalesced(
         self,
@@ -428,24 +446,27 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: AllgatherOptions,
     ) -> Work:
-        return self._wrap_work(
-            self.parent.allgather_into_tensor_coalesced(
-                output_tensors, input_tensors, self._opts_hook(opts)
-            ),
-            opts,
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.allgather_into_tensor_coalesced(
+                    output_tensors, input_tensors, self._opts_hook(opts)
+                ),
+                opts,
+            )
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
-        return self._wrap_work(
-            self.parent.allreduce(tensors, self._opts_hook(opts)), opts
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.allreduce(tensors, self._opts_hook(opts)), opts
+            )
 
     def allreduce_coalesced(
         self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
     ) -> Work:
-        return self._wrap_work(
-            self.parent.allreduce_coalesced(tensors, self._opts_hook(opts)), opts
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.allreduce_coalesced(tensors, self._opts_hook(opts)), opts
+            )
 
     def alltoall_base(
         self,
@@ -455,27 +476,31 @@ class ProcessGroupWrapper(ProcessGroup):
         input_split_sizes: List[int],
         opts: AllToAllOptions,
     ) -> Work:
-        return self._wrap_work(
-            self.parent.alltoall_base(
-                output_buffer,
-                input_buffer,
-                output_split_sizes,
-                input_split_sizes,
-                self._opts_hook(opts),
-            ),
-            opts,
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.alltoall_base(
+                    output_buffer,
+                    input_buffer,
+                    output_split_sizes,
+                    input_split_sizes,
+                    self._opts_hook(opts),
+                ),
+                opts,
+            )
 
     def barrier(self, opts: BarrierOptions) -> Work:
-        return self._wrap_work(self.parent.barrier(self._opts_hook(opts)), opts)
+        with self._run_context():
+            return self._wrap_work(self.parent.barrier(self._opts_hook(opts)), opts)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
-        return self._wrap_work(
-            self.parent.broadcast(tensor_list, self._opts_hook(opts)), opts
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.broadcast(tensor_list, self._opts_hook(opts)), opts
+            )
 
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
-        return self._wrap_work(self.parent.recv(tensors, src_rank, tag), None)
+        with self._run_context():
+            return self._wrap_work(self.parent.recv(tensors, src_rank, tag), None)
 
     def reduce_scatter(
         self,
@@ -483,12 +508,13 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[List[torch.Tensor]],
         opts: object,
     ) -> Work:
-        return self._wrap_work(
-            self.parent.reduce_scatter(
-                output_tensors, input_tensors, self._opts_hook(opts)
-            ),
-            opts,
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.reduce_scatter(
+                    output_tensors, input_tensors, self._opts_hook(opts)
+                ),
+                opts,
+            )
 
     def reduce_scatter_tensor_coalesced(
         self,
@@ -496,15 +522,17 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensors: List[torch.Tensor],
         opts: ReduceScatterOptions,
     ) -> Work:
-        return self._wrap_work(
-            self.parent.reduce_scatter_tensor_coalesced(
-                output_tensors, input_tensors, self._opts_hook(opts)
-            ),
-            opts,
-        )
+        with self._run_context():
+            return self._wrap_work(
+                self.parent.reduce_scatter_tensor_coalesced(
+                    output_tensors, input_tensors, self._opts_hook(opts)
+                ),
+                opts,
+            )
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
-        return self._wrap_work(self.parent.send(tensors, dst_rank, tag), None)
+        with self._run_context():
+            return self._wrap_work(self.parent.send(tensors, dst_rank, tag), None)
 
     def size(self) -> int:
         return self.parent.size()
@@ -670,6 +698,15 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
 
         self._errored: Optional[Exception] = None
 
+        NONBLOCKING_TIMEOUT_ENV = "TORCH_NCCL_NONBLOCKING_TIMEOUT"
+        if NONBLOCKING_TIMEOUT_ENV not in os.environ:
+            warnings.warn(
+                f"{NONBLOCKING_TIMEOUT_ENV} is not set, defaulting to {timeout}. "
+                "If any nonblocking NCCL operations have already run this may "
+                "result in the default timeout of 30 minutes and hangs on error."
+            )
+            os.environ[NONBLOCKING_TIMEOUT_ENV] = str(timeout.total_seconds())
+
     def _opts_hook(self, opts: T) -> T:
         if not self._use_abort:
             return opts
@@ -691,16 +728,33 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
             timeout = opts.timeout
         return _WorkCUDATimeout(self, work, timeout)
 
+    @contextmanager
+    def _run_context(self) -> Generator[None, None, None]:
+        timeout: timedelta = self._timeout
+
+        def callback() -> None:
+            logger.error(f"aborting after {timeout}!")
+            self.abort()
+
+        # when running in blocking mode we need to make sure collectives can
+        # timeout
+        with context_timeout(callback, timeout):
+            yield
+
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         # pyre-fixme[21]: no attribute ProcessGroupNCCL
         from torch.distributed import ProcessGroupNCCL as BaseProcessGroupNCCL
 
         self._errored = None
 
+        # pyre-fixme[16]: no attribute ProcessGroupNCCL
+        opts = BaseProcessGroupNCCL.Options()
+        opts.config.blocking = False
+
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
-        backend_class = BaseProcessGroupNCCL(store, rank, world_size)
+        backend_class = BaseProcessGroupNCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         pg._register_backend(
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
@@ -1586,6 +1640,9 @@ class ProcessGroupBaby(ProcessGroup):
 
         assert self._pipe is not None
         return cast(int, self._pipe.recv(self._timeout))
+
+    def set_timeout(self, timeout: timedelta) -> None:
+        self._timeout = timeout.total_seconds()
 
 
 @dataclass

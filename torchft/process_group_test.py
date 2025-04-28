@@ -575,11 +575,11 @@ class ProcessGroupTest(TestCase):
         t = torch.tensor([2], device=device)
         pg.allreduce([t], ReduceOp.SUM).wait()
         self.assertEqual(mock_stream_timeout.call_count, 1)
-        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 1)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 2)
 
         pg.allreduce([t], ReduceOp.SUM).get_future().wait()
         self.assertEqual(mock_stream_timeout.call_count, 2)
-        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 2)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 4)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(
@@ -902,7 +902,7 @@ class MultiPgBaseTest(TestCase):
         elif backend == "baby_gloo":
             return ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         elif backend == "nccl":
-            return ProcessGroupNCCL(timeout=timedelta(seconds=1))
+            return ProcessGroupNCCL(timeout=timedelta(seconds=10))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
         elif backend == "dummy":
@@ -948,6 +948,8 @@ class MultiPgBaseTest(TestCase):
         """
 
         def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
+            pg.set_timeout(timedelta(seconds=30))
+
             if dev == "cuda":
                 torch.cuda.set_device(rank)
                 # Use a separate stream to avoid deadlocks between threads.
@@ -973,12 +975,14 @@ class MultiPgBaseTest(TestCase):
                 pg.shutdown()
                 return f"Rank{rank} crashed"
 
+            pg.set_timeout(timedelta(seconds=1))
+
             # We hardcode the list of expected errors.
             # gloo: Connection closed by peer, timed out waiting, no error, read error
             # nccl: Tensor-likes are not equal/not close (due to abort)
             with self.assertRaisesRegex(
                 Exception,
-                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close)",
+                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close|process group not initialized)",
             ):
                 test(pg, rank, t1.clone())
                 raise RuntimeError("no error")
