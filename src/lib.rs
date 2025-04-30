@@ -35,7 +35,8 @@ pub mod torchftpb {
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
-    CheckpointMetadataRequest, LighthouseQuorumRequest, ManagerQuorumRequest, ShouldCommitRequest,
+    CheckpointMetadataRequest, LighthouseHeartbeatRequest, LighthouseQuorumRequest,
+    ManagerQuorumRequest, ShouldCommitRequest,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -561,6 +562,26 @@ impl LighthouseClient {
             Ok(quorum)
         });
         Ok(convert_quorum(py, &quorum?)?)
+    }
+
+    /// Send a single heartbeat to the lighthouse.
+    ///
+    /// Args:
+    ///     replica_id (str):  The replica_id you registered with.
+    ///     timeout      (timedelta, optional):  Per-RPC deadline.  Default = 5 s.
+    #[pyo3(signature = (replica_id, timeout = Duration::from_secs(5)))]
+    fn heartbeat(
+        &self,
+        py: Python<'_>,
+        replica_id: String,
+        timeout: Duration,
+    ) -> Result<(), StatusError> {
+        py.allow_threads(move || {
+            let mut req = tonic::Request::new(LighthouseHeartbeatRequest { replica_id });
+            req.set_timeout(timeout);
+            self.runtime.block_on(self.client.clone().heartbeat(req))?;
+            Ok(())
+        })
     }
 }
 

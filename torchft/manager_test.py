@@ -30,9 +30,9 @@ class TestManager(TestCase):
     manager: Optional[Manager]  # pyre-fixme[13]: never initialized
 
     def tearDown(self) -> None:
-        manager = self.manager
-        if manager is not None:
-            manager.shutdown(wait=False)
+        # Manager cleanup might be handled by _create_manager
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.shutdown(wait=False)
 
     def _create_manager(
         self,
@@ -41,6 +41,7 @@ class TestManager(TestCase):
         world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
         timeout: timedelta = timedelta(seconds=10),
         init_sync: bool = True,
+        max_retries: Optional[int] = None,
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         pg.errored.return_value = None
@@ -69,6 +70,7 @@ class TestManager(TestCase):
                 world_size_mode=world_size_mode,
                 timeout=timeout,
                 init_sync=init_sync,
+                max_retries=max_retries,
             )
             self.manager = manager
         return manager
@@ -645,3 +647,50 @@ class TestManager(TestCase):
         manager._init_sync = True
         manager.start_quorum()
         self.assertEqual(client_mock()._quorum.call_args.kwargs["init_sync"], True)
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_max_retries(self, client_mock: MagicMock) -> None:
+        # Create a manager with max_retries=2
+        manager = self._create_manager(max_retries=2)
+
+        # Setup quorum for testing
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+        client_mock()._quorum.return_value = quorum
+
+        # Make should_commit always return False to simulate failures
+        client_mock().should_commit = MagicMock(return_value=False)
+
+        # Start quorum
+        manager.start_quorum()
+
+        # First failure
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._commit_failures, 1)
+
+        # Second failure
+        self.assertFalse(manager.should_commit())
+        self.assertEqual(manager._commit_failures, 2)
+
+        # Third failure - should raise exception
+        with self.assertRaises(RuntimeError) as context:
+            manager.should_commit()
+
+        self.assertIn("exceeding max_retries=2", str(context.exception))
+        self.assertEqual(manager._commit_failures, 3)
+
+        # Now test that success resets the counter
+        manager._commit_failures = 2  # Reset to just before failure threshold
+        client_mock().should_commit = MagicMock(return_value=True)  # Now succeed
+
+        # This should succeed and reset the counter
+        self.assertTrue(manager.should_commit())
+        self.assertEqual(manager._commit_failures, 0)

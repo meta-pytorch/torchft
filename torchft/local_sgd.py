@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type
 import torch
 import torch.distributed as dist
 from torch import nn, optim
+from torch.distributed.tensor import DTensor
 from torch.nn.parameter import Parameter
 from torch.optim.optimizer import Optimizer
 from torch.utils.hooks import RemovableHandle
@@ -22,6 +23,20 @@ from torch.utils.hooks import RemovableHandle
 from torchft.manager import Manager
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+def extract_local_tensor(t: torch.Tensor) -> torch.Tensor:
+    """
+    Returns a cloned version of the input tensor. If the input tensor is a DTensor,
+    it extracts and clones its local representation.
+    """
+    new_tensor = None
+    if isinstance(t, DTensor):
+        new_tensor = t.to_local().clone()
+    else:
+        new_tensor = t.clone()
+    new_tensor.grad = None
+    return new_tensor
 
 
 class LocalSGD:
@@ -33,15 +48,6 @@ class LocalSGD:
     way using a torchft Manager. The allreduce on the parameters will happen
     every sync_every steps after the optimizer.step call.
 
-    To implement safe and fault tolerant, this requires a backup copy of the
-    weights. By default these are stored in CPU memory. If any error occurs
-    during the LocalSGD step, the step will be discarded and the model
-    parameters will reset back to the last time LocalSGD synchronized.
-
-    The backup weights could be eliminated by relaxing the guarantee of exactly
-    `sync_every` steps but that would diverge from the LocalSGD algorithm.
-    DiLoCo also needs this backup copy to compute the delta.
-
     The torchft quorum is computed at the beginning of ``sync_every`` steps. If
     any error occurs, or a worker fails between syncs, ``sync_every`` steps will be
     discarded and a new quorum will be computed on the next step.
@@ -49,9 +55,6 @@ class LocalSGD:
     If running in async mode, on a joining worker the first ``sync_every`` steps
     will discarded as the model will be recovering during that period. When
     using sync mode, the checkpoint will be restored prior to the first step.
-
-    TODO: add a way via Manager to detect workers failing early for shrink only
-    TODO: add DiLoCo support
     """
 
     def __init__(
@@ -67,8 +70,6 @@ class LocalSGD:
             model: The model to wrap.
             optimizer: The optimizer used by the model.
             sync_every: How often to sync the model weights.
-            backup_device: The device to store the backup of the model parameters on. (default cpu)
-            pin_memory: Whether to pin the memory used for the backup of the model parameters.
         """
         super().__init__()
         self._manager = manager
@@ -127,7 +128,15 @@ class LocalSGD:
         if self._manager.should_commit():
             # Update the model parameters with the averaged values
             for param, avg_param in zip(self._model.parameters(), averaged_parameters):
-                param.data.copy_(avg_param)
+                if isinstance(param, DTensor):
+                    # we averaged the local version of the tensor so need to copy it back as a DTensor
+                    param.data.copy_(
+                        DTensor.from_local(
+                            avg_param, param.device_mesh, param.placements
+                        )
+                    )
+                else:
+                    param.data.copy_(avg_param)
 
     def _average(self) -> list[torch.Tensor]:
         """
@@ -137,8 +146,7 @@ class LocalSGD:
         averaged_parameters = []
         for p in self._model.parameters():
             # Create a new tensor to store the averaged parameter
-            p.data.grad = None
-            avg_param = p.data.clone()
+            avg_param = extract_local_tensor(p)
             works.append(self._manager.allreduce(avg_param))
             averaged_parameters.append(avg_param)
         for work in works:
@@ -151,7 +159,12 @@ class DiLoCo:
     DiLoCo is a subclass of LocalSGD that overrides the synchronization
     mechanism to average and synchronize the pseudogradients (delta of the previous global weight and current local weights).
 
-    diloco: https://arxiv.org/pdf/2311.08105
+    This algorithm requires a backup copy of the
+    weights. By default these are stored in CPU memory. If any error occurs
+    during the DiLoCo step, the step will be discarded and the model
+    parameters will reset back to the last time DiLoCo synchronized.
+
+    DiLoCo paper: https://arxiv.org/pdf/2311.08105
     """
 
     bucket_cap_mb = 32 * 1024 * 1024
@@ -169,6 +182,17 @@ class DiLoCo:
         use_bucketization: bool = False,
         bucket_cap_mb: int = None,
     ) -> None:
+        """
+        Args:
+            manager: The manager to use.
+            model: The model to wrap.
+            inner_optimizer: The optimizer used for the local parameters every step.
+            outer_optimizer: The optimizer used for the global parameters updated every "sync_every" steps.
+            sync_every: How often to update the model weights.
+            backup_device: The device to store the backup weights on. If None, the backup weights will be on CPU.
+            pin_memory: Whether to pin the memory for the backup weights (only for CPU device).
+        """
+
         if manager._use_async_quorum:
             raise ValueError(
                 "Using DiLoCo require synchronous quorum to be enabled. "
@@ -194,7 +218,11 @@ class DiLoCo:
 
         self.original_parameters: Dict[str, torch.Tensor] = {}
         for name, p in self._model.named_parameters():
-            t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=self._backup_device)
+            if isinstance(p, DTensor):
+                p = extract_local_tensor(p.data)
+
+            backup_device = self._backup_device or torch.device("cpu")
+            t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=backup_device)
             if (
                 self._pin_memory
                 and t.device == torch.device("cpu")
@@ -210,13 +238,23 @@ class DiLoCo:
         with torch.no_grad():
             # TODO: consider running copy on a separate stream
             for name, p in self._model.named_parameters():
-                self.original_parameters[name].copy_(p.data, non_blocking=True)
+                param_to_local = extract_local_tensor(p.data)
+                self.original_parameters[name].copy_(param_to_local, non_blocking=True)
 
     def _restore_parameters(self) -> None:
         with torch.no_grad():
             # TODO: consider running copy on a separate stream
             for name, p in self._model.named_parameters():
-                p.data.copy_(self.original_parameters[name], non_blocking=False)
+                if isinstance(p, DTensor):
+                    # we averaged the local version of the tensor so need to copy it back as a DTensor
+                    p.data.copy_(
+                        DTensor.from_local(
+                            self.original_parameters[name], p.device_mesh, p.placements
+                        ),
+                        non_blocking=False,
+                    )
+                else:
+                    p.data.copy_(self.original_parameters[name], non_blocking=False)
 
     def __enter__(self) -> "DiLoCo":
         # Add optimizer hook which increments the local step counter and syncs if necessary
@@ -264,8 +302,12 @@ class DiLoCo:
         """
         # Set the .grad field of each parameter to its pseudogradient
         for name, p in self._model.named_parameters():
-            pseudogradient = p.data - self.original_parameters[name]
-            p.grad = pseudogradient
+            local_param = extract_local_tensor(p.data)
+            pseudogradient = local_param - self.original_parameters[name].to(p.device)
+            if isinstance(p, DTensor):
+                p.grad._local_tensor = pseudogradient
+            else:
+                p.grad = pseudogradient
 
         self._average_grads()
         # Restore the parameters back to the previous state
@@ -291,9 +333,12 @@ class DiLoCo:
         """Performs allreduce on each gradient tensor separately (original method)."""
         works = []
         for p in self._model.parameters():
-            if p.grad is None:
-                continue
-            work = self._manager.allreduce(p.grad)
+            # Perform allreduce on the pseudogradients
+            assert p.grad is not None
+            if isinstance(p, DTensor):
+                work = self._manager.allreduce(p.grad._local_tensor)
+            else:
+                work = self._manager.allreduce(p.grad)
             works.append(work)
 
         for work in works:

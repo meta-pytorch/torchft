@@ -107,6 +107,7 @@ class Manager:
         heartbeat_interval: timedelta = timedelta(milliseconds=100),
         checkpoint_transport: Optional[CheckpointTransport[Dict[str, T]]] = None,
         init_sync: bool = True,
+        max_retries: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -147,6 +148,8 @@ class Manager:
             init_sync: whether to synchronize the model weights on step 0. If
                 all of the model weights are initialized identically via
                 ``torch.set_seed`` you should set this to False.
+            max_retries: the maximum number of consecutive should_commit failures to allow
+                before raising an exception. If None, will retry indefinitely.
         """
         self._load_state_dict = load_state_dict
         self._user_state_dict = state_dict
@@ -157,6 +160,8 @@ class Manager:
         self._connect_timeout = connect_timeout
         self._world_size_mode = world_size_mode
         self._init_sync = init_sync
+        self._max_retries = max_retries
+        self._commit_failures = 0
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
         store_port = store_port or int(os.environ["MASTER_PORT"])
@@ -443,6 +448,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
+    @torch.profiler.record_function("torchft::manager::_async_quorum")
     def _async_quorum(
         self,
         allow_heal: bool,
@@ -454,14 +460,17 @@ class Manager:
 
         if curr_device >= 0 and torch.cuda.is_available():
             torch.cuda.set_device(curr_device)
-        quorum = self._client._quorum(
-            rank=self._rank,
-            step=self._step,
-            checkpoint_metadata=self._checkpoint_transport.metadata(),
-            shrink_only=shrink_only,
-            timeout=quorum_timeout,
-            init_sync=self._init_sync,
-        )
+
+        quorum = None
+        with torch.profiler.record_function("torchft::manager::_client::_quorum"):
+            quorum = self._client._quorum(
+                rank=self._rank,
+                step=self._step,
+                checkpoint_metadata=self._checkpoint_transport.metadata(),
+                shrink_only=shrink_only,
+                timeout=quorum_timeout,
+                init_sync=self._init_sync,
+            )
 
         quorum_id = quorum.quorum_id
         replica_rank = quorum.replica_rank
@@ -500,7 +509,10 @@ class Manager:
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
             # TODO: handle configure errors
-            self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
+            with torch.profiler.record_function("torchft::manager::_pg.configure"):
+                self._pg.configure(
+                    store_prefixed_addr, replica_rank, replica_world_size
+                )
             self._quorum_id = quorum_id
 
         if allow_heal:
@@ -515,12 +527,15 @@ class Manager:
                     self._logger.info(
                         f"peers need recovery from us {quorum.recover_dst_ranks}"
                     )
-                    self._checkpoint_transport.send_checkpoint(
-                        dst_ranks=quorum.recover_dst_ranks,
-                        step=max_step,
-                        state_dict=self._manager_state_dict(),
-                        timeout=self._timeout,
-                    )
+                    with torch.profiler.record_function(
+                        "torchft::manager::_checkpoint_transport::send_checkpoint"
+                    ):
+                        self._checkpoint_transport.send_checkpoint(
+                            dst_ranks=quorum.recover_dst_ranks,
+                            step=max_step,
+                            state_dict=self._manager_state_dict(),
+                            timeout=self._timeout,
+                        )
 
                 # See manager.rs for healing conditions
                 if heal:
@@ -546,14 +561,17 @@ class Manager:
 
                     # we apply the user state dict only when safe from the main thread
                     # save it for now
-                    self._pending_state_dict = (
-                        self._checkpoint_transport.recv_checkpoint(
-                            src_rank=recover_src_rank,
-                            metadata=checkpoint_metadata,
-                            step=max_step,
-                            timeout=self._timeout,
+                    with torch.profiler.record_function(
+                        "torchft::manager::_checkpoint_transport::recv_checkpoint"
+                    ):
+                        self._pending_state_dict = (
+                            self._checkpoint_transport.recv_checkpoint(
+                                src_rank=recover_src_rank,
+                                metadata=checkpoint_metadata,
+                                step=max_step,
+                                timeout=self._timeout,
+                            )
                         )
-                    )
 
                     # pyre-fixme[6]: got object
                     self.load_state_dict(self._pending_state_dict["torchft"])
@@ -579,6 +597,7 @@ class Manager:
         self._pending_state_dict = None
         self._logger.info("Loaded state dict.")
 
+    @torch.profiler.record_function("torchft::manager::should_commit")
     def should_commit(self, timeout: Optional[timedelta] = None) -> bool:
         """
         .. note::
@@ -595,8 +614,13 @@ class Manager:
 
         This should only be called once per step.
 
+        If max_retries is set and should_commit fails that many times consecutively,
+        this method will raise a RuntimeError to prevent indefinite failure loops.
+
         Returns:
             True if the optimizer should be stepped, False otherwise
+        Raises:
+            RuntimeError: if should_commit fails max_retries times in a row and max_retries is set
         """
         for work in self._pending_work:
             # check at the beginning of since .wait() may trigger errors
@@ -638,6 +662,17 @@ class Manager:
         if should_commit:
             self._step += 1
             self._batches_committed += self.num_participants()
+            self._commit_failures = 0  # Reset failure counter on success
+        else:
+            self._commit_failures += 1
+            # Check if we've hit max retries
+            if (
+                self._max_retries is not None
+                and self._commit_failures > self._max_retries
+            ):
+                msg = f"should_commit failed {self._commit_failures} times consecutively, exceeding max_retries={self._max_retries}"
+                self._logger.exception(msg)
+                raise RuntimeError(msg)
 
         return should_commit
 

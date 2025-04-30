@@ -11,7 +11,7 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Callable, Dict, List, cast
 from unittest import TestCase, skipIf, skipUnless
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 import torch.distributed as dist
@@ -553,6 +553,34 @@ class ProcessGroupTest(TestCase):
 
         torch.cuda.synchronize()
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(
+        torch.cuda.is_available() and torch.cuda.nccl.version() >= (2, 25),
+        "needs NCCL >=2.25",
+    )
+    @patch("torchft.process_group.stream_timeout", autospec=True)
+    @patch("torchft.process_group.context_timeout", autospec=True)
+    def test_nccl_timeouts(
+        self, mock_context_timeout: Mock, mock_stream_timeout: Mock
+    ) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        device = "cuda"
+
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = ProcessGroupNCCL()
+        pg.configure(store_addr, 0, 1)
+
+        t = torch.tensor([2], device=device)
+        pg.allreduce([t], ReduceOp.SUM).wait()
+        self.assertEqual(mock_stream_timeout.call_count, 1)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 2)
+
+        pg.allreduce([t], ReduceOp.SUM).get_future().wait()
+        self.assertEqual(mock_stream_timeout.call_count, 2)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 4)
+
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(
         torch.cuda.is_available(),
@@ -874,7 +902,7 @@ class MultiPgBaseTest(TestCase):
         elif backend == "baby_gloo":
             return ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         elif backend == "nccl":
-            return ProcessGroupNCCL(timeout=timedelta(seconds=1))
+            return ProcessGroupNCCL(timeout=timedelta(seconds=10))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
         elif backend == "dummy":
@@ -920,6 +948,8 @@ class MultiPgBaseTest(TestCase):
         """
 
         def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
+            pg.set_timeout(timedelta(seconds=30))
+
             if dev == "cuda":
                 torch.cuda.set_device(rank)
                 # Use a separate stream to avoid deadlocks between threads.
@@ -945,12 +975,14 @@ class MultiPgBaseTest(TestCase):
                 pg.shutdown()
                 return f"Rank{rank} crashed"
 
+            pg.set_timeout(timedelta(seconds=1))
+
             # We hardcode the list of expected errors.
             # gloo: Connection closed by peer, timed out waiting, no error, read error
             # nccl: Tensor-likes are not equal/not close (due to abort)
             with self.assertRaisesRegex(
                 Exception,
-                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close)",
+                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close|process group not initialized)",
             ):
                 test(pg, rank, t1.clone())
                 raise RuntimeError("no error")
@@ -969,7 +1001,7 @@ class MultiPgBaseTest(TestCase):
         self._collect(futs)
 
 
-class GlooMultiPgTest(MultiPgBaseTest):
+class NormalGlooMultiPgTest(MultiPgBaseTest):
     BACKEND = "gloo"
     WORLD_SIZE = 3
     SKIP = [

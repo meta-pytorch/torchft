@@ -47,6 +47,9 @@ jobs:
         if [ "${{ matrix.torch-version }}" = "nightly" ]; then
           pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
         fi
+        if [ "${{ matrix.torch-version }}" = "test" ]; then
+          pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
+        fi
 
         # Install dependencies
         pip install -e .[dev] -v
