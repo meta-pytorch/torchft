@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, create_autospec
 
 import torch
 from parameterized import parameterized
-from torch import nn, optim
+from torch import Tensor, nn, optim
 from torch.distributed.tensor import DTensor
 
 from torchft.local_sgd import DiLoCo, LocalSGD, extract_local_tensor
@@ -156,8 +156,11 @@ class DiLoCoTest(TestCase):
         ]
     )
     def test_diloco_allreduce_call_efficiency(
-        self, name, use_bucketization, expect_fewer_calls
-    ):
+        self,
+        name: str,
+        use_bucketization: bool,
+        expect_fewer_calls: bool,
+    ) -> None:
         model = SimpleModel()
 
         inner_optimizer = torch.optim.AdamW(
@@ -192,11 +195,11 @@ class DiLoCoTest(TestCase):
             param_count = len([p for p in model.parameters() if p.requires_grad])
 
             if expect_fewer_calls:
-                self.assertLess(allreduce_calls, param_count)
+                self.assertLess(int(allreduce_calls), int(param_count))
             else:
-                self.assertEqual(allreduce_calls, param_count)
+                self.assertEqual(int(allreduce_calls), int(param_count))
 
-    def test_bucketization_correctness(self):
+    def test_bucketization_correctness(self) -> None:
         class TinyModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -220,7 +223,7 @@ class DiLoCoTest(TestCase):
         manager.should_commit.return_value = True
 
         # Define fake allreduce: multiplies buffer by 2
-        def fake_allreduce(tensor):
+        def fake_allreduce(tensor: Tensor) -> MagicMock:
             tensor.mul_(2)
             return MagicMock(wait=lambda: None)
 

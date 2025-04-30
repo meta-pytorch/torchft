@@ -167,8 +167,8 @@ class DiLoCo:
     DiLoCo paper: https://arxiv.org/pdf/2311.08105
     """
 
-    bucket_cap_mb = 32 * 1024 * 1024
-    use_bucketization = False
+    bucket_cap_mb: int = 32 * 1024 * 1024
+    use_bucketization: bool = False
 
     def __init__(
         self,
@@ -180,7 +180,7 @@ class DiLoCo:
         backup_device: Optional[torch.device] = None,
         pin_memory: bool = True,
         use_bucketization: bool = False,
-        bucket_cap_mb: int = None,
+        bucket_cap_mb: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -347,7 +347,6 @@ class DiLoCo:
     def bucketize_and_allreduce(
         self,
         tensors: List[torch.Tensor],
-        allreduce_fn: Callable[[torch.Tensor], Any],
         bucket_size_bytes: int,
     ) -> None:
         """
@@ -355,7 +354,6 @@ class DiLoCo:
 
         Args:
             tensors: List of torch tensors (e.g., gradients).
-            allreduce_fn: Function that takes a tensor and performs allreduce (e.g., manager.allreduce).
             bucket_size_bytes: Max size of each bucket in bytes.
         """
         if not tensors:
@@ -382,7 +380,7 @@ class DiLoCo:
                 pack_offset += numel
                 flat_index += 1
 
-            work = allreduce_fn(flat_buffer)
+            work = self._manager.allreduce(flat_buffer)
             work.wait()
 
             for t, pack_offset, numel in bucket_tensors:
@@ -397,6 +395,5 @@ class DiLoCo:
         grads = [p.grad for p in self._model.parameters() if p.grad is not None]
         self.bucketize_and_allreduce(
             grads,
-            allreduce_fn=self._manager.allreduce,
             bucket_size_bytes=self.bucket_cap_mb,
         )
