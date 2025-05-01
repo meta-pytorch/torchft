@@ -470,6 +470,7 @@ class Manager:
                 shrink_only=shrink_only,
                 timeout=quorum_timeout,
                 init_sync=self._init_sync,
+                commit_failures=self._commit_failures,
             )
 
         quorum_id = quorum.quorum_id

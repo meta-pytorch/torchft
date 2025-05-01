@@ -55,7 +55,7 @@ macro_rules! info_with_replica {
 struct ManagerState {
     checkpoint_metadata: HashMap<i64, String>,
     channel: broadcast::Sender<Quorum>,
-    participants: HashSet<i64>,
+    participants: HashMap<i64, QuorumMember>,
 
     should_commit_channel: broadcast::Sender<bool>,
     should_commit_failures: HashSet<i64>,
@@ -127,7 +127,7 @@ impl Manager {
             state: Mutex::new(ManagerState {
                 checkpoint_metadata: HashMap::new(),
                 channel: tx,
-                participants: HashSet::new(),
+                participants: HashMap::new(),
 
                 should_commit_channel: should_commit_tx,
                 should_commit_count: HashSet::new(),
@@ -257,24 +257,21 @@ impl ManagerService for Arc<Manager> {
                 .checkpoint_metadata
                 .insert(req.rank, req.checkpoint_metadata.clone());
 
+            let member = QuorumMember {
+                replica_id: self.replica_id.clone(),
+                address: self.address(),
+                store_address: self.store_address.clone(),
+                step: req.step,
+                world_size: self.world_size,
+                shrink_only: req.shrink_only,
+                data: String::new(),
+                commit_failures: req.commit_failures,
+            };
             // TODO check step
-            state.participants.insert(rank);
+            state.participants.insert(rank, member.clone());
             let rx = state.channel.subscribe();
 
-            self._run_quorum(
-                &mut state,
-                QuorumMember {
-                    replica_id: self.replica_id.clone(),
-                    address: self.address(),
-                    store_address: self.store_address.clone(),
-                    step: req.step,
-                    world_size: self.world_size,
-                    shrink_only: req.shrink_only,
-                    data: String::new(),
-                },
-                timeout,
-            )
-            .await?;
+            self._run_quorum(&mut state, member, timeout).await?;
 
             rx
         };
@@ -505,6 +502,11 @@ fn compute_quorum_results(
         replica_rank: replica_rank as i64,
         replica_world_size: participants.len() as i64,
         heal: heal,
+        commit_failures: participants
+            .iter()
+            .map(|p| p.commit_failures)
+            .max()
+            .unwrap_or(0),
     })
 }
 
@@ -610,6 +612,7 @@ mod tests {
             checkpoint_metadata: "addr".to_string(),
             shrink_only: false,
             init_sync: true,
+            commit_failures: 3,
         });
         request.set_timeout(Duration::from_secs(10));
         let resp = client.quorum(request).await?.into_inner();
@@ -626,6 +629,7 @@ mod tests {
         assert_eq!(resp.replica_rank, 0);
         assert_eq!(resp.replica_world_size, 1);
         assert_eq!(resp.heal, false);
+        assert_eq!(resp.commit_failures, 3);
 
         Ok(())
     }
@@ -670,6 +674,7 @@ mod tests {
                     checkpoint_metadata: "addr".to_string(),
                     shrink_only: false,
                     init_sync: true,
+                    commit_failures: 0,
                 });
                 request.set_timeout(Duration::from_secs(10));
 
@@ -761,6 +766,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -770,6 +776,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             ],
             created: None,
@@ -813,6 +820,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -822,6 +830,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "replica_2".to_string(),
@@ -831,6 +840,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "replica_3".to_string(),
@@ -840,6 +850,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "replica_4".to_string(),
@@ -849,6 +860,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             ],
             created: None,
@@ -900,6 +912,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -909,6 +922,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             ],
             created: None,
@@ -929,6 +943,41 @@ mod tests {
         quorum.participants[0].step = 1;
         let results = compute_quorum_results("replica_1", 0, &quorum, false)?;
         assert!(results.heal);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compute_quorum_results_commit_failures() -> Result<()> {
+        let quorum = Quorum {
+            quorum_id: 1,
+            participants: vec![
+                QuorumMember {
+                    replica_id: "replica_0".to_string(),
+                    address: "addr_0".to_string(),
+                    store_address: "store_addr_0".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                    data: String::new(),
+                    commit_failures: 0,
+                },
+                QuorumMember {
+                    replica_id: "replica_1".to_string(),
+                    address: "addr_1".to_string(),
+                    store_address: "store_addr_1".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                    data: String::new(),
+                    commit_failures: 2,
+                },
+            ],
+            created: None,
+        };
+
+        let results = compute_quorum_results("replica_0", 0, &quorum, true)?;
+        assert_eq!(results.commit_failures, 2);
 
         Ok(())
     }

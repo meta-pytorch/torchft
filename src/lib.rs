@@ -177,6 +177,7 @@ impl ManagerClient {
         checkpoint_metadata: String,
         shrink_only: bool,
         init_sync: bool,
+        commit_failures: i64,
         timeout: Duration,
     ) -> Result<QuorumResult, StatusError> {
         py.allow_threads(move || {
@@ -186,6 +187,7 @@ impl ManagerClient {
                 checkpoint_metadata: checkpoint_metadata,
                 shrink_only: shrink_only,
                 init_sync: init_sync,
+                commit_failures: commit_failures,
             });
 
             // This timeout is processed on the server side so we also enable
@@ -547,6 +549,7 @@ impl LighthouseClient {
                     world_size: world_size,
                     shrink_only: shrink_only,
                     data: data_string,
+                    commit_failures: 0,
                 }),
             });
 
