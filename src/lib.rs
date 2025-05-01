@@ -698,11 +698,17 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         .debug(Color::Blue)
         .trace(Color::Magenta);
     let level_filter = match env::var("RUST_LOG").as_deref() {
-        Ok("error") => LevelFilter::Error,
-        Ok("warn") => LevelFilter::Warn,
-        Ok("info") => LevelFilter::Info,
-        Ok("debug") => LevelFilter::Debug,
-        Ok("trace") => LevelFilter::Trace,
+        Ok(value) => {
+            let value_lower = value.to_lowercase();
+            match value_lower.as_str() {
+                "error" => LevelFilter::Error,
+                "warn" => LevelFilter::Warn,
+                "info" => LevelFilter::Info,
+                "debug" => LevelFilter::Debug,
+                "trace" => LevelFilter::Trace,
+                _ => LevelFilter::Info,
+            }
+        }
         _ => LevelFilter::Info,
     };
     fern::Dispatch::new()
