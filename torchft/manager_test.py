@@ -14,6 +14,7 @@ import torch
 from torch.distributed import TCPStore
 
 from torchft._torchft import QuorumResult
+from torchft.checkpointing.transport import CheckpointTransport
 from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
 from torchft.process_group import ProcessGroup, _DummyWork
 
@@ -647,6 +648,79 @@ class TestManager(TestCase):
         manager._init_sync = True
         manager.start_quorum()
         self.assertEqual(client_mock()._quorum.call_args.kwargs["init_sync"], True)
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_quorum_checkpoint_errors(self, client_mock: MagicMock) -> None:
+        manager = self._create_manager(use_async_quorum=True)
+        client_mock().should_commit = MagicMock(return_value=False)
+
+        transport = MagicMock(spec=CheckpointTransport)
+        transport.send_checkpoint.side_effect = RuntimeError("send failure")
+        transport.recv_checkpoint.side_effect = RuntimeError("recv failure")
+        manager._checkpoint_transport = transport
+
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.recover_src_rank = 0
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 20
+        quorum.max_rank = None
+        quorum.max_world_size = 2
+        quorum.heal = True
+
+        client_mock()._quorum.return_value = quorum
+
+        manager.start_quorum()
+        manager.wait_quorum()
+        self.assertFalse(manager.should_commit())
+
+        error = manager.errored()
+        self.assertIsNotNone(error)
+        with self.assertRaisesRegex(RuntimeError, "recv failure"):
+            raise error
+
+        quorum.recover_dst_ranks = [0]
+        manager.start_quorum()
+        manager.wait_quorum()
+        self.assertFalse(manager.should_commit())
+
+        error = manager.errored()
+        self.assertIsNotNone(error)
+        with self.assertRaisesRegex(RuntimeError, "send failure"):
+            raise error
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_quorum_configure_errors(self, client_mock: MagicMock) -> None:
+        manager = self._create_manager(use_async_quorum=True)
+        client_mock().should_commit = MagicMock(return_value=False)
+
+        # pyre-ignore[16]: mock
+        manager._pg.configure.side_effect = RuntimeError("configure failure")
+
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.recover_src_rank = 0
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 20
+        quorum.max_rank = None
+        quorum.max_world_size = 2
+
+        client_mock()._quorum.return_value = quorum
+
+        manager.start_quorum()
+        manager.wait_quorum()
+        self.assertFalse(manager.should_commit())
+
+        error = manager.errored()
+        self.assertIsNotNone(error)
+        with self.assertRaisesRegex(RuntimeError, "configure failure"):
+            raise error
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_max_retries(self, client_mock: MagicMock) -> None:
