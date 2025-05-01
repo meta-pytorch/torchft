@@ -65,6 +65,7 @@ def dummy_init_pg() -> None:
 def _test_pg(
     pg: ProcessGroup,
     example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
+    skip: list[str] = [],
 ) -> Dict[str, dist._Work]:
     """
     Helper function to test a set of collective operations on a given process group.
@@ -124,6 +125,8 @@ def _test_pg(
     works: Dict[str, dist._Work] = {}
 
     for coll_str, args in collectives:
+        if coll_str in skip:
+            continue
         try:
             coll = getattr(pg, coll_str)
             work = coll(*args)
@@ -496,7 +499,12 @@ _ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
 
 
 class ProcessGroupTest(TestCase):
-    def test_gloo_apis(self) -> None:
+    @parameterized.expand(["cpu", "cuda"])
+    def test_gloo_apis(self, device: str) -> None:
+        if device == "cuda" and not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+            return
+
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -507,11 +515,23 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.size(), 1)
 
-        _test_pg(pg)
+        _test_pg(
+            pg,
+            torch.tensor([2], device=device),
+            skip=(
+                # https://github.com/pytorch/pytorch/issues/152645
+                [
+                    "allreduce_coalesced",
+                    "allgather_into_tensor_coalesced",
+                ]
+                if device == "cuda"
+                else []
+            ),
+        )
 
-        m = nn.Linear(3, 4)
+        m = nn.Linear(3, 4).to(device)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
-        m(torch.rand(2, 3))
+        m(torch.rand(2, 3, device=device))
 
     def test_gloo_timeout(self) -> None:
         store = TCPStore(

@@ -560,6 +560,10 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
         )
+        if torch.cuda.is_available():
+            pg._register_backend(
+                torch.device("cuda"), ProcessGroup.BackendType.GLOO, backend_class
+            )
         return pg
 
     def getBackendName(self) -> str:
