@@ -6,7 +6,7 @@ class ManagerClient:
     def __init__(self, addr: str, connect_timeout: timedelta) -> None: ...
     def _quorum(
         self,
-        rank: int,
+        group_rank: int,
         step: int,
         checkpoint_metadata: str,
         shrink_only: bool,
@@ -17,7 +17,7 @@ class ManagerClient:
     def _checkpoint_metadata(self, rank: int, timeout: timedelta) -> str: ...
     def should_commit(
         self,
-        rank: int,
+        group_rank: int,
         step: int,
         should_commit: bool,
         timeout: timedelta,
@@ -28,11 +28,11 @@ class QuorumResult:
     replica_rank: int
     replica_world_size: int
     recover_src_manager_address: str
-    recover_src_rank: Optional[int]
-    recover_dst_ranks: List[int]
+    recover_src_replica_rank: Optional[int]
+    recover_dst_replica_ranks: List[int]
     store_address: str
     max_step: int
-    max_rank: Optional[int]
+    max_replica_rank: Optional[int]
     max_world_size: int
     heal: bool
     commit_failures: int

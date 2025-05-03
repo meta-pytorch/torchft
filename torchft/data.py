@@ -38,34 +38,34 @@ class DistributedSampler(data.distributed.DistributedSampler):
     This will shard the input dataset into ``num_replicas*num_replica_group``
     number of shards.
 
-    Each shard rank is calculated via: ``rank + num_replicas*replica_group``
+    Each shard rank is calculated via: ``rank + num_replicas*replica_rank``
 
-    num_replicas and replica_group must be the same on all workers.
+    num_replicas and replica_rank must be the same on all workers.
     """
 
     def __init__(
         self,
         dataset: data.Dataset,
-        replica_group: int,
+        replica_rank: int,
         num_replica_groups: int,
-        rank: Optional[int] = None,
+        group_rank: Optional[int] = None,
         num_replicas: Optional[int] = None,
         **kwargs: object,
     ) -> None:
         """
         Args:
             data: the dataset to use
-            replica_group: the group ID (0-num_replica_groups) to use for this shard of data.
+            replica_rank: the group ID (0-num_replica_groups) to use for this shard of data.
             num_replica_groups: the max number of global replica groups
             rank: the local group rank
             num_replicas: the local group world size
         """
-        if rank is None:
-            rank = dist.get_rank()
+        if group_rank is None:
+            group_rank = dist.get_rank()
         if num_replicas is None:
             num_replicas = dist.get_world_size()
 
-        self.global_rank: int = rank + num_replicas * replica_group
+        self.global_rank: int = group_rank + num_replicas * replica_rank
         self.global_world_size: int = num_replicas * num_replica_groups
 
         super().__init__(

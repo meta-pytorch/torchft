@@ -73,7 +73,7 @@ service LighthouseService {
 }
 
 message ManagerQuorumRequest {
-    int64 rank = 1;
+    int64 group_rank = 1;
     int64 step = 2;
     string checkpoint_metadata = 3;
     bool shrink_only = 4;
@@ -84,12 +84,12 @@ message ManagerQuorumRequest {
 message ManagerQuorumResponse {
     int64 quorum_id = 1;
     string recover_src_manager_address = 2;
-    optional int64 recover_src_rank = 3;
-    repeated int64 recover_dst_ranks = 4;
+    optional int64 recover_src_replica_rank = 3;
+    repeated int64 recover_dst_replica_ranks = 4;
     string store_address = 5;
     // These are information for the replicas which are at the max step.
     int64 max_step = 6;
-    optional int64 max_rank = 7;
+    optional int64 max_replica_rank = 7;
     int64 max_world_size = 8;
     // These are information for all replicas including behind replicas.
     int64 replica_rank = 9;
@@ -108,7 +108,7 @@ message CheckpointMetadataResponse {
 
 message ShouldCommitRequest {
     bool should_commit = 1;
-    int64 rank = 2;
+    int64 group_rank = 2;
     int64 step = 3;
 }
 message ShouldCommitResponse {

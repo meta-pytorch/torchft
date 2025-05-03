@@ -146,7 +146,7 @@ class TestManager(TestCase):
         quorum.recover_src_manager_address = "manager address"
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = 1
+        quorum.max_replica_rank = 1
         quorum.max_world_size = 2
         quorum.heal = False
 
@@ -180,10 +180,10 @@ class TestManager(TestCase):
         quorum.replica_rank = 1
         quorum.replica_world_size = 2
         quorum.recover_src_manager_address = "manager address"
-        quorum.recover_src_rank = 0
+        quorum.recover_src_replica_rank = 0
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 20
-        quorum.max_rank = None
+        quorum.max_replica_rank = None
         quorum.max_world_size = 2
         quorum.heal = True
 
@@ -234,10 +234,10 @@ class TestManager(TestCase):
         quorum.replica_rank = 1
         quorum.replica_world_size = 2
         quorum.recover_src_manager_address = "manager address"
-        quorum.recover_src_rank = 0
+        quorum.recover_src_replica_rank = 0
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 20
-        quorum.max_rank = None
+        quorum.max_replica_rank = None
         quorum.max_world_size = 1
         quorum.heal = True
 
@@ -296,10 +296,10 @@ class TestManager(TestCase):
         quorum.replica_rank = 1
         quorum.replica_world_size = 2
         quorum.recover_src_manager_address = "manager address"
-        quorum.recover_src_rank = 0
+        quorum.recover_src_replica_rank = 0
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 20
-        quorum.max_rank = None
+        quorum.max_replica_rank = None
         quorum.max_world_size = 1
         quorum.heal = True
 
@@ -358,7 +358,7 @@ class TestManager(TestCase):
         quorum.recover_src_manager_address = "manager address"
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = 1
+        quorum.max_replica_rank = 1
         quorum.max_world_size = 2
         quorum.heal = False
 
@@ -427,7 +427,7 @@ class TestManager(TestCase):
         quorum.recover_src_manager_address = "manager address"
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = 1
+        quorum.max_replica_rank = 1
         quorum.max_world_size = 2
         quorum.heal = False
 
@@ -465,7 +465,7 @@ class TestManager(TestCase):
             quorum.recover_src_manager_address = "manager address"
             quorum.store_address = f"localhost:{self.store.port}"
             quorum.max_step = 1
-            quorum.max_rank = rank
+            quorum.max_replica_rank = rank
             quorum.max_world_size = 3
             quorum.heal = False
 
@@ -497,10 +497,10 @@ class TestManager(TestCase):
         quorum.replica_rank = 0
         quorum.replica_world_size = 3
         quorum.recover_src_manager_address = "manager address"
-        quorum.recover_src_rank = 1
+        quorum.recover_src_replica_rank = 1
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = None
+        quorum.max_replica_rank = None
         quorum.max_world_size = 2
         quorum.heal = True
         client_mock()._quorum.return_value = quorum
@@ -568,8 +568,8 @@ class TestManager(TestCase):
         manager._quorum_future = quorum_future = MagicMock(
             spec=concurrent.futures.Future
         )
-        manager._participating_rank = 1
-        manager._participating_world_size = 5
+        manager._participating_replica_rank = 1
+        manager._participating_replica_world_size = 5
         self.assertEqual(manager.num_participants(), 5)
         self.assertEqual(quorum_future.result.call_count, 1)
         self.assertEqual(manager.participating_rank(), 1)
@@ -603,7 +603,7 @@ class TestManager(TestCase):
         quorum.recover_src_manager_address = "manager address"
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = 1
+        quorum.max_replica_rank = 1
         quorum.max_world_size = 2
         quorum.heal = False
 
@@ -636,7 +636,7 @@ class TestManager(TestCase):
         quorum.recover_src_manager_address = "manager address"
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = 1
+        quorum.max_replica_rank = 1
         quorum.max_world_size = 2
         quorum.heal = False
 
@@ -664,10 +664,10 @@ class TestManager(TestCase):
         quorum.replica_rank = 1
         quorum.replica_world_size = 2
         quorum.recover_src_manager_address = "manager address"
-        quorum.recover_src_rank = 0
+        quorum.recover_src_replica_rank = 0
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 20
-        quorum.max_rank = None
+        quorum.max_replica_rank = None
         quorum.max_world_size = 2
         quorum.heal = True
 
@@ -682,7 +682,7 @@ class TestManager(TestCase):
         with self.assertRaisesRegex(RuntimeError, "recv failure"):
             raise error
 
-        quorum.recover_dst_ranks = [0]
+        quorum.recover_dst_replica_ranks = [0]
         manager.start_quorum()
         manager.wait_quorum()
         self.assertFalse(manager.should_commit())
@@ -705,10 +705,10 @@ class TestManager(TestCase):
         quorum.replica_rank = 1
         quorum.replica_world_size = 2
         quorum.recover_src_manager_address = "manager address"
-        quorum.recover_src_rank = 0
+        quorum.recover_src_replica_rank = 0
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 20
-        quorum.max_rank = None
+        quorum.max_replica_rank = None
         quorum.max_world_size = 2
 
         client_mock()._quorum.return_value = quorum
@@ -735,7 +735,7 @@ class TestManager(TestCase):
         quorum.recover_src_manager_address = "manager address"
         quorum.store_address = f"localhost:{self.store.port}"
         quorum.max_step = 1
-        quorum.max_rank = 1
+        quorum.max_replica_rank = 1
         quorum.max_world_size = 2
         quorum.heal = False
         client_mock()._quorum.return_value = quorum

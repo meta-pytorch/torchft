@@ -235,9 +235,9 @@ impl ManagerService for Arc<Manager> {
         request: Request<ManagerQuorumRequest>,
     ) -> Result<Response<ManagerQuorumResponse>, Status> {
         let req = request.get_ref();
-        let rank = req.rank;
+        let group_rank = req.group_rank;
 
-        info_with_replica!(self.replica_id, "Start quorum for rank {}", rank);
+        info_with_replica!(self.replica_id, "Start quorum for group_rank {}", group_rank);
 
         let timeout = try_parse_grpc_timeout(&request.metadata())
             .map_err(|e| {
@@ -255,7 +255,7 @@ impl ManagerService for Arc<Manager> {
             // TODO: make separate call to set?
             state
                 .checkpoint_metadata
-                .insert(req.rank, req.checkpoint_metadata.clone());
+                .insert(req.group_rank, req.checkpoint_metadata.clone());
 
             let member = QuorumMember {
                 replica_id: self.replica_id.clone(),
@@ -268,7 +268,7 @@ impl ManagerService for Arc<Manager> {
                 commit_failures: req.commit_failures,
             };
             // TODO check step
-            state.participants.insert(rank, member.clone());
+            state.participants.insert(group_rank, member.clone());
             let rx = state.channel.subscribe();
 
             self._run_quorum(&mut state, member, timeout).await?;
@@ -281,9 +281,13 @@ impl ManagerService for Arc<Manager> {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info_with_replica!(self.replica_id, "Finished quorum for rank {}", rank);
+        info_with_replica!(
+            self.replica_id,
+            "Finished quorum for group_rank {}",
+            group_rank
+        );
 
-        let reply = compute_quorum_results(&self.replica_id, rank, &quorum, req.init_sync)?;
+        let reply = compute_quorum_results(&self.replica_id, group_rank, &quorum, req.init_sync)?;
 
         Ok(Response::new(reply))
     }
@@ -312,12 +316,12 @@ impl ManagerService for Arc<Manager> {
         request: Request<ShouldCommitRequest>,
     ) -> Result<Response<ShouldCommitResponse>, Status> {
         let req = request.into_inner();
-        let rank = req.rank;
+        let group_rank = req.group_rank;
 
         info_with_replica!(
             self.replica_id,
             "should_commit request from {} should_commit={}",
-            rank,
+            group_rank,
             req.should_commit
         );
 
@@ -327,9 +331,9 @@ impl ManagerService for Arc<Manager> {
             let mut state = self.state.lock().await;
 
             if !req.should_commit {
-                state.should_commit_failures.insert(rank);
+                state.should_commit_failures.insert(group_rank);
             }
-            state.should_commit_count.insert(rank);
+            state.should_commit_count.insert(group_rank);
 
             let rx = state.should_commit_channel.subscribe();
 
@@ -377,7 +381,7 @@ impl ManagerService for Arc<Manager> {
 
 fn compute_quorum_results(
     replica_id: &str,
-    rank: i64,
+    group_rank: i64,
     quorum: &Quorum,
     init_sync: bool,
 ) -> Result<ManagerQuorumResponse, Status> {
@@ -408,7 +412,7 @@ fn compute_quorum_results(
     let max_step = participants.iter().map(|p| p.step).max().unwrap();
     let max_participants: Vec<&QuorumMember> =
         participants.iter().filter(|p| p.step == max_step).collect();
-    let max_rank = max_participants.iter().enumerate().find_map(|(i, p)| {
+    let max_replica_rank = max_participants.iter().enumerate().find_map(|(i, p)| {
         if p.replica_id == replica_id {
             Some(i as i64)
         } else {
@@ -417,8 +421,9 @@ fn compute_quorum_results(
     });
 
     // The primary TCPStore to use for this rank.
-    let primary_rank = rank as usize % max_participants.len();
-    let primary = max_participants[primary_rank];
+    // There is one TCPStore per replica.
+    let primary_replica_rank = group_rank as usize % max_participants.len();
+    let primary = max_participants[primary_replica_rank];
 
     // Compute recovery assignments
 
@@ -427,7 +432,7 @@ fn compute_quorum_results(
     // Nodes are recovering if
     // 1. not at the max step (init_sync)
     // 2. max_step == 0 and not the primary replica
-    let all_recover_dst_ranks: Vec<usize> = participants
+    let all_recover_dst_replica_ranks: Vec<usize> = participants
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
@@ -439,12 +444,13 @@ fn compute_quorum_results(
         })
         .collect();
 
-    let all_recover_dst_ranks_set = all_recover_dst_ranks.iter().collect::<HashSet<_>>();
+    let all_recover_dst_replica_ranks_set =
+        all_recover_dst_replica_ranks.iter().collect::<HashSet<_>>();
     let up_to_date_ranks: Vec<usize> = participants
         .iter()
         .enumerate()
         .filter_map(|(i, _p)| {
-            if !all_recover_dst_ranks_set.contains(&i) {
+            if !all_recover_dst_replica_ranks_set.contains(&i) {
                 Some(i)
             } else {
                 None
@@ -455,34 +461,34 @@ fn compute_quorum_results(
     // This is a map of rank to the ranks that are recovering from that node.
     let mut recovery_assignments: HashMap<usize, Vec<i64>> = HashMap::new();
     // The rank of the node that this rank is recovering from.
-    let mut recover_src_rank: Option<i64> = None;
-    for (i, recovering_rank) in all_recover_dst_ranks.iter().enumerate() {
-        let up_to_date_idx = (i + rank as usize) % up_to_date_ranks.len();
-        let recovering_recover_src_rank = up_to_date_ranks[up_to_date_idx];
-        if !recovery_assignments.contains_key(&recovering_recover_src_rank) {
-            recovery_assignments.insert(recovering_recover_src_rank, Vec::new());
+    let mut recover_src_replica_rank: Option<i64> = None;
+    for (i, recovering_rank) in all_recover_dst_replica_ranks.iter().enumerate() {
+        let up_to_date_idx = (i + group_rank as usize) % up_to_date_ranks.len();
+        let recovering_recover_src_replica_rank = up_to_date_ranks[up_to_date_idx];
+        if !recovery_assignments.contains_key(&recovering_recover_src_replica_rank) {
+            recovery_assignments.insert(recovering_recover_src_replica_rank, Vec::new());
         }
         recovery_assignments
-            .get_mut(&recovering_recover_src_rank)
+            .get_mut(&recovering_recover_src_replica_rank)
             .unwrap()
             .push(*recovering_rank as i64);
         if *recovering_rank == replica_rank {
-            recover_src_rank = Some(recovering_recover_src_rank as i64);
+            recover_src_replica_rank = Some(recovering_recover_src_replica_rank as i64);
         }
     }
 
-    let heal = recover_src_rank.is_some();
+    let heal = recover_src_replica_rank.is_some();
     if heal {
         info_with_replica!(
             replica_id,
-            "healing is required step={}, max_step={}, recover_src_rank={}",
+            "healing is required step={}, max_step={}, recover_src_replica_rank={}",
             step,
             max_step,
-            recover_src_rank.unwrap()
+            recover_src_replica_rank.unwrap()
         );
     }
 
-    let recover_src_manager_address = match recover_src_rank {
+    let recover_src_manager_address = match recover_src_replica_rank {
         Some(r) => participants[r as usize].address.clone(),
         None => "".to_string(),
     };
@@ -491,13 +497,13 @@ fn compute_quorum_results(
         quorum_id: quorum.quorum_id,
         // address is used for looking up the checkpoint server address.
         recover_src_manager_address: recover_src_manager_address,
-        recover_src_rank: recover_src_rank,
-        recover_dst_ranks: recovery_assignments
+        recover_src_replica_rank: recover_src_replica_rank,
+        recover_dst_replica_ranks: recovery_assignments
             .get(&replica_rank)
             .map_or_else(Vec::new, |v| v.clone()),
         store_address: primary.store_address.clone(),
         max_step: max_step,
-        max_rank: max_rank,
+        max_replica_rank: max_replica_rank,
         max_world_size: max_participants.len() as i64,
         replica_rank: replica_rank as i64,
         replica_world_size: participants.len() as i64,
@@ -515,7 +521,7 @@ mod tests {
     use super::*;
     use crate::lighthouse::{Lighthouse, LighthouseOpt};
 
-    async fn should_commit(rank: i64, should_commit: bool) -> Result<ShouldCommitResponse> {
+    async fn should_commit(group_rank: i64, should_commit: bool) -> Result<ShouldCommitResponse> {
         let mut client = manager_client_new(
             "http://localhost:29531".to_string(),
             Duration::from_secs(10),
@@ -523,7 +529,7 @@ mod tests {
         .await?;
 
         let request = tonic::Request::new(ShouldCommitRequest {
-            rank: rank,
+            group_rank: group_rank,
             step: 1,
             should_commit: should_commit,
         });
@@ -607,7 +613,7 @@ mod tests {
         let mut client = manager_client_new(manager.address(), Duration::from_secs(10)).await?;
 
         let mut request = tonic::Request::new(ManagerQuorumRequest {
-            rank: 0,
+            group_rank: 0,
             step: 123,
             checkpoint_metadata: "addr".to_string(),
             shrink_only: false,
@@ -624,7 +630,7 @@ mod tests {
         assert_eq!(resp.recover_src_manager_address, "".to_string());
         assert_eq!(resp.store_address, "store_addr".to_string());
         assert_eq!(resp.max_step, 123);
-        assert_eq!(resp.max_rank, Some(0));
+        assert_eq!(resp.max_replica_rank, Some(0));
         assert_eq!(resp.max_world_size, 1);
         assert_eq!(resp.replica_rank, 0);
         assert_eq!(resp.replica_world_size, 1);
@@ -669,7 +675,7 @@ mod tests {
                     manager_client_new(manager.address(), Duration::from_secs(10)).await?;
 
                 let mut request = tonic::Request::new(ManagerQuorumRequest {
-                    rank: 0,
+                    group_rank: 0,
                     step: 0,
                     checkpoint_metadata: "addr".to_string(),
                     shrink_only: false,
@@ -787,22 +793,22 @@ mod tests {
         let results = compute_quorum_results("replica_0", 0, &quorum, true)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 0);
-        assert_eq!(results.recover_src_rank, None);
-        assert_eq!(results.recover_dst_ranks, vec![1]);
+        assert_eq!(results.recover_src_replica_rank, None);
+        assert_eq!(results.recover_dst_replica_ranks, vec![1]);
 
         let results = compute_quorum_results("replica_1", 0, &quorum, true)?;
         assert!(results.heal);
         assert_eq!(results.replica_rank, 1);
-        assert_eq!(results.recover_src_rank, Some(0));
-        assert_eq!(results.recover_dst_ranks, Vec::<i64>::new());
+        assert_eq!(results.recover_src_replica_rank, Some(0));
+        assert_eq!(results.recover_dst_replica_ranks, Vec::<i64>::new());
 
         // rank 1 assignments should be offset from rank 0 above and the primary
 
         let results = compute_quorum_results("replica_1", 1, &quorum, true)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 1);
-        assert_eq!(results.recover_src_rank, None);
-        assert_eq!(results.recover_dst_ranks, vec![0]);
+        assert_eq!(results.recover_src_replica_rank, None);
+        assert_eq!(results.recover_dst_replica_ranks, vec![0]);
 
         Ok(())
     }
@@ -872,29 +878,29 @@ mod tests {
         assert!(results.heal);
         assert_eq!(results.recover_src_manager_address, "addr_1".to_string());
         assert_eq!(results.replica_rank, 0);
-        assert_eq!(results.recover_src_rank, Some(1));
-        assert!(results.recover_dst_ranks.is_empty());
+        assert_eq!(results.recover_src_replica_rank, Some(1));
+        assert!(results.recover_dst_replica_ranks.is_empty());
 
         let results = compute_quorum_results("replica_1", 0, &quorum, true)?;
         assert!(!results.heal);
         assert_eq!(results.recover_src_manager_address, "".to_string());
         assert_eq!(results.replica_rank, 1);
-        assert_eq!(results.recover_src_rank, None);
-        assert_eq!(results.recover_dst_ranks, vec![0, 4]);
+        assert_eq!(results.recover_src_replica_rank, None);
+        assert_eq!(results.recover_dst_replica_ranks, vec![0, 4]);
 
         let results = compute_quorum_results("replica_3", 0, &quorum, true)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 3);
-        assert_eq!(results.recover_src_rank, None);
-        assert_eq!(results.recover_dst_ranks, vec![2]);
+        assert_eq!(results.recover_src_replica_rank, None);
+        assert_eq!(results.recover_dst_replica_ranks, vec![2]);
 
         // rank 1 assignments should be offset from rank 0 above
 
         let results = compute_quorum_results("replica_1", 1, &quorum, true)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 1);
-        assert_eq!(results.recover_src_rank, None);
-        assert_eq!(results.recover_dst_ranks, vec![2]);
+        assert_eq!(results.recover_src_replica_rank, None);
+        assert_eq!(results.recover_dst_replica_ranks, vec![2]);
 
         Ok(())
     }
