@@ -8,7 +8,10 @@ pub mod lighthouse;
 pub mod manager;
 mod net;
 mod retry;
+mod router;
 mod timeout;
+
+pub use crate::router::Router;
 
 use anyhow::Result;
 use atty::Stream;
@@ -21,6 +24,7 @@ use std::thread::available_parallelism;
 use structopt::StructOpt;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Channel;
 use tonic::Status;
 
@@ -33,7 +37,9 @@ pub mod torchftpb {
 }
 
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
+use crate::torchftpb::lighthouse_service_server::LighthouseServiceServer;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
+use crate::torchftpb::LighthouseHeartbeatRequest;
 use crate::torchftpb::{
     CheckpointMetadataRequest, LighthouseQuorumRequest, ManagerQuorumRequest, ShouldCommitRequest,
 };
@@ -336,9 +342,12 @@ fn lighthouse_main(py: Python<'_>) -> PyResult<()> {
 }
 
 async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
-    let lighthouse = lighthouse::Lighthouse::new(opt).await?;
+    let router = Router::new(opt.clone());
 
-    lighthouse.run().await?;
+    tonic::transport::Server::builder()
+        .add_service(LighthouseServiceServer::new(router))
+        .serve(opt.bind.parse::<std::net::SocketAddr>()?)
+        .await?;
 
     Ok(())
 }
@@ -476,13 +485,19 @@ fn convert_quorum(py: Python, q: &torchftpb::Quorum) -> PyResult<Quorum> {
 struct LighthouseClient {
     client: LighthouseServiceClient<Channel>,
     runtime: Runtime,
+    room_id: Option<String>,
 }
 
 #[pymethods]
 impl LighthouseClient {
-    #[pyo3(signature = (addr, connect_timeout))]
+    #[pyo3(signature = (addr, connect_timeout, room_id = None))]
     #[new]
-    fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        addr: String,
+        connect_timeout: Duration,
+        room_id: Option<String>,
+    ) -> PyResult<Self> {
         py.allow_threads(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(num_threads())
@@ -495,6 +510,7 @@ impl LighthouseClient {
             Ok(Self {
                 client: client,
                 runtime: runtime,
+                room_id: room_id,
             })
         })
     }
@@ -549,6 +565,8 @@ impl LighthouseClient {
                 }),
             });
 
+            let mut request = self.add_room_header(request);
+
             // This timeout is processed on the server side so we also enable
             // keep alives to detect server health.
             request.set_timeout(timeout);
@@ -561,6 +579,41 @@ impl LighthouseClient {
             Ok(quorum)
         });
         Ok(convert_quorum(py, &quorum?)?)
+    }
+
+    /// Send a single heartbeat to the lighthouse.
+    ///
+    /// Args:
+    ///     replica_id (str):  The replica_id you registered with.
+    ///     timeout      (timedelta, optional):  Per-RPC deadline.  Default = 5 s.
+    #[pyo3(signature = (replica_id, timeout = Duration::from_secs(5)))]
+    fn heartbeat(
+        &self,
+        py: Python<'_>,
+        replica_id: String,
+        timeout: Duration,
+    ) -> Result<(), StatusError> {
+        py.allow_threads(move || {
+            let mut req = tonic::Request::new(LighthouseHeartbeatRequest { replica_id });
+            let mut req = self.add_room_header(req);
+            req.set_timeout(timeout);
+            self.runtime.block_on(self.client.clone().heartbeat(req))?;
+            Ok(())
+        })
+    }
+}
+
+impl LighthouseClient {
+    /// Attach `"room-id"` header if `self.room_id` is Some(_)
+    fn add_room_header<T>(&self, mut req: tonic::Request<T>) -> tonic::Request<T> {
+        if let Some(ref id) = self.room_id {
+            use tonic::metadata::MetadataValue;
+            req.metadata_mut().insert(
+                crate::router::ROOM_ID_HEADER,
+                MetadataValue::try_from(id.as_str()).expect("room-id ascii"),
+            );
+        }
+        req
     }
 }
 
@@ -579,7 +632,7 @@ impl LighthouseClient {
 ///     heartbeat_timeout_ms (int): The timeout for heartbeats.
 #[pyclass]
 struct LighthouseServer {
-    lighthouse: Arc<lighthouse::Lighthouse>,
+    bind: String,
     handle: JoinHandle<Result<()>>,
     _runtime: Runtime,
 }
@@ -607,19 +660,30 @@ impl LighthouseServer {
                 .enable_all()
                 .build()?;
 
-            let lighthouse = rt
-                .block_on(lighthouse::Lighthouse::new(lighthouse::LighthouseOpt {
-                    bind: bind,
-                    min_replicas: min_replicas,
-                    join_timeout_ms: join_timeout_ms,
-                    quorum_tick_ms: quorum_tick_ms,
-                    heartbeat_timeout_ms: heartbeat_timeout_ms,
-                }))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let opt = lighthouse::LighthouseOpt {
+                bind: bind.clone(),
+                min_replicas,
+                join_timeout_ms,
+                quorum_tick_ms,
+                heartbeat_timeout_ms,
+            };
+
+            let listener = rt.block_on(tokio::net::TcpListener::bind(&bind))?;
+            let bound_sock = listener.local_addr()?;
+            let bound = format!("http://{}", bound_sock);
+            let incoming = TcpListenerStream::new(listener);
+
+            let handle = rt.spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(LighthouseServiceServer::new(Router::new(opt.clone())))
+                    .serve_with_incoming(incoming)
+                    .await
+                    .map_err(|e: tonic::transport::Error| anyhow::anyhow!(e))
+            });
 
             Ok(Self {
-                handle: rt.spawn(lighthouse.clone().run()),
-                lighthouse: lighthouse,
+                bind: bound,
+                handle,
                 _runtime: rt,
             })
         })
@@ -630,7 +694,7 @@ impl LighthouseServer {
     /// Returns:
     ///    str: The address of the lighthouse server.
     fn address(&self) -> PyResult<String> {
-        Ok(self.lighthouse.address().to_string())
+        Ok(self.bind.clone())
     }
 
     /// shutdown shuts down the lighthouse server.
