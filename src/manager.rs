@@ -237,7 +237,11 @@ impl ManagerService for Arc<Manager> {
         let req = request.get_ref();
         let group_rank = req.group_rank;
 
-        info_with_replica!(self.replica_id, "Start quorum for group_rank {}", group_rank);
+        info_with_replica!(
+            self.replica_id,
+            "Start quorum for group_rank {}",
+            group_rank
+        );
 
         let timeout = try_parse_grpc_timeout(&request.metadata())
             .map_err(|e| {
