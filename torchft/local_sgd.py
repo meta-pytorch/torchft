@@ -13,6 +13,7 @@ from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type
 
 import torch
+import torch.distributed as dist
 from torch import nn, optim
 from torch.distributed.tensor import DTensor
 from torch.nn.parameter import Parameter
@@ -47,15 +48,6 @@ class LocalSGD:
     way using a torchft Manager. The allreduce on the parameters will happen
     every sync_every steps after the optimizer.step call.
 
-    To implement safe and fault tolerant, this requires a backup copy of the
-    weights. By default these are stored in CPU memory. If any error occurs
-    during the LocalSGD step, the step will be discarded and the model
-    parameters will reset back to the last time LocalSGD synchronized.
-
-    The backup weights could be eliminated by relaxing the guarantee of exactly
-    `sync_every` steps but that would diverge from the LocalSGD algorithm.
-    DiLoCo also needs this backup copy to compute the delta.
-
     The torchft quorum is computed at the beginning of ``sync_every`` steps. If
     any error occurs, or a worker fails between syncs, ``sync_every`` steps will be
     discarded and a new quorum will be computed on the next step.
@@ -63,9 +55,6 @@ class LocalSGD:
     If running in async mode, on a joining worker the first ``sync_every`` steps
     will discarded as the model will be recovering during that period. When
     using sync mode, the checkpoint will be restored prior to the first step.
-
-    TODO: add a way via Manager to detect workers failing early for shrink only
-    TODO: add DiLoCo support
     """
 
     def __init__(
@@ -81,8 +70,6 @@ class LocalSGD:
             model: The model to wrap.
             optimizer: The optimizer used by the model.
             sync_every: How often to sync the model weights.
-            backup_device: The device to store the backup of the model parameters on. (default cpu)
-            pin_memory: Whether to pin the memory used for the backup of the model parameters.
         """
         super().__init__()
         self._manager = manager
@@ -172,8 +159,16 @@ class DiLoCo:
     DiLoCo is a subclass of LocalSGD that overrides the synchronization
     mechanism to average and synchronize the pseudogradients (delta of the previous global weight and current local weights).
 
-    diloco: https://arxiv.org/pdf/2311.08105
+    This algorithm requires a backup copy of the
+    weights. By default these are stored in CPU memory. If any error occurs
+    during the DiLoCo step, the step will be discarded and the model
+    parameters will reset back to the last time DiLoCo synchronized.
+
+    DiLoCo paper: https://arxiv.org/pdf/2311.08105
     """
+
+    bucket_cap_mb: int = 32 * 1024 * 1024
+    use_bucketization: bool = False
 
     def __init__(
         self,
@@ -184,7 +179,20 @@ class DiLoCo:
         sync_every: int,
         backup_device: Optional[torch.device] = None,
         pin_memory: bool = True,
+        use_bucketization: bool = False,
+        bucket_cap_mb: Optional[int] = None,
     ) -> None:
+        """
+        Args:
+            manager: The manager to use.
+            model: The model to wrap.
+            inner_optimizer: The optimizer used for the local parameters every step.
+            outer_optimizer: The optimizer used for the global parameters updated every "sync_every" steps.
+            sync_every: How often to update the model weights.
+            backup_device: The device to store the backup weights on. If None, the backup weights will be on CPU.
+            pin_memory: Whether to pin the memory for the backup weights (only for CPU device).
+        """
+
         if manager._use_async_quorum:
             raise ValueError(
                 "Using DiLoCo require synchronous quorum to be enabled. "
@@ -202,11 +210,19 @@ class DiLoCo:
 
         self._hooks: List[RemovableHandle] = []
         self._outer_optimizer = outer_optimizer
+
+        if bucket_cap_mb is not None:
+            self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
+
+        self.use_bucketization = use_bucketization
+
         self.original_parameters: Dict[str, torch.Tensor] = {}
         for name, p in self._model.named_parameters():
             if isinstance(p, DTensor):
                 p = extract_local_tensor(p.data)
-            t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=self._backup_device)
+
+            backup_device = self._backup_device or torch.device("cpu")
+            t = torch.empty(*tuple(p.shape), dtype=p.dtype, device=backup_device)
             if (
                 self._pin_memory
                 and t.device == torch.device("cpu")
@@ -287,7 +303,7 @@ class DiLoCo:
         # Set the .grad field of each parameter to its pseudogradient
         for name, p in self._model.named_parameters():
             local_param = extract_local_tensor(p.data)
-            pseudogradient = local_param - self.original_parameters[name]
+            pseudogradient = local_param - self.original_parameters[name].to(p.device)
             if isinstance(p, DTensor):
                 p.grad._local_tensor = pseudogradient
             else:
@@ -304,8 +320,17 @@ class DiLoCo:
 
     def _average_grads(self) -> None:
         """
-        Average the gradients across the diloco group.
+        Efficiently averages gradients across the group using either:
+        - Per-parameter allreduce (old behavior)
+        - Bucketized allreduce (new behavior)
         """
+        if self.use_bucketization:
+            self._allreduce_bucketized()
+        else:
+            self._allreduce_per_param()
+
+    def _allreduce_per_param(self) -> None:
+        """Performs allreduce on each gradient tensor separately (original method)."""
         works = []
         for p in self._model.parameters():
             # Perform allreduce on the pseudogradients
@@ -315,6 +340,60 @@ class DiLoCo:
             else:
                 work = self._manager.allreduce(p.grad)
             works.append(work)
-        # Wait for all allreduce operations to complete
+
         for work in works:
             work.wait()
+
+    def bucketize_and_allreduce(
+        self,
+        tensors: List[torch.Tensor],
+        bucket_size_bytes: int,
+    ) -> None:
+        """
+        Applies allreduce on a list of tensors using bucketization.
+
+        Args:
+            tensors: List of torch tensors (e.g., gradients).
+            bucket_size_bytes: Max size of each bucket in bytes.
+        """
+        if not tensors:
+            return
+
+        total_size = sum(t.numel() for t in tensors)
+        dtype, device = tensors[0].dtype, tensors[0].device
+
+        offset = 0
+        flat_index = 0
+        while offset < total_size:
+            chunk_size = min(
+                bucket_size_bytes // tensors[0].element_size(), total_size - offset
+            )
+            flat_buffer = torch.zeros(chunk_size, dtype=dtype, device=device)
+
+            pack_offset, bucket_tensors = 0, []
+            for t in tensors[flat_index:]:
+                numel = t.numel()
+                if pack_offset + numel > chunk_size:
+                    break
+                flat_buffer[pack_offset : pack_offset + numel].copy_(t.view(-1))
+                bucket_tensors.append((t, pack_offset, numel))
+                pack_offset += numel
+                flat_index += 1
+
+            work = self._manager.allreduce(flat_buffer)
+            work.wait()
+
+            for t, pack_offset, numel in bucket_tensors:
+                t.copy_(flat_buffer[pack_offset : pack_offset + numel].view_as(t))
+
+            offset += chunk_size
+
+    def _allreduce_bucketized(self) -> None:
+        """
+        Averages gradients using bucketized allreduce with a fixed buffer.
+        """
+        grads = [p.grad for p in self._model.parameters() if p.grad is not None]
+        self.bucketize_and_allreduce(
+            grads,
+            bucket_size_bytes=self.bucket_cap_mb,
+        )

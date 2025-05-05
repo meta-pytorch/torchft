@@ -65,6 +65,7 @@ def dummy_init_pg() -> None:
 def _test_pg(
     pg: ProcessGroup,
     example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
+    skip: list[str] = [],
 ) -> Dict[str, dist._Work]:
     """
     Helper function to test a set of collective operations on a given process group.
@@ -124,6 +125,8 @@ def _test_pg(
     works: Dict[str, dist._Work] = {}
 
     for coll_str, args in collectives:
+        if coll_str in skip:
+            continue
         try:
             coll = getattr(pg, coll_str)
             work = coll(*args)
@@ -496,7 +499,12 @@ _ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
 
 
 class ProcessGroupTest(TestCase):
-    def test_gloo_apis(self) -> None:
+    @parameterized.expand(["cpu", "cuda"])
+    def test_gloo_apis(self, device: str) -> None:
+        if device == "cuda" and not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+            return
+
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -507,11 +515,23 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.size(), 1)
 
-        _test_pg(pg)
+        _test_pg(
+            pg,
+            torch.tensor([2], device=device),
+            skip=(
+                # https://github.com/pytorch/pytorch/issues/152645
+                [
+                    "allreduce_coalesced",
+                    "allgather_into_tensor_coalesced",
+                ]
+                if device == "cuda"
+                else []
+            ),
+        )
 
-        m = nn.Linear(3, 4)
+        m = nn.Linear(3, 4).to(device)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
-        m(torch.rand(2, 3))
+        m(torch.rand(2, 3, device=device))
 
     def test_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -575,11 +595,11 @@ class ProcessGroupTest(TestCase):
         t = torch.tensor([2], device=device)
         pg.allreduce([t], ReduceOp.SUM).wait()
         self.assertEqual(mock_stream_timeout.call_count, 1)
-        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 1)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 2)
 
         pg.allreduce([t], ReduceOp.SUM).get_future().wait()
         self.assertEqual(mock_stream_timeout.call_count, 2)
-        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 2)
+        self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 4)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(
@@ -902,7 +922,7 @@ class MultiPgBaseTest(TestCase):
         elif backend == "baby_gloo":
             return ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         elif backend == "nccl":
-            return ProcessGroupNCCL(timeout=timedelta(seconds=1))
+            return ProcessGroupNCCL(timeout=timedelta(seconds=10))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
         elif backend == "dummy":
@@ -948,6 +968,8 @@ class MultiPgBaseTest(TestCase):
         """
 
         def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
+            pg.set_timeout(timedelta(seconds=30))
+
             if dev == "cuda":
                 torch.cuda.set_device(rank)
                 # Use a separate stream to avoid deadlocks between threads.
@@ -973,12 +995,14 @@ class MultiPgBaseTest(TestCase):
                 pg.shutdown()
                 return f"Rank{rank} crashed"
 
+            pg.set_timeout(timedelta(seconds=1))
+
             # We hardcode the list of expected errors.
             # gloo: Connection closed by peer, timed out waiting, no error, read error
             # nccl: Tensor-likes are not equal/not close (due to abort)
             with self.assertRaisesRegex(
                 Exception,
-                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close)",
+                r"(Connection closed by peer|timed out after|Timed out waiting|no error|Read error|not equal|not close|process group not initialized)",
             ):
                 test(pg, rank, t1.clone())
                 raise RuntimeError("no error")

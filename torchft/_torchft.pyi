@@ -11,6 +11,7 @@ class ManagerClient:
         checkpoint_metadata: str,
         shrink_only: bool,
         timeout: timedelta,
+        commit_failures: int,
         init_sync: bool = True,
     ) -> QuorumResult: ...
     def _checkpoint_metadata(self, rank: int, timeout: timedelta) -> str: ...
@@ -34,6 +35,7 @@ class QuorumResult:
     max_rank: Optional[int]
     max_world_size: int
     heal: bool
+    commit_failures: int
 
 class ManagerServer:
     def __init__(
@@ -99,3 +101,8 @@ class LighthouseClient:
         shrink_only: Optional[bool] = None,
         data: Optional[dict[Hashable, object]] = None,
     ) -> Quorum: ...
+    def heartbeat(
+        self,
+        replica_id: str,
+        timeout: timedelta = timedelta(seconds=5),
+    ) -> None: ...

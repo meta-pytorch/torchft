@@ -2,6 +2,7 @@ import asyncio
 import queue
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import Callable, Generator, Optional, TypeVar
@@ -53,6 +54,13 @@ class _TimeoutManager:
         self._event_loop_thread: Optional[threading.Thread] = None
         self._next_timer_id = 0
 
+        # Ensures `_event_loop_thread` is not stuck
+        self._watchdog_thread: Optional[threading.Thread] = None
+
+        # Give this much time the the `_event_loop_thread` to confirm that
+        # it is not stuck
+        self._watchdog_interval = timedelta(seconds=30)
+
         # This queue is used to delete events on the main thread as cudaEventDestroy
         # can block if the CUDA queue is full.
         self._del_queue: queue.SimpleQueue[object] = queue.SimpleQueue()
@@ -70,13 +78,45 @@ class _TimeoutManager:
                     name="TimeoutManager",
                 )
                 self._event_loop_thread.start()
+
+                self._watchdog_thread = threading.Thread(
+                    target=self._watchdog_loop, daemon=True
+                )
+                self._watchdog_thread.start()
+
             # pyre-fixme[7]: optional
             return self._event_loop
+
+    def _watchdog_loop(self) -> None:
+        while True:
+            is_healthy = False
+
+            def updated_health() -> None:
+                nonlocal is_healthy
+                is_healthy = True
+
+            with self._lock:
+                if self._event_loop is None:
+                    return
+
+                # The method passed to the event loop should finish fast.
+                # It just updates a bool, which is also thread safe.
+                self._event_loop.call_soon_threadsafe(updated_health)
+
+            time.sleep(self._watchdog_interval.total_seconds())
+
+            if not is_healthy:
+                print("TimeoutManager is stuck. Exiting.")
+                sys.exit(1)
+                # Needed becuase `sys.exit` is mocked in unit tests.
+                # If we don't return here, we don't break out of the loop.
+                return
 
     def shutdown(self) -> None:
         """
         Shutdown the event loop and cancel all pending timeouts.
         """
+        watchdog_thread = None
         with self._lock:
             if self._event_loop is not None:
                 self._event_loop.call_soon_threadsafe(self._event_loop.stop)
@@ -84,6 +124,17 @@ class _TimeoutManager:
                 self._event_loop_thread.join()
                 self._event_loop = None
                 self._event_loop_thread = None
+
+                # We can't join the watchdog thread here because it grabs `lock_`
+                watchdog_thread = self._watchdog_thread
+
+        if watchdog_thread is not None:
+            # If `_maybe_start_event_loop` is called again, the it is possible the `join`
+            # below will never finish.
+            # This class assumes `_maybe_start_event_loop` will not be called after `shutdown`.
+            # If this functionality is required in the future, we could change the class to
+            # support this. Or create multiple instances of this class.
+            watchdog_thread.join()
 
     def register(self, fut: Future[T], timeout: timedelta) -> Future[T]:
         """

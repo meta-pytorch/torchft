@@ -288,6 +288,12 @@ impl Lighthouse {
         if quorum_met.is_some() {
             let participants = quorum_met.unwrap();
 
+            let commit_failure_replica_ids: Vec<String> = participants
+                .iter()
+                .filter(|p| p.commit_failures > 0)
+                .map(|p| p.replica_id.clone())
+                .collect();
+
             // only increment quorum ID if something about the quorum
             // changed (members/addresses/etc)
             if state.prev_quorum.is_none()
@@ -299,6 +305,13 @@ impl Lighthouse {
                 state.quorum_id += 1;
                 info!(
                     "Detected quorum change, bumping quorum_id to {}",
+                    state.quorum_id
+                );
+            } else if commit_failure_replica_ids.len() > 0 {
+                state.quorum_id += 1;
+                info!(
+                    "Detected commit failures in [{}], bumping quorum_id to {}",
+                    commit_failure_replica_ids.join(", "),
                     state.quorum_id
                 );
             }
@@ -639,6 +652,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -656,6 +670,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -712,6 +727,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -751,6 +767,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -798,6 +815,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -819,6 +837,7 @@ mod tests {
                 world_size: 1,
                 shrink_only: false,
                 data: String::new(),
+                commit_failures: 0,
             }],
             created: Some(SystemTime::now().into()),
         });
@@ -838,6 +857,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -882,6 +902,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
                 QuorumMember {
                     replica_id: "b".to_string(),
@@ -891,6 +912,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             ],
             created: Some(SystemTime::now().into()),
@@ -908,6 +930,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: true,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -926,6 +949,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: true,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -975,6 +999,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 }),
             });
 
@@ -1021,6 +1046,7 @@ mod tests {
                     world_size: 1,
                     shrink_only: false,
                     data: String::new(),
+                    commit_failures: 0,
                 },
             },
         );
@@ -1047,6 +1073,7 @@ mod tests {
             world_size: 1,
             shrink_only: false,
             data: String::new(),
+            commit_failures: 0,
         }];
         let b = vec![QuorumMember {
             replica_id: "1".to_string(),
@@ -1056,6 +1083,7 @@ mod tests {
             world_size: 1,
             shrink_only: false,
             data: String::new(),
+            commit_failures: 0,
         }];
 
         // replica_id is the same
@@ -1069,12 +1097,13 @@ mod tests {
             world_size: 1,
             shrink_only: false,
             data: String::new(),
+            commit_failures: 0,
         }];
         // replica_id changed
         assert!(quorum_changed(&a, &c));
     }
-    #[tokio::test]
 
+    #[tokio::test]
     async fn test_lighthouse_join_during_shrink() -> Result<()> {
         fn create_member(id: &str, addr_num: &str, step: i64, shrink_only: bool) -> QuorumMember {
             QuorumMember {
@@ -1085,6 +1114,7 @@ mod tests {
                 world_size: 1,
                 shrink_only,
                 data: String::new(),
+                commit_failures: 0,
             }
         }
 
@@ -1175,6 +1205,78 @@ mod tests {
             .any(|p| p.replica_id == "joiner"));
         assert_eq!(join_quorum.participants.len(), 3);
         assert_eq!(join_quorum.participants[2].step, 3);
+
+        lighthouse_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_lighthouse_commit_failures() -> Result<()> {
+        fn create_member(id: &str, commit_failures: i64) -> QuorumMember {
+            QuorumMember {
+                replica_id: id.to_string(),
+                address: format!("addr{}", id),
+                store_address: format!("store{}", id),
+                step: 10,
+                world_size: 1,
+                shrink_only: false,
+                data: String::new(),
+                commit_failures,
+            }
+        }
+
+        fn create_request(member: &QuorumMember) -> tonic::Request<LighthouseQuorumRequest> {
+            tonic::Request::new(LighthouseQuorumRequest {
+                requester: Some(member.clone()),
+            })
+        }
+
+        let opt = LighthouseOpt {
+            min_replicas: 2,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 1000,
+            quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
+        };
+
+        // Start the lighthouse service
+        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse_task = tokio::spawn(lighthouse.clone().run());
+
+        // Create client to interact with lighthouse
+        let mut client = lighthouse_client_new(lighthouse.address()).await?;
+
+        // First two quorums should be stable
+        for _i in 0..2 {
+            let first_request = create_request(&create_member("replica0", 0));
+            let second_request = create_request(&create_member("replica1", 0));
+
+            tokio::spawn({
+                let mut client = client.clone();
+                async move { client.quorum(first_request).await }
+            });
+            let first_response = client.quorum(second_request).await?;
+            let first_quorum = first_response.into_inner().quorum.unwrap();
+            assert_eq!(first_quorum.quorum_id, 1);
+            assert_eq!(first_quorum.participants.len(), 2);
+            assert_eq!(first_quorum.participants[0].commit_failures, 0);
+            assert_eq!(first_quorum.participants[1].commit_failures, 0);
+        }
+
+        // commit_failures should increment quorum_id
+        let first_request = create_request(&create_member("replica0", 0));
+        let second_request = create_request(&create_member("replica1", 2));
+
+        tokio::spawn({
+            let mut client = client.clone();
+            async move { client.quorum(first_request).await }
+        });
+        let first_response = client.quorum(second_request).await?;
+        let first_quorum = first_response.into_inner().quorum.unwrap();
+        assert_eq!(first_quorum.quorum_id, 2);
+        assert_eq!(first_quorum.participants.len(), 2);
+        assert_eq!(first_quorum.participants[0].commit_failures, 0);
+        assert_eq!(first_quorum.participants[1].commit_failures, 2);
 
         lighthouse_task.abort();
         Ok(())

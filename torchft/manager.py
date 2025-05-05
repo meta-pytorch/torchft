@@ -448,6 +448,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
+    @torch.profiler.record_function("torchft::manager::_async_quorum")
     def _async_quorum(
         self,
         allow_heal: bool,
@@ -459,14 +460,18 @@ class Manager:
 
         if curr_device >= 0 and torch.cuda.is_available():
             torch.cuda.set_device(curr_device)
-        quorum = self._client._quorum(
-            rank=self._rank,
-            step=self._step,
-            checkpoint_metadata=self._checkpoint_transport.metadata(),
-            shrink_only=shrink_only,
-            timeout=quorum_timeout,
-            init_sync=self._init_sync,
-        )
+
+        quorum = None
+        with torch.profiler.record_function("torchft::manager::_client::_quorum"):
+            quorum = self._client._quorum(
+                rank=self._rank,
+                step=self._step,
+                checkpoint_metadata=self._checkpoint_transport.metadata(),
+                shrink_only=shrink_only,
+                timeout=quorum_timeout,
+                init_sync=self._init_sync,
+                commit_failures=self._commit_failures,
+            )
 
         quorum_id = quorum.quorum_id
         replica_rank = quorum.replica_rank
@@ -504,9 +509,16 @@ class Manager:
 
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
-            # TODO: handle configure errors
-            self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
-            self._quorum_id = quorum_id
+            try:
+                with torch.profiler.record_function("torchft::manager::_pg.configure"):
+                    self._pg.configure(
+                        store_prefixed_addr, replica_rank, replica_world_size
+                    )
+                self._quorum_id = quorum_id
+            except Exception as e:
+                self._logger.exception(f"got exception in pg configure: {e}")
+                self.report_error(e)
+                return
 
         if allow_heal:
             # run recovery on the recovery stream if available
@@ -516,56 +528,67 @@ class Manager:
                 if recovery_stream is not None
                 else nullcontext()
             ):
-                if quorum.recover_dst_ranks:
-                    self._logger.info(
-                        f"peers need recovery from us {quorum.recover_dst_ranks}"
-                    )
-                    self._checkpoint_transport.send_checkpoint(
-                        dst_ranks=quorum.recover_dst_ranks,
-                        step=max_step,
-                        state_dict=self._manager_state_dict(),
-                        timeout=self._timeout,
-                    )
-
-                # See manager.rs for healing conditions
-                if heal:
-                    self._healing = True
-                    self._logger.info(
-                        f"healing required, fetching checkpoint metadata from {recover_src_manager_address=} {max_step=}"
-                    )
-                    primary_client = ManagerClient(
-                        recover_src_manager_address,
-                        connect_timeout=self._connect_timeout,
-                    )
-                    checkpoint_metadata = primary_client._checkpoint_metadata(
-                        self._rank, timeout=self._timeout
-                    )
-                    recover_src_rank = quorum.recover_src_rank
-                    assert (
-                        recover_src_rank is not None
-                    ), "must have a recover rank when healing"
-
-                    self._logger.info(
-                        f"fetching checkpoint from {recover_src_rank=} with {checkpoint_metadata=}"
-                    )
-
-                    # we apply the user state dict only when safe from the main thread
-                    # save it for now
-                    self._pending_state_dict = (
-                        self._checkpoint_transport.recv_checkpoint(
-                            src_rank=recover_src_rank,
-                            metadata=checkpoint_metadata,
-                            step=max_step,
-                            timeout=self._timeout,
+                try:
+                    if quorum.recover_dst_ranks:
+                        self._logger.info(
+                            f"peers need recovery from us {quorum.recover_dst_ranks}"
                         )
-                    )
+                        with torch.profiler.record_function(
+                            "torchft::manager::_checkpoint_transport::send_checkpoint"
+                        ):
+                            self._checkpoint_transport.send_checkpoint(
+                                dst_ranks=quorum.recover_dst_ranks,
+                                step=max_step,
+                                state_dict=self._manager_state_dict(),
+                                timeout=self._timeout,
+                            )
 
-                    # pyre-fixme[6]: got object
-                    self.load_state_dict(self._pending_state_dict["torchft"])
+                    # See manager.rs for healing conditions
+                    if heal:
+                        self._healing = True
+                        self._logger.info(
+                            f"healing required, fetching checkpoint metadata from {recover_src_manager_address=} {max_step=}"
+                        )
+                        primary_client = ManagerClient(
+                            recover_src_manager_address,
+                            connect_timeout=self._connect_timeout,
+                        )
+                        checkpoint_metadata = primary_client._checkpoint_metadata(
+                            self._rank, timeout=self._timeout
+                        )
+                        recover_src_rank = quorum.recover_src_rank
+                        assert (
+                            recover_src_rank is not None
+                        ), "must have a recover rank when healing"
 
-                    # This isn't strictly needed as loading the state_dict above should
-                    # restore the correct step but it makes writing tests simpler.
-                    self._step = max_step
+                        self._logger.info(
+                            f"fetching checkpoint from {recover_src_rank=} with {checkpoint_metadata=}"
+                        )
+
+                        # we apply the user state dict only when safe from the main thread
+                        # save it for now
+                        with torch.profiler.record_function(
+                            "torchft::manager::_checkpoint_transport::recv_checkpoint"
+                        ):
+                            self._pending_state_dict = (
+                                self._checkpoint_transport.recv_checkpoint(
+                                    src_rank=recover_src_rank,
+                                    metadata=checkpoint_metadata,
+                                    step=max_step,
+                                    timeout=self._timeout,
+                                )
+                            )
+
+                        # pyre-fixme[6]: got object
+                        self.load_state_dict(self._pending_state_dict["torchft"])
+
+                        # This isn't strictly needed as loading the state_dict above should
+                        # restore the correct step but it makes writing tests simpler.
+                        self._step = max_step
+                except Exception as e:
+                    self._logger.exception(f"got exception in recovery: {e}")
+                    self.report_error(e)
+                    return
 
     def _apply_pending_state_dict(self) -> None:
         assert self._healing, "must be in healing state"
@@ -574,16 +597,21 @@ class Manager:
         assert self._quorum_future is not None, "must call step before should_commit"
         self._quorum_future.result()
 
-        self._logger.info("applying pending state dict")
+        pending_state_dict = self._pending_state_dict
 
-        assert self._pending_state_dict is not None, "checkpoint was not staged"
-        assert (
-            self._load_state_dict is not None
-        ), "user load_state_dict is not initialized."
-        self._load_state_dict(self._pending_state_dict["user"])
-        self._pending_state_dict = None
-        self._logger.info("Loaded state dict.")
+        if pending_state_dict is None:
+            assert self.errored(), "checkpoint was not staged and no error occured"
+        else:
+            self._logger.info("applying pending state dict")
 
+            assert (
+                self._load_state_dict is not None
+            ), "user load_state_dict is not initialized."
+            self._load_state_dict(pending_state_dict["user"])
+            self._pending_state_dict = None
+            self._logger.info("Loaded state dict.")
+
+    @torch.profiler.record_function("torchft::manager::should_commit")
     def should_commit(self, timeout: Optional[timedelta] = None) -> bool:
         """
         .. note::

@@ -12,7 +12,7 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "torch"
+    "torch>=2.7"
 ]
 
 [project.urls]
