@@ -11,7 +11,7 @@ from torch.distributed.tensor import DeviceMesh, DTensor, distribute_tensor
 
 from torchft.checkpointing.transport import CheckpointTransport
 
-TIMEOUT_REGEX = r"(Timed out|timed out|timeout|time out)"
+TIMEOUT_REGEX = r".*(Timed out|timed out|timeout|time out).*"
 
 
 def assertStateDictEqual(

@@ -444,7 +444,8 @@ class TestManager(TestCase):
         manager._pg.errored.return_value = injected_failure
 
         self.assertFalse(manager.should_commit())
-        self.assertEqual(manager._errored, injected_failure)
+        assert manager._errored is not None
+        self.assertEqual(manager._errored.original_exception, injected_failure)
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.errored.call_count, 1)
 
@@ -526,7 +527,9 @@ class TestManager(TestCase):
         self.assertIsNone(manager.errored())
         e = RuntimeError("some error")
         manager.report_error(e)
-        self.assertIs(manager.errored(), e)
+        error = manager.errored()
+        assert error is not None
+        self.assertIs(error.original_exception, e)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_wrap_future(self, client_mock: MagicMock) -> None:
@@ -540,7 +543,9 @@ class TestManager(TestCase):
 
         e = RuntimeError("injected failure")
         fut.set_exception(e)
-        self.assertIs(manager.errored(), e)
+        error = manager.errored()
+        assert error is not None
+        self.assertIs(error.original_exception, e)
         self.assertEqual(wrapped_fut.value(), 2)
 
         self.assertEqual(manager._pending_work, [wrapped_fut])
@@ -555,11 +560,11 @@ class TestManager(TestCase):
         wrapped_fut = manager.wrap_future(fut, 2)
         wrapped_fut.wait()
         error = manager.errored()
-        self.assertIsNotNone(error)
+        assert error is not None
         with self.assertRaisesRegex(
             TimeoutError, "future did not complete within.*0.01"
         ):
-            raise error
+            raise error.original_exception
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_numerics(self, client_mock: MagicMock) -> None:
@@ -678,9 +683,9 @@ class TestManager(TestCase):
         self.assertFalse(manager.should_commit())
 
         error = manager.errored()
-        self.assertIsNotNone(error)
+        assert error is not None
         with self.assertRaisesRegex(RuntimeError, "recv failure"):
-            raise error
+            raise error.original_exception
 
         quorum.recover_dst_ranks = [0]
         manager.start_quorum()
@@ -688,9 +693,9 @@ class TestManager(TestCase):
         self.assertFalse(manager.should_commit())
 
         error = manager.errored()
-        self.assertIsNotNone(error)
+        assert error is not None
         with self.assertRaisesRegex(RuntimeError, "send failure"):
-            raise error
+            raise error.original_exception
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_configure_errors(self, client_mock: MagicMock) -> None:
@@ -718,9 +723,9 @@ class TestManager(TestCase):
         self.assertFalse(manager.should_commit())
 
         error = manager.errored()
-        self.assertIsNotNone(error)
+        assert error is not None
         with self.assertRaisesRegex(RuntimeError, "configure failure"):
-            raise error
+            raise error.original_exception
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_max_retries(self, client_mock: MagicMock) -> None:

@@ -29,6 +29,7 @@ import concurrent.futures
 import logging
 import os
 import socket
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -69,6 +70,13 @@ class WorldSizeMode(Enum):
 
     DYNAMIC = 0
     FIXED_WITH_SPARES = 1
+
+
+class ExceptionWithTraceback(Exception):
+    def __init__(self, e: Exception) -> None:
+        self.original_exception = e
+        self.stack_trace: str = traceback.format_exc()
+        super().__init__(f"{e}\n{self.stack_trace}")
 
 
 class Manager:
@@ -235,7 +243,7 @@ class Manager:
 
         self._step = 0
         self._quorum_id = -1
-        self._errored: Optional[Exception] = None
+        self._errored: Optional[ExceptionWithTraceback] = None
         self._healing = False
         self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
@@ -332,9 +340,9 @@ class Manager:
         This should be called when an error occurs that leads to a corrupted
         gradient that needs to be discarded.
         """
-        self._errored = e
+        self._errored = ExceptionWithTraceback(e)
 
-    def errored(self) -> Optional[Exception]:
+    def errored(self) -> Optional[ExceptionWithTraceback]:
         """
         Get whether an error has occurred.
 
