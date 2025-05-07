@@ -6,10 +6,11 @@
 
 pub mod lighthouse;
 pub mod manager;
+pub mod router;
 mod net;
 mod retry;
-mod router;
 mod timeout;
+mod interceptor;
 
 pub use crate::router::Router;
 
@@ -25,8 +26,9 @@ use structopt::StructOpt;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::Status;
+use tonic::service::interceptor::InterceptedService;
 
 use chrono::Local;
 use fern::colors::{Color, ColoredLevelConfig};
@@ -36,6 +38,7 @@ pub mod torchftpb {
     tonic::include_proto!("torchft");
 }
 
+use crate::interceptor::RoomIdInterceptor;
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::lighthouse_service_server::LighthouseServiceServer;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
@@ -486,9 +489,10 @@ fn convert_quorum(py: Python, q: &torchftpb::Quorum) -> PyResult<Quorum> {
 ///     connect_timeout (timedelta): The timeout for connecting to the lighthouse server.
 #[pyclass]
 struct LighthouseClient {
-    client: LighthouseServiceClient<Channel>,
+    client: LighthouseServiceClient<
+            InterceptedService<Channel, RoomIdInterceptor>
+	    >,
     runtime: Runtime,
-    room_id: Option<String>,
 }
 
 #[pymethods]
@@ -507,14 +511,25 @@ impl LighthouseClient {
                 .thread_name("torchft-lhclnt")
                 .enable_all()
                 .build()?;
-            let client = runtime
-                .block_on(manager::lighthouse_client_new(addr, connect_timeout))
+
+            let endpoint = Endpoint::from_shared(addr.clone())
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            Ok(Self {
-                client: client,
-                runtime: runtime,
-                room_id: room_id,
-            })
+            let channel = runtime
+                .block_on(
+                    endpoint
+                        .connect_timeout(connect_timeout)
+                        .connect(),
+                )
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            let interceptor =
+                RoomIdInterceptor::new(room_id.unwrap_or_else(|| "default".to_owned()));
+
+            let client =
+                LighthouseServiceClient::with_interceptor(channel, interceptor);
+
+            Ok(Self { client, runtime })           
+		
         })
     }
 
@@ -569,8 +584,6 @@ impl LighthouseClient {
                 }),
             });
 
-            let mut request = self.add_room_header(request);
-
             // This timeout is processed on the server side so we also enable
             // keep alives to detect server health.
             request.set_timeout(timeout);
@@ -599,27 +612,11 @@ impl LighthouseClient {
     ) -> Result<(), StatusError> {
         py.allow_threads(move || {
             let mut req = tonic::Request::new(LighthouseHeartbeatRequest { replica_id });
-            let mut req = self.add_room_header(req);
             req.set_timeout(timeout);
             self.runtime.block_on(self.client.clone().heartbeat(req))?;
             Ok(())
         })
     }
-}
-
-impl LighthouseClient {
-    /// Attach `"room-id"` header if `self.room_id` is Some(_)
-    fn add_room_header<T>(&self, mut req: tonic::Request<T>) -> tonic::Request<T> {
-        if let Some(ref id) = self.room_id {
-            use tonic::metadata::MetadataValue;
-            req.metadata_mut().insert(
-                crate::router::ROOM_ID_HEADER,
-                MetadataValue::try_from(id.as_str()).expect("room-id ascii"),
-            );
-        }
-        req
-    }
-
 }
 
 /// LighthouseServer is a GRPC server for the lighthouse service.

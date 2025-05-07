@@ -6,9 +6,11 @@
 
 use std::net::SocketAddr;
 use structopt::StructOpt;
+use tonic::transport::Server;
 use torchft::lighthouse::LighthouseOpt;
+use torchft::torchftpb::lighthouse_service_server::LighthouseServiceServer;
 use torchft::router::Router;
-use torchftpb::lighthouse_service_server::LighthouseServiceServer;
+
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
