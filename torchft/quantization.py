@@ -134,7 +134,7 @@ def _fused_kernel_quantize_into_fp8(
             other=0.0,
         )
         scaled_row_block = i_row_block * i_row_scale
-        quantized_row_block = scaled_row_block.to(tl.float8e4nv)
+        quantized_row_block = scaled_row_block.to(TL_FP8_TYPE)
         tl.store(
             o_quant_ptr + col_offsets,
             quantized_row_block,
@@ -336,7 +336,7 @@ def _fused_kernel_reduce_fp8(
             TL_FP8_TYPE,
         )
         o_row_block_acc = o_row_block_acc * o_row_scale / all_reduce_size
-        o_quant_row_block_acc = o_row_block_acc.to(tl.float8e4nv)
+        o_quant_row_block_acc = o_row_block_acc.to(TL_FP8_TYPE)
         tl.store(
             o_rank_quant_ptr + col_offsets,
             o_quant_row_block_acc,
