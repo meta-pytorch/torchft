@@ -10,7 +10,6 @@ import triton
 import triton.language as tl
 import triton.runtime as tr
 
-
 SCALE_DTYPE = torch.float32
 SCALE_DTYPE_BYTES = 4
 SCALE_TL_DTYPE = tl.float32
@@ -18,6 +17,13 @@ SCALE_TL_DTYPE_BYTES = tl.constexpr(4)
 TL_MAX_FP8 = tl.constexpr(448.0)
 
 BLOCK_SIZE_T = 2048
+
+
+def _get_fp8_type() -> tl.constexpr:
+    if cuda.get_device_capability() >= (9, 0):
+        return tl.constexpr(tl.float8e4nv)
+    else:
+        return tl.constexpr(tl.float8e4b15)
 
 
 @triton.jit
@@ -38,6 +44,7 @@ def _fused_kernel_quantize_into_fp8(
     o_size_bytes_per_rank,
     all_reduce_size,
     BLOCK_SIZE: tl.constexpr,
+    TL_FP8_TYPE: tl.constexpr,
 ):
     """
     Kernel to quantize a set of input tensors into fp8. The input tensors are
@@ -99,7 +106,7 @@ def _fused_kernel_quantize_into_fp8(
     # be written
     o_curr_ptr = o_ptr + o_offset
     o_scale_ptr = o_curr_ptr.to(tl.pointer_type(SCALE_TL_DTYPE))
-    o_quant_ptr = (o_curr_ptr + SCALE_TL_DTYPE_BYTES).to(tl.pointer_type(tl.float8e4nv))
+    o_quant_ptr = (o_curr_ptr + SCALE_TL_DTYPE_BYTES).to(tl.pointer_type(TL_FP8_TYPE))
 
     # Compute maximum for the current row block by block
     col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -146,6 +153,7 @@ def _fused_kernel_dequantize_from_fp8(
     o_size_bytes_per_rank,
     all_reduce_size,
     BLOCK_SIZE: tl.constexpr,
+    TL_FP8_TYPE: tl.constexpr,
 ) -> None:
     """
     Kernel to dequantize a set of input tensors from fp8. The input tensors
@@ -204,7 +212,7 @@ def _fused_kernel_dequantize_from_fp8(
     # written
     o_curr_ptr = o_ptr + o_offset
     o_scale_ptr = o_curr_ptr.to(tl.pointer_type(SCALE_TL_DTYPE))
-    o_quant_ptr = (o_curr_ptr + SCALE_TL_DTYPE_BYTES).to(tl.pointer_type(tl.float8e4nv))
+    o_quant_ptr = (o_curr_ptr + SCALE_TL_DTYPE_BYTES).to(tl.pointer_type(TL_FP8_TYPE))
 
     # Load row scale
     i_row_scale = tl.load(o_scale_ptr)
@@ -236,6 +244,7 @@ def _fused_kernel_reduce_fp8(
     all_reduce_size,
     all_reduce_rank,
     BLOCK_SIZE: tl.constexpr,
+    TL_FP8_TYPE: tl.constexpr,
 ) -> None:
     """
     Reduces rows of the output tensor for the given rank. The output tensor
@@ -292,6 +301,7 @@ def _fused_kernel_reduce_fp8(
             o_size_bytes_per_rank,
             col_offsets,
             col_offsets_mask,
+            TL_FP8_TYPE,
         )
 
         # Compute maximum across accumulated blocks
@@ -306,7 +316,7 @@ def _fused_kernel_reduce_fp8(
     o_rank_row_ptr = o_ptr + all_reduce_rank * o_size_bytes_per_rank + o_offset
     o_rank_scale_ptr = o_rank_row_ptr.to(tl.pointer_type(SCALE_TL_DTYPE))
     o_rank_quant_ptr = (o_rank_row_ptr + SCALE_TL_DTYPE_BYTES).to(
-        tl.pointer_type(tl.float8e4nv)
+        tl.pointer_type(TL_FP8_TYPE)
     )
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -323,6 +333,7 @@ def _fused_kernel_reduce_fp8(
             o_size_bytes_per_rank,
             col_offsets,
             col_offsets_mask,
+            TL_FP8_TYPE,
         )
         o_row_block_acc = o_row_block_acc * o_row_scale / all_reduce_size
         o_quant_row_block_acc = o_row_block_acc.to(tl.float8e4nv)
@@ -347,6 +358,7 @@ def _fused_kernel_accumulate_block(
     o_row_stride,
     col_offsets,
     col_mask,
+    TL_FP8_TYPE: tl.constexpr,
 ) -> tl.tensor:
     """
     Sums up blocks of quantized rows. The blocks are loaded from the output
@@ -373,7 +385,7 @@ def _fused_kernel_accumulate_block(
         # Load row scale and block of quantized row
         o_scale_ptr = o_row_ptr.to(tl.pointer_type(tl.float32))
         o_quant_ptr = (o_row_ptr + SCALE_TL_DTYPE_BYTES).to(
-            tl.pointer_type(tl.float8e4nv)
+            tl.pointer_type(TL_FP8_TYPE)
         )
 
         o_row_scale = tl.load(o_scale_ptr)
@@ -516,6 +528,7 @@ def fused_quantize_into_fp8(
         output_size // all_reduce_group_size,
         all_reduce_group_size,
         BLOCK_SIZE=BLOCK_SIZE_T,
+        TL_FP8_TYPE=_get_fp8_type(),
     )
 
     return output
@@ -562,6 +575,7 @@ def fused_dequantize_from_fp8(
         output_size // all_reduce_group_size,
         all_reduce_group_size,
         BLOCK_SIZE=BLOCK_SIZE_T,
+        TL_FP8_TYPE=_get_fp8_type(),
     )
 
 
@@ -608,4 +622,5 @@ def fused_reduce_fp8(
         all_reduce_group_size,
         all_reduce_rank,
         BLOCK_SIZE=BLOCK_SIZE_T,
+        TL_FP8_TYPE=_get_fp8_type(),
     )

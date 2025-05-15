@@ -5,16 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 
 import torch
 from parameterized import parameterized
-
-from torchft.quantization import (
-    fused_dequantize_from_fp8,
-    fused_quantize_into_fp8,
-    fused_reduce_fp8,
-)
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -67,7 +61,25 @@ def gen_splits(inp: torch.Tensor, split_size: int) -> list[list[tuple[int, ...]]
     return combinations
 
 
+try:
+    import triton
+
+    TRITON_AVAILABLE = True
+except ImportError:
+    TRITON_AVAILABLE = False
+
+
+@skipUnless(
+    torch.cuda.is_available() and TRITON_AVAILABLE,
+    "CUDA and Triton are required for this test",
+)
 class QuantizationTest(TestCase):
+
+    from torchft.quantization import (
+        fused_dequantize_from_fp8,
+        fused_quantize_into_fp8,
+        fused_reduce_fp8,
+    )
 
     def run_test(
         self,
@@ -100,7 +112,9 @@ class QuantizationTest(TestCase):
                 reshaped_inputs.append(i.view(*s))
                 reshaped_outputs.append(o.view(*s))
 
-            quant = fused_quantize_into_fp8(reshaped_inputs, world_size)
+            quant = QuantizationTest.fused_quantize_into_fp8(
+                reshaped_inputs, world_size
+            )
             quant_slices = torch.split(quant, quant.numel() // world_size)
 
             quant_final = torch.empty_like(quant)
@@ -117,11 +131,15 @@ class QuantizationTest(TestCase):
                 for other in range(world_size):
                     quant_copy_slices[other].copy_(quant_slices[r])
 
-                fused_reduce_fp8(reshaped_inputs, quant_copy, world_size, r)
+                QuantizationTest.fused_reduce_fp8(
+                    reshaped_inputs, quant_copy, world_size, r
+                )
 
                 quant_final_slices[r].copy_(quant_copy_slices[r])
 
-            fused_dequantize_from_fp8(reshaped_outputs, quant_final, world_size)
+            QuantizationTest.fused_dequantize_from_fp8(
+                reshaped_outputs, quant_final, world_size
+            )
 
             self.assertFalse(any_nan(reshaped_outputs))
 
@@ -137,7 +155,6 @@ class QuantizationTest(TestCase):
         for m in [1.0, 10.0, 100.0, 1000.0]
     ]
 
-    @unittest.skipIf(not torch.cuda.is_available(), "GPUs are not available")
     @parameterized.expand(END_TO_END_CONFIGS)
     def test_end_to_end(self, tensor_size: int, multiplier: float) -> None:
         self.run_test(
