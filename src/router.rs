@@ -1,32 +1,38 @@
-use std::sync::Arc;
+use std::{
+    convert::Infallible,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use dashmap::{mapref::entry::Entry, DashMap};
-use tonic::{Request, Response, Status};
+use futures::FutureExt;
+use tonic::{
+    body::BoxBody,
+    codegen::http::{HeaderMap, Request, Response}, // http-0.2 types
+    server::NamedService,
+};
+use tower::Service;
 
 use crate::{
     lighthouse::{Lighthouse, LighthouseOpt},
-    torchftpb::{
-        lighthouse_service_server::LighthouseService, LighthouseHeartbeatRequest,
-        LighthouseHeartbeatResponse, LighthouseQuorumRequest, LighthouseQuorumResponse,
-    },
+    torchftpb::lighthouse_service_server::LighthouseServiceServer,
 };
 
-/// Metadata header for both client and router
+/// Metadata header recognised by both client interceptor and this router.
 pub const ROOM_ID_HEADER: &str = "room-id";
 
-/// Top-level service registered with tonic’s `Server::builder()`
+/// gRPC server for a single room (inner state = `Arc<Lighthouse>`).
+type GrpcSvc = LighthouseServiceServer<Arc<Lighthouse>>;
+
 #[derive(Clone)]
 pub struct Router {
-    rooms: Arc<DashMap<String, Arc<Lighthouse>>>,
-    tmpl_opt: LighthouseOpt, // (cloned for each new room)
+    rooms: Arc<DashMap<String, Arc<GrpcSvc>>>,
+    tmpl_opt: LighthouseOpt,
 }
 
-/// Designates a single tonic gRPC server into many logical “rooms.”
-/// Inspects the `room-id` metadata header on each request, then
-/// lazily creates or reuses an Arc<Lighthouse> for that namespace
 impl Router {
-    /// Create a new router given the CLI/config options that are
-    /// normally passed straight to `Lighthouse::new`.
     pub fn new(tmpl_opt: LighthouseOpt) -> Self {
         Self {
             rooms: Arc::new(DashMap::new()),
@@ -34,55 +40,71 @@ impl Router {
         }
     }
 
-    /// Room lookup: creation if it doesn't exist, access if it does
-    async fn room(&self, id: &str) -> Arc<Lighthouse> {
-        // 1. Quick optimistic read (no locking contention).
-        if let Some(handle) = self.rooms.get(id) {
-            return handle.clone();
-        }
-
-        // 2. Build the Lighthouse instance *off the map* so
-        //    we don't hold any guard across `.await`.
-        let new_room = Lighthouse::new(self.tmpl_opt.clone())
-            .await
-            .expect("failed to create Lighthouse");
-
-        // 3. Second pass: insert if still vacant, otherwise reuse
-        //    whatever another task inserted first.
-        match self.rooms.entry(id.to_owned()) {
-            Entry::Occupied(entry) => entry.get().clone(),
-            Entry::Vacant(entry) => {
-                entry.insert(new_room.clone());
-                new_room
-            }
-        }
-    }
-
-    /// Extracts `"room-id"` from metadata, defaulting to `"default"`.
-    fn extract_room_id(meta: &tonic::metadata::MetadataMap) -> &str {
-        meta.get(ROOM_ID_HEADER)
+    fn room_id(hdrs: &HeaderMap) -> &str {
+        hdrs.get(ROOM_ID_HEADER)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("default")
     }
+
+    async fn room_service(
+        rooms: Arc<DashMap<String, Arc<GrpcSvc>>>,
+        tmpl: LighthouseOpt,
+        id: &str,
+    ) -> Arc<GrpcSvc> {
+        if let Some(svc) = rooms.get(id) {
+            return svc.clone();
+        }
+
+        // Build room state once.
+        let lh = Lighthouse::new(tmpl.clone())
+            .await
+            .expect("failed to create Lighthouse");
+
+        let svc_new = Arc::new(LighthouseServiceServer::new(lh));
+
+        match rooms.entry(id.to_owned()) {
+            Entry::Occupied(e) => e.get().clone(),
+            Entry::Vacant(v) => {
+                v.insert(svc_new.clone());
+                svc_new
+            }
+        }
+    }
 }
 
-#[tonic::async_trait]
-impl LighthouseService for Router {
-    async fn quorum(
-        &self,
-        req: Request<LighthouseQuorumRequest>,
-    ) -> Result<Response<LighthouseQuorumResponse>, Status> {
-        let id = Self::extract_room_id(req.metadata()).to_owned();
-        let room = self.room(&id).await;
-        <Arc<Lighthouse> as LighthouseService>::quorum(&room, req).await
+// Tower::Service implementation
+impl Service<Request<BoxBody>> for Router {
+    type Response = Response<BoxBody>;
+    type Error = Infallible;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
-    async fn heartbeat(
-        &self,
-        req: Request<LighthouseHeartbeatRequest>,
-    ) -> Result<Response<LighthouseHeartbeatResponse>, Status> {
-        let id = Self::extract_room_id(req.metadata()).to_owned();
-        let room = self.room(&id).await;
-        <Arc<Lighthouse> as LighthouseService>::heartbeat(&room, req).await
+    fn call(&mut self, req: Request<BoxBody>) -> Self::Future {
+        let rooms = self.rooms.clone();
+        let tmpl = self.tmpl_opt.clone();
+        let room = Self::room_id(req.headers()).to_owned();
+
+        async move {
+            let svc_arc = Self::room_service(rooms, tmpl, &room).await;
+
+            // `Arc<GrpcSvc>` itself isn’t a Service; clone the inner value.
+            let mut svc = (*svc_arc).clone();
+            let resp = svc
+                .call(req)
+                .await
+                .map_err(|_e| -> Infallible { unreachable!() })?;
+
+            Ok(resp)
+        }
+        .boxed()
     }
+}
+
+// Forward tonic’s NamedService marker
+impl NamedService for Router {
+    const NAME: &'static str = <GrpcSvc as NamedService>::NAME;
 }

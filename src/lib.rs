@@ -4,13 +4,13 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+mod interceptor;
 pub mod lighthouse;
 pub mod manager;
-pub mod router;
 mod net;
 mod retry;
+pub mod router;
 mod timeout;
-mod interceptor;
 
 pub use crate::router::Router;
 
@@ -20,15 +20,16 @@ use core::time::Duration;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use std::cmp;
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread::available_parallelism;
 use structopt::StructOpt;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Status;
-use tonic::service::interceptor::InterceptedService;
 
 use chrono::Local;
 use fern::colors::{Color, ColoredLevelConfig};
@@ -40,9 +41,7 @@ pub mod torchftpb {
 
 use crate::interceptor::RoomIdInterceptor;
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
-use crate::torchftpb::lighthouse_service_server::LighthouseServiceServer;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
-use crate::torchftpb::LighthouseHeartbeatRequest;
 use crate::torchftpb::{
     CheckpointMetadataRequest, LighthouseHeartbeatRequest, LighthouseQuorumRequest,
     ManagerQuorumRequest, ShouldCommitRequest,
@@ -349,10 +348,11 @@ fn lighthouse_main(py: Python<'_>) -> PyResult<()> {
 
 async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
     let router = Router::new(opt.clone());
+    let addr: SocketAddr = opt.bind.parse()?;
 
     tonic::transport::Server::builder()
-        .add_service(LighthouseServiceServer::new(router))
-        .serve(opt.bind.parse::<std::net::SocketAddr>()?)
+        .add_service(router)
+        .serve(addr)
         .await?;
 
     Ok(())
@@ -489,9 +489,7 @@ fn convert_quorum(py: Python, q: &torchftpb::Quorum) -> PyResult<Quorum> {
 ///     connect_timeout (timedelta): The timeout for connecting to the lighthouse server.
 #[pyclass]
 struct LighthouseClient {
-    client: LighthouseServiceClient<
-            InterceptedService<Channel, RoomIdInterceptor>
-	    >,
+    client: LighthouseServiceClient<InterceptedService<Channel, RoomIdInterceptor>>,
     runtime: Runtime,
 }
 
@@ -515,21 +513,15 @@ impl LighthouseClient {
             let endpoint = Endpoint::from_shared(addr.clone())
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let channel = runtime
-                .block_on(
-                    endpoint
-                        .connect_timeout(connect_timeout)
-                        .connect(),
-                )
+                .block_on(endpoint.connect_timeout(connect_timeout).connect())
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
             let interceptor =
                 RoomIdInterceptor::new(room_id.unwrap_or_else(|| "default".to_owned()));
 
-            let client =
-                LighthouseServiceClient::with_interceptor(channel, interceptor);
+            let client = LighthouseServiceClient::with_interceptor(channel, interceptor);
 
-            Ok(Self { client, runtime })           
-		
+            Ok(Self { client, runtime })
         })
     }
 
@@ -674,10 +666,11 @@ impl LighthouseServer {
             let bound_sock = listener.local_addr()?;
             let bound = format!("http://{}", bound_sock);
             let incoming = TcpListenerStream::new(listener);
+            let router = Router::new(opt.clone());
 
             let handle = rt.spawn(async move {
                 tonic::transport::Server::builder()
-                    .add_service(LighthouseServiceServer::new(Router::new(opt.clone())))
+                    .add_service(router)
                     .serve_with_incoming(incoming)
                     .await
                     .map_err(|e: tonic::transport::Error| anyhow::anyhow!(e))
