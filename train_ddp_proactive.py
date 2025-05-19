@@ -14,41 +14,13 @@ REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
 os.environ["CUDA_VISIBLE_DEVICES"] = str(REPLICA_GROUP_ID % 4)
 os.environ["NCCL_HOSTID"] = str(REPLICA_GROUP_ID)
 
-import random
-
 import torch
 import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as transforms
 from torch import nn, optim
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.utils.data import Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
-
-
-class SyntheticDataset(Dataset):
-    def __init__(
-        self,
-        length=50000,
-        channels=3,
-        height=32,
-        width=32,
-        num_classes=10,
-        transform=None,
-    ):
-        self.length = length
-        self.channels = channels
-        self.height = height
-        self.width = width
-        self.num_classes = num_classes
-        self.transform = transform
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        img = torch.randn(self.channels, self.height, self.width)
-        label = random.randint(0, self.num_classes - 1)
-        return img, label
-
 
 from torchft import (
     DistributedDataParallel,
@@ -68,12 +40,11 @@ def main() -> None:
     REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
     NUM_REPLICA_GROUPS = int(os.environ.get("NUM_REPLICA_GROUPS", 2))
 
-    trainset = SyntheticDataset(
-        length=50000,
-        channels=3,
-        height=32,
-        width=32,
-        num_classes=10,
+    transform = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    )
+    trainset = torchvision.datasets.CIFAR10(
+        root="./cifar", train=True, download=True, transform=transform
     )
 
     # This shards the training set across all ranks and replica groups. We manage
@@ -167,7 +138,6 @@ def main() -> None:
     m = Net().to(device)
     m = DistributedDataParallel(manager, m)
     optimizer = Optimizer(manager, optim.AdamW(m.parameters()))
-    criterion = nn.CrossEntropyLoss()
 
     print(m)
     num_params = sum(p.numel() for p in m.parameters())
@@ -197,22 +167,30 @@ def main() -> None:
         for i, (inputs, labels) in enumerate(trainloader):
             prof.step()
 
+            time.sleep(0.5)  # Else each iteration runs too quickly
+
             inputs = inputs.to(device)
             labels = labels.to(device)
 
             # must be called at the beginning of each train loop
             # Quorum computation is triggered here but only needed in the backwards pass.
             optimizer.zero_grad()
-            # optimizer.load_state_dict(manager.new_state_dict())
-            # manager.new_state_dict comes from the controller
-            # What is hard about this? 1. Controller needs to give information to the manager in a timely manner.
-            # 2. There needs to have enough time for a listening thread to put these into the state dict and modify the manager state.
 
             out = m(inputs)
+            criterion = nn.CrossEntropyLoss()
             loss = criterion(out, labels)
 
             # Gradient allreduce overlaps with the backwards pass.
             loss.backward()
+            if manager.current_step() == 3:
+                if REPLICA_GROUP_ID == 0:
+                    manager.shutdown()
+                    exit(0)
+                # If proactive recovery, then the surviving process will reconfigure
+                # If not proactive recovery, then the surviving process will wait until timeout
+
+            test_tensor = torch.tensor([1.0]).to(device)
+            manager.allreduce(test_tensor)
 
             # must be called at the end of the train loop
             # This may not actually step the optimizer if an error occured during grad allreduce.
@@ -230,9 +208,7 @@ def main() -> None:
             # they're shared across all groups and will load from existing replicas as
             # long as not every worker goes down.
 
-            time.sleep(1)
-            if manager.current_step() >= 10000:  # if manager.stop_training()
-                # Print out all the stats, etc., calculate. Post-amble (or some other word)
+            if manager.current_step() >= 10000:
                 # complete training
                 prof.stop()
                 exit()
