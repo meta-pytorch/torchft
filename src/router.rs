@@ -10,7 +10,7 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use futures::FutureExt;
 use tonic::{
     body::BoxBody,
-    codegen::http::{HeaderMap, Request, Response}, // http-0.2 types
+    codegen::http::{HeaderMap, Request, Response},
     server::NamedService,
 };
 use tower::Service;
@@ -28,7 +28,7 @@ type GrpcSvc = LighthouseServiceServer<Arc<Lighthouse>>;
 
 #[derive(Clone)]
 pub struct Router {
-    rooms: Arc<DashMap<String, Arc<GrpcSvc>>>,
+    rooms: Arc<DashMap<String, Arc<Lighthouse>>>,
     tmpl_opt: LighthouseOpt,
 }
 
@@ -47,26 +47,23 @@ impl Router {
     }
 
     async fn room_service(
-        rooms: Arc<DashMap<String, Arc<GrpcSvc>>>,
+        rooms: Arc<DashMap<String, Arc<Lighthouse>>>,
         tmpl: LighthouseOpt,
         id: &str,
-    ) -> Arc<GrpcSvc> {
-        if let Some(svc) = rooms.get(id) {
-            return svc.clone();
+    ) -> Arc<Lighthouse> {
+        if let Some(lh) = rooms.get(id) {
+            return lh.clone();
         }
 
-        // Build room state once.
-        let lh = Lighthouse::new(tmpl.clone())
+        let lh = Lighthouse::new(id.to_owned(), tmpl.clone())
             .await
             .expect("failed to create Lighthouse");
-
-        let svc_new = Arc::new(LighthouseServiceServer::new(lh));
 
         match rooms.entry(id.to_owned()) {
             Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(v) => {
-                v.insert(svc_new.clone());
-                svc_new
+                v.insert(lh.clone());
+                lh
             }
         }
     }
@@ -89,10 +86,9 @@ impl Service<Request<BoxBody>> for Router {
         let room = Self::room_id(req.headers()).to_owned();
 
         async move {
-            let svc_arc = Self::room_service(rooms, tmpl, &room).await;
+            let lh = Self::room_service(rooms, tmpl, &room).await;
 
-            // `Arc<GrpcSvc>` itself isn’t a Service; clone the inner value.
-            let mut svc = (*svc_arc).clone();
+            let mut svc = LighthouseServiceServer::new(lh);
             let resp = svc
                 .call(req)
                 .await

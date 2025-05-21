@@ -17,6 +17,7 @@ pub use crate::router::Router;
 use anyhow::Result;
 use atty::Stream;
 use core::time::Duration;
+use gethostname::gethostname;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use std::cmp;
 use std::env;
@@ -664,7 +665,6 @@ impl LighthouseServer {
 
             let listener = rt.block_on(tokio::net::TcpListener::bind(&bind))?;
             let bound_sock = listener.local_addr()?;
-            let bound = format!("http://{}", bound_sock);
             let incoming = TcpListenerStream::new(listener);
             let router = Router::new(opt.clone());
 
@@ -676,8 +676,15 @@ impl LighthouseServer {
                     .map_err(|e: tonic::transport::Error| anyhow::anyhow!(e))
             });
 
+            let host = if bind.starts_with("0.0.0.0") || bind.starts_with("[::]") {
+                gethostname().to_string_lossy().into_owned()
+            } else {
+                bind.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap()
+            };
+            let public_addr = format!("http://{}:{}", host, bound_sock.port());
+
             Ok(Self {
-                bind: bound,
+                bind: public_addr,
                 handle,
                 _runtime: rt,
             })

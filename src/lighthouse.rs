@@ -58,6 +58,7 @@ struct State {
 }
 
 pub struct Lighthouse {
+    id: String,
     state: Mutex<State>,
     opt: LighthouseOpt,
     listener: Mutex<Option<tokio::net::TcpListener>>,
@@ -261,12 +262,13 @@ fn quorum_compute(
 }
 
 impl Lighthouse {
-    pub async fn new(opt: LighthouseOpt) -> Result<Arc<Self>> {
+    pub async fn new(id: String, opt: LighthouseOpt) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind(&opt.bind).await?;
 
         let (tx, _) = broadcast::channel(16);
 
         Ok(Arc::new(Self {
+            id: id,
             state: Mutex::new(State {
                 participants: HashMap::new(),
                 channel: tx,
