@@ -10,10 +10,6 @@ import sys
 import time
 from datetime import timedelta
 
-REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
-os.environ["CUDA_VISIBLE_DEVICES"] = str(REPLICA_GROUP_ID % 4)
-os.environ["NCCL_HOSTID"] = str(REPLICA_GROUP_ID)
-
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -32,6 +28,9 @@ from torchft import (
 )
 from torchft.checkpointing.pg_transport import PGTransport
 
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "utils"))
+from utils import get_cifar10_dataset
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -39,12 +38,17 @@ logging.basicConfig(level=logging.INFO)
 def main() -> None:
     REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
     NUM_REPLICA_GROUPS = int(os.environ.get("NUM_REPLICA_GROUPS", 2))
+    QUICK_RUN = bool(os.environ.get("QUICK_RUN", False))
 
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
-    trainset = torchvision.datasets.CIFAR10(
-        root="./cifar", train=True, download=True, transform=transform
+    trainset = get_cifar10_dataset(
+        root="./cifar",
+        train=True,
+        download=True,
+        transform=transform,
+        quick_run=QUICK_RUN,
     )
 
     # This shards the training set across all ranks and replica groups. We manage
@@ -90,6 +94,11 @@ def main() -> None:
         timeout=timedelta(seconds=10),
         device=("cuda" if torch.cuda.is_available() else "cpu"),
     )
+
+    if REPLICA_GROUP_ID == 0:
+        # Reduce initial sleep for quick runs
+        initial_sleep = 3 if QUICK_RUN else 10
+        time.sleep(initial_sleep)
 
     manager = Manager(
         pg=pg,
@@ -163,11 +172,10 @@ def main() -> None:
     )
 
     prof.start()
+
     while True:
         for i, (inputs, labels) in enumerate(trainloader):
             prof.step()
-
-            time.sleep(0.5)  # Else each iteration runs too quickly
 
             inputs = inputs.to(device)
             labels = labels.to(device)
@@ -182,15 +190,6 @@ def main() -> None:
 
             # Gradient allreduce overlaps with the backwards pass.
             loss.backward()
-            if manager.current_step() == 3:
-                if REPLICA_GROUP_ID == 0:
-                    manager.shutdown()
-                    exit(0)
-                # If proactive recovery, then the surviving process will reconfigure
-                # If not proactive recovery, then the surviving process will wait until timeout
-
-            test_tensor = torch.tensor([1.0]).to(device)
-            manager.allreduce(test_tensor)
 
             # must be called at the end of the train loop
             # This may not actually step the optimizer if an error occured during grad allreduce.
@@ -208,10 +207,14 @@ def main() -> None:
             # they're shared across all groups and will load from existing replicas as
             # long as not every worker goes down.
 
-            if manager.current_step() >= 10000:
+            max_steps = 10 if QUICK_RUN else 10000
+            if manager.current_step() >= max_steps:
                 # complete training
                 prof.stop()
                 exit()
+
+            sleep_time = 0.5 if QUICK_RUN else 0.5
+            time.sleep(sleep_time)
 
 
 if __name__ == "__main__":

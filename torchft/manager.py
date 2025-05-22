@@ -223,6 +223,7 @@ class Manager:
         )
 
         if lighthouse_addr is not None and self._proactive_recovery:
+            print("In proactive recovery mode: ", self._proactive_recovery)
             ctx = multiprocessing.get_context("spawn")
             error_local, error_remote = ctx.Pipe()
             self._error_pipe = _MonitoredPipe(error_local)
