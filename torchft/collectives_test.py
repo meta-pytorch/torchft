@@ -19,6 +19,7 @@ from torchft.process_group import ProcessGroup
 from torchft.process_group_test import MultiPgBaseTest
 
 try:
+    # pyre-ignore[21]: Could not find a module corresponding to import `triton`
     import triton
 except ImportError:
     pass
@@ -87,13 +88,13 @@ else:
                 if mean_diff > tolerance:
                     raise AssertionError(f"Results not within tolerance {tolerance}")
 
-        @parameterized.expand(
-            [
-                (ts, m)
-                for ts in [128, 512, 1024, 2048, 4096]
-                for m in [1.0, 10.0, 100.0, 1000.0]
-            ]
-        )
+        END_TO_END_CONFIGS: list[tuple[int, float]] = [
+            (ts, m)
+            for ts in [128, 512, 1024, 2048, 4096]
+            for m in [1.0, 10.0, 100.0, 1000.0]
+        ]
+
+        @parameterized.expand(END_TO_END_CONFIGS)
         def test_collective(self, tensor_size: int, multiplier: float) -> None:
             self._run_parallel_collectives(
                 lambda pg, rank, device: self._run_collective(

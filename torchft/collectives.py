@@ -32,6 +32,7 @@ def _to_allgather_options(opts: AllreduceOptions) -> AllgatherOptions:
 
 
 try:
+    # pyre-ignore[21]: Could not find a module corresponding to import `triton`
     import triton
 except ImportError:
     pass
@@ -157,6 +158,7 @@ else:
                     del self._quantized_tensors_out
                     del self._quantized_tensors
 
+            # pyre-ignore[29]
             return QuantizedAllReduceFuture(
                 sync_stream, quantized_tensors, quantized_tensors_out
             )
