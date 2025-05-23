@@ -22,7 +22,7 @@ Issues = "https://github.com/pytorch-labs/torchft/issues"
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "pytest==8.3.4",
     "pytest-timeout",
     "black",
     "pyre-check",
