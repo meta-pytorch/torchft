@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
 import torch
 import torch.cuda as cuda
 
@@ -41,7 +42,6 @@ def _kernel_calculate_scale(row_max) -> tl.tensor:
 
 
 @triton.jit
-# pyre-fixme[2]: Missing parameter annotation
 def _fused_kernel_quantize_into_fp8(
     i_ptrs,
     i_shapes,
