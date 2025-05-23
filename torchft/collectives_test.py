@@ -6,7 +6,7 @@
 
 import unittest
 from typing import Callable
-from unittest import skipUnless, TestCase
+from unittest import TestCase, skipUnless
 
 import torch
 from parameterized import parameterized
