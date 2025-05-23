@@ -6,17 +6,23 @@
 
 import torch
 import torch.cuda as cuda
+
+# pyre-fixme[21]: Could not find a module corresponding to import `triton`
 import triton
+
+# pyre-fixme[21]: Could not find a module corresponding to import `triton.language`
 import triton.language as tl
+
+# pyre-fixme[21]: Could not find a module corresponding to import `triton.runtime`
 import triton.runtime as tr
 
-SCALE_DTYPE = torch.float32
-SCALE_DTYPE_BYTES = 4
+SCALE_DTYPE: torch.dtype = torch.float32
+SCALE_DTYPE_BYTES: int = 4
 SCALE_TL_DTYPE = tl.float32
 SCALE_TL_DTYPE_BYTES = tl.constexpr(4)
 TL_MAX_FP8 = tl.constexpr(448.0)
 
-BLOCK_SIZE_T = 2048
+BLOCK_SIZE_T: int = 2048
 
 
 def _get_fp8_type() -> tl.constexpr:
@@ -35,6 +41,7 @@ def _kernel_calculate_scale(row_max) -> tl.tensor:
 
 
 @triton.jit
+# pyre-fixme[2]: Missing parameter annotation
 def _fused_kernel_quantize_into_fp8(
     i_ptrs,
     i_shapes,

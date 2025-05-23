@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from unittest import TestCase, skipUnless
+from unittest import skipUnless, TestCase
 
 import torch
 from parameterized import parameterized
@@ -16,22 +16,22 @@ torch.set_printoptions(precision=4, sci_mode=False)
 DEVICE = "cuda"
 
 try:
+    # pyre-fixme[21]: Could not find a module corresponding to import `triton`
     import triton
 except ImportError:
     pass
 else:
+    from torchft.quantization import (
+        fused_dequantize_from_fp8,
+        fused_quantize_into_fp8,
+        fused_reduce_fp8,
+    )
 
     @skipUnless(
         torch.cuda.is_available(),
         "CUDA is required for this test",
     )
     class QuantizationTest(TestCase):
-
-        from torchft.quantization import (
-            fused_dequantize_from_fp8,
-            fused_quantize_into_fp8,
-            fused_reduce_fp8,
-        )
 
         def run_test(
             self,
@@ -64,9 +64,7 @@ else:
                     reshaped_inputs.append(i.view(*s))
                     reshaped_outputs.append(o.view(*s))
 
-                quant = QuantizationTest.fused_quantize_into_fp8(
-                    reshaped_inputs, world_size
-                )
+                quant = fused_quantize_into_fp8(reshaped_inputs, world_size)
                 quant_slices = torch.split(quant, quant.numel() // world_size)
 
                 quant_final = torch.empty_like(quant)
@@ -83,15 +81,11 @@ else:
                     for other in range(world_size):
                         quant_copy_slices[other].copy_(quant_slices[r])
 
-                    QuantizationTest.fused_reduce_fp8(
-                        reshaped_inputs, quant_copy, world_size, r
-                    )
+                    fused_reduce_fp8(reshaped_inputs, quant_copy, world_size, r)
 
                     quant_final_slices[r].copy_(quant_copy_slices[r])
 
-                QuantizationTest.fused_dequantize_from_fp8(
-                    reshaped_outputs, quant_final, world_size
-                )
+                fused_dequantize_from_fp8(reshaped_outputs, quant_final, world_size)
 
                 self.assertFalse(_test_utils.any_nan(reshaped_outputs))
 

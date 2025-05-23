@@ -6,7 +6,7 @@
 
 import unittest
 from typing import Callable
-from unittest import TestCase, skipUnless
+from unittest import skipUnless, TestCase
 
 import torch
 from parameterized import parameterized
@@ -15,7 +15,6 @@ from torch.distributed import AllreduceOptions, ReduceOp
 from torch.distributed.distributed_c10d import ReduceOp
 
 from torchft import _test_utils
-from torchft.collectives import allreduce_quantized
 from torchft.process_group import ProcessGroup
 from torchft.process_group_test import MultiPgBaseTest
 
@@ -24,6 +23,7 @@ try:
 except ImportError:
     pass
 else:
+    from torchft.collectives import allreduce_quantized
 
     @skipUnless(
         torch.cuda.is_available() and torch.cuda.device_count() >= 2,
