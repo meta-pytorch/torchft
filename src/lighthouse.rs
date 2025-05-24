@@ -22,8 +22,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono;
 use gethostname::gethostname;
-use log::{error, info};
+use log::{error, info, warn};
+use serde_json;
+use std::fs;
 use structopt::StructOpt;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
@@ -44,9 +47,12 @@ use std::pin::Pin;
 use crate::manager::manager_client_new;
 use crate::torchftpb::{
     lighthouse_service_server::{LighthouseService, LighthouseServiceServer},
-    KillRequest, LighthouseHeartbeatRequest, LighthouseHeartbeatResponse, LighthouseQuorumRequest,
-    LighthouseQuorumResponse, Quorum, QuorumMember, SubscribeFailuresRequest,
+    KillRequest, LighthouseConfigRequest, LighthouseConfigResponse, LighthouseHeartbeatRequest,
+    LighthouseHeartbeatResponse, LighthouseQuorumRequest, LighthouseQuorumResponse, Quorum,
+    QuorumMember, SubscribeFailuresRequest,
 };
+
+use serde::Deserialize;
 
 #[derive(Clone)]
 struct QuorumMemberDetails {
@@ -77,6 +83,9 @@ struct State {
 
     // Broadcast channel for sending failure notifications to subscribers.
     pub failure_channel: broadcast::Sender<FailureNotification>,
+
+    // Configuration data as serde_json::Map (loaded from config file if provided)
+    config_data: serde_json::Map<String, serde_json::Value>,
 }
 
 pub struct Lighthouse {
@@ -149,6 +158,12 @@ pub struct LighthouseOpt {
         help = "How frequently to check for failures."
     )]
     pub failure_tick_ms: u64,
+
+    #[structopt(
+        long = "lighthouse_config",
+        help = "Path to configuration file (JSON format)"
+    )]
+    pub lighthouse_config: Option<String>,
 }
 
 fn quorum_changed(a: &Vec<QuorumMember>, b: &Vec<QuorumMember>) -> bool {
@@ -289,9 +304,47 @@ fn quorum_compute(
     )
 }
 
+fn load_config(config_path: &Option<String>) -> serde_json::Map<String, serde_json::Value> {
+    match config_path {
+        Some(path) => {
+            match fs::read_to_string(path) {
+                Ok(content) => {
+                    // Parse JSON into Map
+                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        &content,
+                    ) {
+                        Ok(json_map) => {
+                            info!("Successfully loaded config from {}", path);
+                            json_map
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Invalid JSON in config file {}: {}. Using empty config.",
+                                path, e
+                            );
+                            serde_json::Map::new()
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to read config file {}: {}. Using empty config.",
+                        path, e
+                    );
+                    serde_json::Map::new()
+                }
+            }
+        }
+        None => serde_json::Map::new(),
+    }
+}
+
 impl Lighthouse {
     pub async fn new(opt: LighthouseOpt) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind(&opt.bind).await?;
+
+        // Load configuration data
+        let config_data = load_config(&opt.lighthouse_config);
 
         let (tx, _) = broadcast::channel(16);
         let (failure_tx, failure_rx) = broadcast::channel::<FailureNotification>(16);
@@ -333,6 +386,7 @@ impl Lighthouse {
                 heartbeats: HashMap::new(),
                 failures: HashMap::new(),
                 failure_channel: failure_tx,
+                config_data: config_data,
             }),
             opt: opt,
             local_addr: listener.local_addr()?,
@@ -429,6 +483,19 @@ impl Lighthouse {
                 get({
                     let self_clone = self.clone();
                     move || async { self_clone.get_status().await }
+                }),
+            )
+            .route(
+                "/config",
+                get({
+                    let self_clone = self.clone();
+                    move || async { self_clone.get_config_page().await }
+                })
+                .put({
+                    let self_clone = self.clone();
+                    move |form_data: axum::extract::Form<ConfigUpdateForm>| async move {
+                        self_clone.update_config(form_data).await
+                    }
                 }),
             )
             .route(
@@ -602,6 +669,86 @@ impl Lighthouse {
         Ok(())
     }
 
+    async fn get_config_page(self: Arc<Self>) -> Html<String> {
+        self.get_config_page_with_message("".to_string()).await
+    }
+
+    async fn get_config_page_with_message(
+        self: Arc<Self>,
+        success_message: String,
+    ) -> Html<String> {
+        let config_data = {
+            let state = self.state.lock().await;
+            // Serialize Map to JSON string for the web interface
+            match serde_json::to_string_pretty(&state.config_data) {
+                Ok(json_str) => json_str,
+                Err(_) => "{}".to_string(),
+            }
+        };
+
+        let timestamp = chrono::Utc::now()
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+
+        let template = ConfigTemplate {
+            config_data: config_data,
+            timestamp: timestamp,
+            success_message: if success_message.is_empty() {
+                None
+            } else {
+                Some(success_message)
+            },
+        };
+        Html(template.render().unwrap())
+    }
+
+    async fn update_config(
+        self: Arc<Self>,
+        axum::extract::Form(form_data): axum::extract::Form<ConfigUpdateForm>,
+    ) -> Result<Html<String>, AppError> {
+        let new_config_json = form_data.config;
+
+        info!("Update config called with: {}", new_config_json);
+
+        // Parse and validate the JSON into a Map
+        let new_config_map = match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &new_config_json,
+        ) {
+            Ok(json_map) => json_map,
+            Err(e) => {
+                warn!("Invalid JSON provided via web interface: {}", e);
+                return Err(AppError(anyhow!("Invalid JSON: {}", e)));
+            }
+        };
+
+        // Update the config in the lighthouse state
+        {
+            let mut state = self.state.lock().await;
+            state.config_data = new_config_map.clone();
+        }
+
+        // Log the updated configuration content
+        match serde_json::to_string_pretty(&new_config_map) {
+            Ok(pretty_json) => {
+                info!(
+                    "Config updated successfully via web interface. New configuration:\n{}",
+                    pretty_json
+                );
+            }
+            Err(_) => {
+                info!(
+                    "Config updated successfully via web interface. New configuration: {:?}",
+                    new_config_map
+                );
+            }
+        }
+
+        // Return the updated config page with success message
+        Ok(self
+            .get_config_page_with_message("Configuration updated successfully!".to_string())
+            .await)
+    }
+
     pub async fn inject_failure(self: Arc<Self>, replica_id: String) -> Result<()> {
         let state = self.state.lock().await;
         state
@@ -729,6 +876,30 @@ impl LighthouseService for Arc<Lighthouse> {
 
         Ok(Response::new(Box::pin(stream)))
     }
+
+    async fn get_config(
+        &self,
+        _request: Request<LighthouseConfigRequest>,
+    ) -> Result<Response<LighthouseConfigResponse>, Status> {
+        let config_data = {
+            let state = self.state.lock().await;
+            // Convert serde_json::Map to HashMap<String, String> for protobuf
+            state
+                .config_data
+                .iter()
+                .map(|(k, v)| {
+                    let value_str = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    };
+                    (k.clone(), value_str)
+                })
+                .collect()
+        };
+
+        let reply = LighthouseConfigResponse { config_data };
+        Ok(Response::new(reply))
+    }
 }
 
 #[derive(Template)]
@@ -747,6 +918,14 @@ struct StatusTemplate {
 
     // visualization thresholds
     old_age_threshold: Instant,
+}
+
+#[derive(Template)]
+#[template(path = "config.html")]
+struct ConfigTemplate {
+    config_data: String,
+    timestamp: String,
+    success_message: Option<String>,
 }
 
 // Make our own error that wraps `anyhow::Error`.
@@ -772,6 +951,11 @@ where
     fn from(err: E) -> Self {
         Self(err.into())
     }
+}
+
+#[derive(Deserialize)]
+struct ConfigUpdateForm {
+    config: String,
 }
 
 #[cfg(test)]
@@ -800,6 +984,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         let mut state = State {
@@ -810,6 +995,7 @@ mod tests {
             heartbeats: HashMap::new(),
             failures: HashMap::new(),
             failure_channel: broadcast::channel(16).0,
+            config_data: serde_json::Map::new(),
         };
 
         let now = Instant::now();
@@ -882,6 +1068,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         let mut state = State {
@@ -892,6 +1079,7 @@ mod tests {
             heartbeats: HashMap::new(),
             failures: HashMap::new(),
             failure_channel: broadcast::channel(16).0,
+            config_data: serde_json::Map::new(),
         };
 
         let now = Instant::now();
@@ -971,6 +1159,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         let mut state = State {
@@ -981,6 +1170,7 @@ mod tests {
             heartbeats: HashMap::new(),
             failures: HashMap::new(),
             failure_channel: broadcast::channel(16).0,
+            config_data: serde_json::Map::new(),
         };
 
         let now = Instant::now();
@@ -1064,6 +1254,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         let mut state = State {
@@ -1074,6 +1265,7 @@ mod tests {
             heartbeats: HashMap::new(),
             failures: HashMap::new(),
             failure_channel: broadcast::channel(16).0,
+            config_data: serde_json::Map::new(),
         };
 
         let now = Instant::now();
@@ -1162,6 +1354,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
         let lighthouse = Lighthouse::new(opt).await?;
 
@@ -1209,6 +1402,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         let mut state = State {
@@ -1219,6 +1413,7 @@ mod tests {
             heartbeats: HashMap::new(),
             failures: HashMap::new(),
             failure_channel: broadcast::channel(16).0,
+            config_data: serde_json::Map::new(),
         };
 
         let now = Instant::now();
@@ -1322,6 +1517,7 @@ mod tests {
             quorum_tick_ms: 10,        // Not directly relevant but keep it small
             heartbeat_timeout_ms: 100, // Reasonably short for testing
             failure_tick_ms: 50,       // How often _failure_tick would be called
+            lighthouse_config: None,
         };
         let lighthouse = Lighthouse::new(opt.clone()).await?;
 
@@ -1501,6 +1697,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         // Start the lighthouse service
@@ -1609,6 +1806,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         // Start the lighthouse service
@@ -1663,6 +1861,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
 
         let lighthouse = Lighthouse::new(opt).await?;
@@ -1685,6 +1884,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
             failure_tick_ms: 1000,
+            lighthouse_config: None,
         };
         let lighthouse = Lighthouse::new(opt).await?;
         let mut client = lighthouse_client_new(lighthouse.address()).await?;
@@ -1717,6 +1917,114 @@ mod tests {
         }
 
         lighthouse_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_config_broadcasting() -> Result<()> {
+        // Create a test config file
+        let test_config =
+            r#"{"learning_rate": "0.001", "batch_size": "32", "model_type": "transformer"}"#;
+        std::fs::write("test_config_temp.json", test_config).unwrap();
+
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60000,
+            quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
+            failure_tick_ms: 1000,
+            lighthouse_config: Some("test_config_temp.json".to_string()),
+        };
+
+        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse_task = tokio::spawn(lighthouse.clone().run());
+
+        let mut client = lighthouse_client_new(lighthouse.address()).await?;
+
+        let request = tonic::Request::new(LighthouseConfigRequest {});
+        let response = client.get_config(request).await?;
+        let config_data = response.into_inner().config_data;
+
+        // Verify the config was loaded and parsed correctly
+        assert_eq!(config_data.get("learning_rate"), Some(&"0.001".to_string()));
+        assert_eq!(config_data.get("batch_size"), Some(&"32".to_string()));
+        assert_eq!(
+            config_data.get("model_type"),
+            Some(&"transformer".to_string())
+        );
+        assert_eq!(config_data.len(), 3);
+
+        lighthouse_task.abort();
+
+        // Clean up test file
+        std::fs::remove_file("test_config_temp.json").unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_config_broadcasting_no_config() -> Result<()> {
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60000,
+            quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
+            failure_tick_ms: 1000,
+            lighthouse_config: None,
+        };
+
+        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse_task = tokio::spawn(lighthouse.clone().run());
+
+        let mut client = lighthouse_client_new(lighthouse.address()).await?;
+
+        let request = tonic::Request::new(LighthouseConfigRequest {});
+        let response = client.get_config(request).await?;
+        let config_data = response.into_inner().config_data;
+
+        // When no config is provided, should return empty map
+        assert_eq!(config_data.len(), 0);
+
+        lighthouse_task.abort();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_config_broadcasting_invalid_json() -> Result<()> {
+        // Create an invalid JSON file
+        let invalid_json = r#"{"learning_rate": "0.001", "batch_size": 32 // invalid comment"#;
+        std::fs::write("test_invalid_config.json", invalid_json).unwrap();
+
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60000,
+            quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
+            failure_tick_ms: 1000,
+            lighthouse_config: Some("test_invalid_config.json".to_string()),
+        };
+
+        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse_task = tokio::spawn(lighthouse.clone().run());
+
+        let mut client = lighthouse_client_new(lighthouse.address()).await?;
+
+        let request = tonic::Request::new(LighthouseConfigRequest {});
+        let response = client.get_config(request).await?;
+        let config_data = response.into_inner().config_data;
+
+        // When invalid JSON is provided, should return empty map
+        assert_eq!(config_data.len(), 0);
+
+        lighthouse_task.abort();
+
+        // Clean up test file
+        std::fs::remove_file("test_invalid_config.json").unwrap();
+
         Ok(())
     }
 }

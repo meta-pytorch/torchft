@@ -37,8 +37,8 @@ use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
     CheckpointMetadataRequest, FailureNotification as ProtoFailureNotification,
-    LighthouseHeartbeatRequest, LighthouseQuorumRequest, ManagerQuorumRequest, ShouldCommitRequest,
-    SubscribeFailuresRequest,
+    LighthouseConfigRequest, LighthouseHeartbeatRequest, LighthouseQuorumRequest,
+    ManagerQuorumRequest, ShouldCommitRequest, SubscribeFailuresRequest,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -646,6 +646,28 @@ impl LighthouseClient {
             })
         })
     }
+
+    /// Get configuration data from the lighthouse server.
+    ///
+    /// Returns:
+    ///     dict[str, str]: The configuration data as a dictionary.
+    ///
+    /// Args:
+    ///     timeout (timedelta, optional): Per-RPC deadline. Default = 5 s.
+    #[pyo3(signature = (timeout = Duration::from_secs(5)))]
+    fn get_config(
+        &self,
+        py: Python<'_>,
+        timeout: Duration,
+    ) -> Result<std::collections::HashMap<String, String>, StatusError> {
+        py.allow_threads(move || {
+            let mut req = tonic::Request::new(LighthouseConfigRequest {});
+            req.set_timeout(timeout);
+            let response = self.runtime.block_on(self.client.clone().get_config(req))?;
+            let config_data = response.into_inner().config_data;
+            Ok(config_data)
+        })
+    }
 }
 
 /// LighthouseServer is a GRPC server for the lighthouse service.
@@ -661,6 +683,7 @@ impl LighthouseClient {
 ///     join_timeout_ms (int): The timeout for joining the quorum.
 ///     quorum_tick_ms (int): The interval at which the quorum is checked.
 ///     heartbeat_timeout_ms (int): The timeout for heartbeats.
+///     lighthouse_config (str, optional): Path to configuration file (JSON format).
 #[pyclass]
 struct LighthouseServer {
     lighthouse: Arc<lighthouse::Lighthouse>,
@@ -670,7 +693,7 @@ struct LighthouseServer {
 
 #[pymethods]
 impl LighthouseServer {
-    #[pyo3(signature = (bind, min_replicas, join_timeout_ms=None, quorum_tick_ms=None, heartbeat_timeout_ms=None, failure_tick_ms=None))]
+    #[pyo3(signature = (bind, min_replicas, join_timeout_ms=None, quorum_tick_ms=None, heartbeat_timeout_ms=None, failure_tick_ms=None, lighthouse_config=None))]
     #[new]
     fn new(
         py: Python<'_>,
@@ -680,6 +703,7 @@ impl LighthouseServer {
         quorum_tick_ms: Option<u64>,
         heartbeat_timeout_ms: Option<u64>,
         failure_tick_ms: Option<u64>,
+        lighthouse_config: Option<String>,
     ) -> PyResult<Self> {
         let join_timeout_ms = join_timeout_ms.unwrap_or(100);
         let quorum_tick_ms = quorum_tick_ms.unwrap_or(100);
@@ -701,6 +725,7 @@ impl LighthouseServer {
                     quorum_tick_ms: quorum_tick_ms,
                     heartbeat_timeout_ms: heartbeat_timeout_ms,
                     failure_tick_ms: failure_tick_ms,
+                    lighthouse_config: lighthouse_config,
                 }))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 

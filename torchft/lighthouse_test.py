@@ -224,3 +224,78 @@ class TestLighthouse(TestCase):
 
         # Clean up
         server.shutdown()
+
+    def test_get_config_rpc(self) -> None:
+        """Test that get_config RPC returns configuration data."""
+        import json
+        import os
+        import tempfile
+
+        # Create a temporary config file with test data
+        test_config = {
+            "learning_rate": "0.001",
+            "batch_size": "64",
+            "model_type": "transformer",
+            "epochs": "100",
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(test_config, f)
+            config_file_path = f.name
+
+        try:
+            # Test without config file first
+            lighthouse = LighthouseServer(
+                bind="[::]:0",
+                min_replicas=1,
+            )
+
+            client = LighthouseClient(
+                addr=lighthouse.address(),
+                connect_timeout=timedelta(seconds=1),
+            )
+
+            # Test that get_config method exists and can be called
+            config_dict = client.get_config(timeout=timedelta(seconds=1))
+
+            # Verify the returned type is a dictionary
+            assert isinstance(
+                config_dict, dict
+            ), f"Expected dict, got {type(config_dict)}"
+
+            # With no config file provided to LighthouseServer, should return empty dict
+            assert len(config_dict) == 0, f"Expected empty config, got {config_dict}"
+
+            lighthouse.shutdown()
+
+            # Test with config file using the now exposed lighthouse_config parameter
+            lighthouse_with_config = LighthouseServer(
+                bind="[::]:0", min_replicas=1, lighthouse_config=config_file_path
+            )
+
+            client_with_config = LighthouseClient(
+                addr=lighthouse_with_config.address(),
+                connect_timeout=timedelta(seconds=1),
+            )
+
+            # Get config from lighthouse that has a config file
+            config_dict_with_file = client_with_config.get_config(
+                timeout=timedelta(seconds=1)
+            )
+
+            # Verify the config was loaded correctly
+            assert isinstance(
+                config_dict_with_file, dict
+            ), f"Expected dict, got {type(config_dict_with_file)}"
+            assert config_dict_with_file["learning_rate"] == "0.001"
+            assert config_dict_with_file["batch_size"] == "64"
+            assert config_dict_with_file["model_type"] == "transformer"
+            assert config_dict_with_file["epochs"] == "100"
+            assert len(config_dict_with_file) == 4
+
+            lighthouse_with_config.shutdown()
+
+        finally:
+            # Clean up the temporary config file
+            if os.path.exists(config_file_path):
+                os.unlink(config_file_path)
