@@ -53,7 +53,7 @@ def main() -> None:
         trainset,
         replica_group=REPLICA_GROUP_ID,
         num_replica_groups=NUM_REPLICA_GROUPS,
-        rank=0,
+        group_rank=0,
         # for DDP we can use replica groups of size 1, FSDP/PP/CP would need more.
         num_replicas=1,
         shuffle=True,

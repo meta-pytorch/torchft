@@ -29,6 +29,7 @@ import concurrent.futures
 import logging
 import os
 import socket
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -69,6 +70,13 @@ class WorldSizeMode(Enum):
 
     DYNAMIC = 0
     FIXED_WITH_SPARES = 1
+
+
+class ExceptionWithTraceback(Exception):
+    def __init__(self, e: Exception) -> None:
+        self.original_exception = e
+        self.stack_trace: str = traceback.format_exc()
+        super().__init__(f"{e}\n{self.stack_trace}")
 
 
 class Manager:
@@ -136,8 +144,8 @@ class Manager:
                 depending on how frequently the syncs occur.
             connect_timeout: the timeout used for establishing rpc connections
                 to ManagerServer and Lighthouse
-            rank: the replica group local rank
-            world_size: the replica group local world size
+            rank: the replica group local rank, referred to as group_rank in manager.py for clarity
+            world_size: the replica group local world size, referred to as group_world_size in manager.py for clarity
             store_addr: TCPStore address for this replica group
             store_port: TCPStore port for this replica group
             lighthouse_addr: if rank==0, the address of the lighthouse server
@@ -158,16 +166,16 @@ class Manager:
         self._timeout = timeout
         self._quorum_timeout = quorum_timeout
         self._connect_timeout = connect_timeout
-        self._world_size_mode = world_size_mode
+        self._replica_world_size_mode = world_size_mode
         self._init_sync = init_sync
         self._max_retries = max_retries
         self._commit_failures = 0
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
         store_port = store_port or int(os.environ["MASTER_PORT"])
-        self._rank: int = rank if rank is not None else int(os.environ["RANK"])
-        rank = self._rank
-        world_size = world_size or int(os.environ["WORLD_SIZE"])
+        self._group_rank: int = rank if rank is not None else int(os.environ["RANK"])
+        group_rank = self._group_rank
+        group_world_size = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
 
         if checkpoint_transport is None:
@@ -197,7 +205,7 @@ class Manager:
             torch.cuda.Stream() if torch.cuda.is_available() else None
         )
 
-        if rank == 0:
+        if self._group_rank == 0:
             if port is None:
                 port = int(os.environ.get(MANAGER_PORT_ENV, 0))
 
@@ -217,7 +225,7 @@ class Manager:
                 hostname=hostname,
                 bind=bind,
                 store_addr=f"{store_addr}:{store_port}",
-                world_size=world_size,
+                world_size=group_world_size,
                 heartbeat_interval=heartbeat_interval,
                 connect_timeout=connect_timeout,
             )
@@ -230,19 +238,19 @@ class Manager:
 
         replica_id = self._store.get(REPLICA_ID_KEY).decode("utf-8")
         self._logger = _ManagerLogger(
-            manager=self, replica_id=replica_id or "", rank=rank
+            manager=self, replica_id=replica_id or "", group_rank=group_rank
         )
 
         self._step = 0
         self._quorum_id = -1
-        self._errored: Optional[Exception] = None
+        self._errored: Optional[ExceptionWithTraceback] = None
         self._healing = False
         self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
 
         # first step is 1
-        self._participating_rank: Optional[int] = None
-        self._participating_world_size: int = 0
+        self._participating_replica_rank: Optional[int] = None
+        self._participating_replica_world_size: int = 0
 
     def set_state_dict_fns(
         self, load_state_dict: Callable[[T], None], state_dict: Callable[[], T]
@@ -332,9 +340,9 @@ class Manager:
         This should be called when an error occurs that leads to a corrupted
         gradient that needs to be discarded.
         """
-        self._errored = e
+        self._errored = ExceptionWithTraceback(e)
 
-    def errored(self) -> Optional[Exception]:
+    def errored(self) -> Optional[ExceptionWithTraceback]:
         """
         Get whether an error has occurred.
 
@@ -464,7 +472,7 @@ class Manager:
         quorum = None
         with torch.profiler.record_function("torchft::manager::_client::_quorum"):
             quorum = self._client._quorum(
-                rank=self._rank,
+                group_rank=self._group_rank,
                 step=self._step,
                 checkpoint_metadata=self._checkpoint_transport.metadata(),
                 shrink_only=shrink_only,
@@ -479,33 +487,35 @@ class Manager:
         recover_src_manager_address = quorum.recover_src_manager_address
         store_address = quorum.store_address
         max_step = quorum.max_step
-        max_rank = quorum.max_rank
-        max_world_size = quorum.max_world_size
+        max_replica_rank = quorum.max_replica_rank
+        max_replica_world_size = quorum.max_world_size
         heal = quorum.heal
 
         # When using async quorum we need to take the recovered workers.
         # When not using async quorum we need to take the max world size as all
         # workers will be healthy.
-        self._participating_rank, self._participating_world_size = (
-            (max_rank, max_world_size)
+        self._participating_replica_rank, self._participating_replica_world_size = (
+            (max_replica_rank, max_replica_world_size)
             if self._use_async_quorum or not allow_heal
             else (replica_rank, replica_world_size)
         )
 
         # For fixed with spares we need to ensure that we don't have more
         # participating replicas than the min replica size.
-        if self._world_size_mode == WorldSizeMode.FIXED_WITH_SPARES:
-            self._participating_world_size = min(
-                self._participating_world_size, self._min_replica_size
+        if self._replica_world_size_mode == WorldSizeMode.FIXED_WITH_SPARES:
+            self._participating_replica_world_size = min(
+                self._participating_replica_world_size, self._min_replica_size
             )
             if (
-                self._participating_rank is not None
-                and self._participating_rank >= self._min_replica_size
+                self._participating_replica_rank is not None
+                and self._participating_replica_rank >= self._min_replica_size
             ):
-                self._participating_rank = None
+                self._participating_replica_rank = None
 
         if quorum_id != self._quorum_id:
-            store_prefixed_addr = f"{store_address}/torchft/{quorum_id}/{self._rank}"
+            store_prefixed_addr = (
+                f"{store_address}/torchft/{quorum_id}/{self._group_rank}"
+            )
 
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
@@ -529,15 +539,15 @@ class Manager:
                 else nullcontext()
             ):
                 try:
-                    if quorum.recover_dst_ranks:
+                    if quorum.recover_dst_replica_ranks:
                         self._logger.info(
-                            f"peers need recovery from us {quorum.recover_dst_ranks}"
+                            f"peers need recovery from us {quorum.recover_dst_replica_ranks}"
                         )
                         with torch.profiler.record_function(
                             "torchft::manager::_checkpoint_transport::send_checkpoint"
                         ):
                             self._checkpoint_transport.send_checkpoint(
-                                dst_ranks=quorum.recover_dst_ranks,
+                                dst_ranks=quorum.recover_dst_replica_ranks,
                                 step=max_step,
                                 state_dict=self._manager_state_dict(),
                                 timeout=self._timeout,
@@ -554,15 +564,15 @@ class Manager:
                             connect_timeout=self._connect_timeout,
                         )
                         checkpoint_metadata = primary_client._checkpoint_metadata(
-                            self._rank, timeout=self._timeout
+                            self._group_rank, timeout=self._timeout
                         )
-                        recover_src_rank = quorum.recover_src_rank
+                        recover_src_replica_rank = quorum.recover_src_replica_rank
                         assert (
-                            recover_src_rank is not None
+                            recover_src_replica_rank is not None
                         ), "must have a recover rank when healing"
 
                         self._logger.info(
-                            f"fetching checkpoint from {recover_src_rank=} with {checkpoint_metadata=}"
+                            f"fetching checkpoint from {recover_src_replica_rank=} with {checkpoint_metadata=}"
                         )
 
                         # we apply the user state dict only when safe from the main thread
@@ -570,13 +580,11 @@ class Manager:
                         with torch.profiler.record_function(
                             "torchft::manager::_checkpoint_transport::recv_checkpoint"
                         ):
-                            self._pending_state_dict = (
-                                self._checkpoint_transport.recv_checkpoint(
-                                    src_rank=recover_src_rank,
-                                    metadata=checkpoint_metadata,
-                                    step=max_step,
-                                    timeout=self._timeout,
-                                )
+                            self._pending_state_dict = self._checkpoint_transport.recv_checkpoint(
+                                src_rank=recover_src_replica_rank,
+                                metadata=checkpoint_metadata,  # Depending on group rank
+                                step=max_step,
+                                timeout=self._timeout,
                             )
 
                         # pyre-fixme[6]: got object
@@ -661,7 +669,7 @@ class Manager:
         enough_replicas = self.num_participants() >= self._min_replica_size
         local_should_commit = enough_replicas and self._errored is None
         should_commit = self._client.should_commit(
-            self._rank,
+            self._group_rank,
             self._step,
             local_should_commit,
             timeout=timeout or self._timeout,
@@ -762,7 +770,7 @@ class Manager:
 
         self.wait_quorum()
 
-        return self._participating_rank
+        return self._participating_replica_rank
 
     def num_participants(self) -> int:
         """
@@ -780,8 +788,8 @@ class Manager:
 
         self.wait_quorum()
 
-        assert self._participating_world_size >= 0, "internal error"
-        return self._participating_world_size
+        assert self._participating_replica_world_size >= 0, "internal error"
+        return self._participating_replica_world_size
 
     def is_participating(self) -> bool:
         """
@@ -790,7 +798,7 @@ class Manager:
         Returns:
             whether this replica is participating in the current quorum
         """
-        if self._participating_rank is None:
+        if self._participating_replica_rank is None:
             return False
         if self._healing:
             assert self._use_async_quorum
@@ -799,16 +807,14 @@ class Manager:
 
 
 class _ManagerLogger:
-    def __init__(self, manager: Manager, replica_id: str, rank: int) -> None:
+    def __init__(self, manager: Manager, replica_id: str, group_rank: int) -> None:
         self._logger: logging.Logger = logging.getLogger(__name__)
         self._replica_id = replica_id
-        self._rank = rank
+        self._group_rank = group_rank
         self._manager = manager
 
     def prefix(self) -> str:
-        return (
-            f"[{self._replica_id}/{self._rank} - step {self._manager.current_step()}]"
-        )
+        return f"[{self._replica_id}/{self._group_rank} - step {self._manager.current_step()}]"
 
     def info(self, msg: str) -> None:
         self._logger.info(f"{self.prefix()} {msg}")

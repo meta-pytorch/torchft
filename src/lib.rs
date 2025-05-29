@@ -181,7 +181,7 @@ impl ManagerClient {
     fn _quorum(
         &self,
         py: Python<'_>,
-        rank: i64,
+        group_rank: i64,
         step: i64,
         checkpoint_metadata: String,
         shrink_only: bool,
@@ -191,7 +191,7 @@ impl ManagerClient {
     ) -> Result<QuorumResult, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
-                rank: rank,
+                group_rank: group_rank,
                 step: step,
                 checkpoint_metadata: checkpoint_metadata,
                 shrink_only: shrink_only,
@@ -210,11 +210,11 @@ impl ManagerClient {
                 replica_rank: resp.replica_rank,
                 replica_world_size: resp.replica_world_size,
                 recover_src_manager_address: resp.recover_src_manager_address,
-                recover_src_rank: resp.recover_src_rank,
-                recover_dst_ranks: resp.recover_dst_ranks,
+                recover_src_replica_rank: resp.recover_src_replica_rank,
+                recover_dst_replica_ranks: resp.recover_dst_replica_ranks,
                 store_address: resp.store_address,
                 max_step: resp.max_step,
-                max_rank: resp.max_rank,
+                max_replica_rank: resp.max_replica_rank,
                 max_world_size: resp.max_world_size,
                 heal: resp.heal,
             })
@@ -259,14 +259,14 @@ impl ManagerClient {
     fn should_commit(
         &self,
         py: Python<'_>,
-        rank: i64,
+        group_rank: i64,
         step: i64,
         should_commit: bool,
         timeout: Duration,
     ) -> Result<bool, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ShouldCommitRequest {
-                rank: rank,
+                group_rank: group_rank,
                 step: step,
                 should_commit: should_commit,
             });
@@ -290,11 +290,11 @@ struct QuorumResult {
     replica_rank: i64,
     replica_world_size: i64,
     recover_src_manager_address: String,
-    recover_src_rank: Option<i64>,
-    recover_dst_ranks: Vec<i64>,
+    recover_src_replica_rank: Option<i64>,
+    recover_dst_replica_ranks: Vec<i64>,
     store_address: String,
     max_step: i64,
-    max_rank: Option<i64>,
+    max_replica_rank: Option<i64>,
     max_world_size: i64,
     heal: bool,
 }
@@ -308,11 +308,11 @@ impl QuorumResult {
             replica_rank: 0,
             replica_world_size: 1,
             recover_src_manager_address: "".to_string(),
-            recover_src_rank: None,
-            recover_dst_ranks: Vec::new(),
+            recover_src_replica_rank: None,
+            recover_dst_replica_ranks: Vec::new(),
             store_address: "".to_string(),
             max_step: 0,
-            max_rank: None,
+            max_replica_rank: None,
             max_world_size: 1,
             heal: false,
         }

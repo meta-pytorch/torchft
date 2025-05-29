@@ -27,9 +27,9 @@ class TestData(TestCase):
         dataset = DummyDataset(1000)
         sampler = DistributedSampler(
             dataset,
-            replica_group=1,
+            replica_rank=1,
             num_replica_groups=2,
-            rank=3,
+            group_rank=3,
             num_replicas=4,
         )
         self.assertEqual(sampler.global_rank, 3 + 1 * 4)
