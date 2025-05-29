@@ -977,7 +977,7 @@ mod tests {
             quorum_tick_ms: 10,
             heartbeat_timeout_ms: 5000,
         };
-        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse = Lighthouse::new("".to_string(), opt).await?;
 
         let lighthouse_task = tokio::spawn(lighthouse.clone().run());
 
@@ -1135,7 +1135,7 @@ mod tests {
         };
 
         // Start the lighthouse service
-        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse = Lighthouse::new("".to_string(), opt).await?;
         let lighthouse_task = tokio::spawn(lighthouse.clone().run());
 
         // Create client to interact with lighthouse
@@ -1242,7 +1242,7 @@ mod tests {
         };
 
         // Start the lighthouse service
-        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse = Lighthouse::new("".to_string(), opt).await?;
         let lighthouse_task = tokio::spawn(lighthouse.clone().run());
 
         // Create client to interact with lighthouse

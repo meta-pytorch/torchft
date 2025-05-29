@@ -1,4 +1,4 @@
-use tonic::{service::Interceptor, metadata::MetadataValue, Request, Status};
+use tonic::{metadata::MetadataValue, service::Interceptor, Request, Status};
 
 /// Attaches user-assigned room-id header to every outbound RPC
 #[derive(Clone)]
