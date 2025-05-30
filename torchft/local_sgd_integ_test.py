@@ -162,11 +162,18 @@ def diloco_train_loop(
         stack.callback(manager.shutdown)
         # initialize default group for device mesh to work
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(
-                init_method=f"tcp://localhost:0",
-                rank=rank,
-                world_size=runner.world_size,
-            )
+            # TODO: remove this try-except once pytorch is updated to 2.8.0 and can use localhost:0
+            try:
+                torch.distributed.init_process_group(
+                    init_method="tcp://localhost:0",
+                    rank=rank,
+                    world_size=runner.world_size,
+                )
+            except ValueError:
+                os.environ["MASTER_ADDR"] = "localhost"
+                os.environ["MASTER_PORT"] = "0"
+                os.environ["WORLD_SIZE"] = str(runner.world_size)
+                os.environ["RANK"] = str(rank)
 
         device_type = device.type
         ft_device_mesh = ft_init_device_mesh(
