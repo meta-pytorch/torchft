@@ -39,14 +39,23 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, 
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
+from torch.distributed.distributed_c10d import AllreduceOptions, ReduceOp
 
 from torchft._torchft import ManagerClient, ManagerServer
 from torchft.checkpointing import CheckpointTransport, HTTPTransport
-from torchft.collectives import allreduce_quantized
 from torchft.futures import future_timeout
 
 if TYPE_CHECKING:
     from torchft.process_group import ProcessGroup
+
+IS_TRITON_AVAILABLE = True
+try:
+    # pyre-ignore[21]: Could not find a module corresponding to import `triton`
+    import triton
+
+    from torchft.collectives import allreduce_quantized
+except ImportError:
+    IS_TRITON_AVAILABLE = False
 
 MANAGER_ADDR_KEY: str = "manager_addr"
 MANAGER_PORT_ENV: str = "TORCHFT_MANAGER_PORT"
@@ -308,7 +317,7 @@ class Manager:
                 | torch.futures.Future[torch.Tensor]
                 | torch.futures.Future[List[torch.Tensor]]
             ] = None
-            if should_quantize:
+            if should_quantize and IS_TRITON_AVAILABLE:
                 fut = allreduce_quantized([tensor], ReduceOp.AVG, self._pg)
             else:
                 work = self._pg.allreduce([tensor], ReduceOp.SUM)
