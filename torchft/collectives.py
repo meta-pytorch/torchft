@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-
 from typing import TYPE_CHECKING
 
 import torch
@@ -157,7 +156,7 @@ def reduce_scatter_quantized(
     output: torch.Tensor,
     inputs: list[torch.Tensor],
     opts: ReduceScatterOptions | ReduceOp,
-    process_group: ProcessGroup,
+    process_group: "ProcessGroup",
     sync_stream: cuda.Stream | None = None,
 ) -> Future[None]:
     """
