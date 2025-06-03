@@ -126,7 +126,7 @@ else:
                 tensors_num=4,
                 tensor_size=tensor_size,
                 multiplier=multiplier,
-                tolerance=0.03,
+                tolerance=0.05,
                 reduce_op=reduce_op,
                 type=type,
             )

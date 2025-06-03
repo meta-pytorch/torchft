@@ -22,23 +22,29 @@ SCALE_DTYPE: torch.dtype = torch.float32
 SCALE_DTYPE_BYTES: int = 4
 SCALE_TL_DTYPE = tl.float32
 SCALE_TL_DTYPE_BYTES = tl.constexpr(4)
-TL_MAX_FP8 = tl.constexpr(448.0)
 
 BLOCK_SIZE_T: int = 2048
 
 
 # pyre-ignore[11]: Annotation `tl.constexpr` is not defined
+def _get_fp8_max() -> tl.constexpr:
+    if cuda.get_device_capability() >= (9, 0):
+        return tl.constexpr(448.0)
+    else:
+        return tl.constexpr(127)
+
+
 def _get_fp8_type() -> tl.constexpr:
     if cuda.get_device_capability() >= (9, 0):
         return tl.constexpr(tl.float8e4nv)
     else:
-        return tl.constexpr(tl.float8e4b15)
+        return tl.constexpr(tl.int8)
 
 
 @triton.jit
 # pyre-ignore[11]: Annotation `tl.tensor` is not defined
-def _kernel_calculate_scale(row_max) -> tl.tensor:
-    row_scale = TL_MAX_FP8 / row_max
+def _kernel_calculate_scale(row_max, TL_FP8_MAX: tl.constexpr) -> tl.tensor:
+    row_scale = TL_FP8_MAX / row_max
     is_inf = row_scale == float("inf")
     row_scale = tl.where(is_inf, 1.0, row_scale)
     return row_scale
@@ -56,6 +62,7 @@ def _fused_kernel_quantize_into_fp8(
     all_reduce_size,
     BLOCK_SIZE: tl.constexpr,
     TL_FP8_TYPE: tl.constexpr,
+    TL_FP8_MAX: tl.constexpr,
 ):
     """
     Kernel to quantize a set of input tensors into fp8. The input tensors are
@@ -134,7 +141,7 @@ def _fused_kernel_quantize_into_fp8(
 
     # Compute and store scale for the current row
     i_row_max = tl.max(col_maxes)
-    i_row_scale = _kernel_calculate_scale(i_row_max)
+    i_row_scale = _kernel_calculate_scale(i_row_max, TL_FP8_MAX)
     tl.store(o_scale_ptr, i_row_scale)
 
     # Scale and quantize current row block by block
@@ -262,6 +269,7 @@ def _fused_kernel_reduce_fp8(
     division_factor,
     BLOCK_SIZE: tl.constexpr,
     TL_FP8_TYPE: tl.constexpr,
+    TL_FP8_MAX: tl.constexpr,
 ) -> None:
     """
     Reduces rows of the output tensor for the given rank. The output tensor
@@ -329,7 +337,7 @@ def _fused_kernel_reduce_fp8(
         col_offsets += BLOCK_SIZE
 
     # Compute scaling factor for the reduced row
-    o_row_scale = _kernel_calculate_scale(o_row_max / division_factor)
+    o_row_scale = _kernel_calculate_scale(o_row_max / division_factor, TL_FP8_MAX)
 
     o_rank_row_ptr = o_ptr + all_reduce_rank * o_size_bytes_per_rank + o_offset
     o_rank_scale_ptr = o_rank_row_ptr.to(tl.pointer_type(SCALE_TL_DTYPE))
@@ -566,6 +574,7 @@ def fused_quantize_into_fp8(
         all_reduce_group_size,
         BLOCK_SIZE=BLOCK_SIZE_T,
         TL_FP8_TYPE=_get_fp8_type(),
+        TL_FP8_MAX=_get_fp8_max(),
     )
 
     return output
@@ -665,4 +674,5 @@ def fused_reduce_fp8(
         1.0 if reduce_op == ReduceOp.SUM else float(all_reduce_group_size),
         BLOCK_SIZE=BLOCK_SIZE_T,
         TL_FP8_TYPE=_get_fp8_type(),
+        TL_FP8_MAX=_get_fp8_max(),
     )

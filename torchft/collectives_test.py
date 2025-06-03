@@ -205,7 +205,7 @@ else:
                     3,
                     tensor_size,
                     multiplier,
-                    0.04,
+                    0.05,
                     reduce_op,
                     dtype,
                 )
