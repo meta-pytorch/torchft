@@ -8,6 +8,7 @@ from unittest import TestCase, skipUnless
 
 import torch
 from parameterized import parameterized
+from torch.distributed import ReduceOp
 
 from torchft import _test_utils
 
@@ -40,11 +41,13 @@ else:
             tensor_size: int,
             multiplier: float,
             tolerance: float,
+            reduce_op: ReduceOp,
+            type: torch.dtype,
         ) -> None:
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
-                    dtype=torch.float32,
+                    dtype=type,
                     device="cuda",
                 )
                 * multiplier
@@ -81,7 +84,9 @@ else:
                     for other in range(world_size):
                         quant_copy_slices[other].copy_(quant_slices[r])
 
-                    fused_reduce_fp8(reshaped_inputs, quant_copy, world_size, r)
+                    fused_reduce_fp8(
+                        reshaped_inputs, quant_copy, world_size, r, reduce_op
+                    )
 
                     quant_final_slices[r].copy_(quant_copy_slices[r])
 
@@ -89,24 +94,39 @@ else:
 
                 self.assertFalse(_test_utils.any_nan(reshaped_outputs))
 
-                diff = torch.abs((inputs - outputs).div(inputs))
+                if reduce_op == ReduceOp.SUM:
+                    inputs.mul_(world_size)
+
+                diff = torch.abs(
+                    (inputs - outputs).div(inputs.to(torch.float32) + 0.0000001)
+                )
                 mean_diff = diff.mean().item()
                 self.assertLessEqual(
                     mean_diff, tolerance, f"Results not within tolerance {tolerance}"
                 )
 
-        END_TO_END_CONFIGS: list[tuple[int, float]] = [
-            (ts, m)
-            for ts in [128, 256, 512, 1024, 2048, 4096]
+        END_TO_END_CONFIGS: list[tuple[int, float, ReduceOp, torch.dtype]] = [
+            (ts, m, o, t)
+            for ts in [128, 256, 1024, 4096]
             for m in [1.0, 10.0, 100.0, 1000.0]
+            for o in [ReduceOp.AVG, ReduceOp.SUM]
+            for t in [torch.float32, torch.float16, torch.bfloat16]
         ]
 
         @parameterized.expand(END_TO_END_CONFIGS)
-        def test_end_to_end(self, tensor_size: int, multiplier: float) -> None:
+        def test_end_to_end(
+            self,
+            tensor_size: int,
+            multiplier: float,
+            reduce_op: ReduceOp,
+            type: torch.dtype,
+        ) -> None:
             self.run_test(
                 world_size=2,
                 tensors_num=4,
                 tensor_size=tensor_size,
                 multiplier=multiplier,
-                tolerance=3.0,
+                tolerance=0.03,
+                reduce_op=reduce_op,
+                type=type,
             )

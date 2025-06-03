@@ -16,6 +16,7 @@ import triton.language as tl
 
 # pyre-ignore[21]: Could not find a module corresponding to import `triton.runtime`
 import triton.runtime as tr
+from torch.distributed import ReduceOp
 
 SCALE_DTYPE: torch.dtype = torch.float32
 SCALE_DTYPE_BYTES: int = 4
@@ -49,6 +50,7 @@ def _fused_kernel_quantize_into_fp8(
     i_shapes,
     i_strides,
     i_offsets,
+    i_dtype,
     o_ptr,
     o_size_bytes_per_rank,
     all_reduce_size,
@@ -68,6 +70,7 @@ def _fused_kernel_quantize_into_fp8(
         i_shapes: Shapes of the input tensors to be quantized
         i_strides: Strides of the input tensors to be quantized
         i_offsets: Offsets of the output tensors for each input tensor
+        i_dtype: Dummy tensor that carries the dtype of the input tensors
         o_ptr: Pointer to the output tensor for the quantized input and scales
         o_size_bytes_per_rank: Size in bytes in the output tensor per rank
         all_reduce_size: Size of the all-reduce group
@@ -91,7 +94,7 @@ def _fused_kernel_quantize_into_fp8(
     i_col_stride = tl.load(i_strides + i_idx * 2 + 1)
 
     # Pointer to the input tensor
-    i_ptr = tl.load(i_ptrs + i_idx).to(tl.pointer_type(tl.float32))
+    i_ptr = tl.load(i_ptrs + i_idx).to(i_dtype.dtype)
 
     # Number of the rows in the input tensor that are processed by a single
     # rank
@@ -158,6 +161,7 @@ def _fused_kernel_dequantize_from_fp8(
     i_shapes,
     i_strides,
     i_offsets,
+    i_dtype,
     o_ptr,
     o_size_bytes_per_rank,
     all_reduce_size,
@@ -174,6 +178,7 @@ def _fused_kernel_dequantize_from_fp8(
         i_shapes: Shapes of the input tensors to be dequantized into
         i_strides: Strides of the input tensors to be dequantized into
         i_offsets: Offsets of the output tensors for each input tensor
+        i_dtype: Dummy tensor that carries the dtype of the input tensors
         o_ptr: Pointer to the tensor that contains output of the quantization
             or local reduction
         o_size_bytes_per_rank: Size in bytes in the output tensor per rank
@@ -197,7 +202,7 @@ def _fused_kernel_dequantize_from_fp8(
     i_col_stride = tl.load(i_strides + i_idx * 2 + 1)
 
     # Pointer to the input tensor
-    i_ptr = tl.load(i_ptrs + i_idx).to(tl.pointer_type(tl.float32))
+    i_ptr = tl.load(i_ptrs + i_idx).to(i_dtype.dtype)
 
     # Number of the rows in the input tensor that are processed by a single
     # rank
@@ -235,7 +240,9 @@ def _fused_kernel_dequantize_from_fp8(
             other=0.0,
         )
 
-        i_dequant_row_block = i_quant_row_block.to(tl.float32) / i_row_scale
+        i_dequant_row_block = (
+            i_quant_row_block.to(i_dtype.dtype.element_ty) / i_row_scale
+        )
         tl.store(
             i_ptr + i_row_idx * i_row_stride + col_offsets * i_col_stride,
             i_dequant_row_block,
@@ -252,6 +259,7 @@ def _fused_kernel_reduce_fp8(
     o_size_bytes_per_rank,
     all_reduce_size,
     all_reduce_rank,
+    division_factor,
     BLOCK_SIZE: tl.constexpr,
     TL_FP8_TYPE: tl.constexpr,
 ) -> None:
@@ -271,6 +279,7 @@ def _fused_kernel_reduce_fp8(
         o_size_bytes_per_rank: Size in bytes in the output tensor per rank
         all_reduce_size: Size of the all-reduce group
         all_reduce_rank: Rank in the all-reduce group
+        division_factor: Division factor for the reduction result
         BLOCK_SIZE: Block size for the reduction
         NUM_SM: Number of SMs to use for the reduction
     """
@@ -320,7 +329,7 @@ def _fused_kernel_reduce_fp8(
         col_offsets += BLOCK_SIZE
 
     # Compute scaling factor for the reduced row
-    o_row_scale = _kernel_calculate_scale(o_row_max / all_reduce_size)
+    o_row_scale = _kernel_calculate_scale(o_row_max / division_factor)
 
     o_rank_row_ptr = o_ptr + all_reduce_rank * o_size_bytes_per_rank + o_offset
     o_rank_scale_ptr = o_rank_row_ptr.to(tl.pointer_type(SCALE_TL_DTYPE))
@@ -344,7 +353,7 @@ def _fused_kernel_reduce_fp8(
             col_offsets_mask,
             TL_FP8_TYPE,
         )
-        o_row_block_acc = o_row_block_acc * o_row_scale / all_reduce_size
+        o_row_block_acc = o_row_block_acc * o_row_scale / division_factor
         o_quant_row_block_acc = o_row_block_acc.to(TL_FP8_TYPE)
         tl.store(
             o_rank_quant_ptr + col_offsets,
@@ -398,6 +407,8 @@ def _fused_kernel_accumulate_block(
         )
 
         o_row_scale = tl.load(o_scale_ptr)
+        # Ensure that we do not divide by zero when reducing "padding" rows
+        o_row_scale = tl.where(o_row_scale == 0.0, 1.0, o_row_scale)
         o_row_quant_block = tl.load(
             o_quant_ptr + col_offsets,
             mask=col_mask,
@@ -412,7 +423,14 @@ def _fused_kernel_accumulate_block(
 def _prepare_quantize_fp8(
     inputs: list[torch.Tensor], all_reduce_group_size: int
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, torch.device
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    int,
+    int,
+    torch.device,
 ]:
     """
     Prepares the inputs for the quantization, dequantization and reduction kernels.
@@ -427,6 +445,7 @@ def _prepare_quantize_fp8(
         d_i_strides: Row strides of the input tensors
         d_i_offsets: Offsets into the output tensor for each rank for each input
             tensor.
+        d_i_dtype: The type of the input tensors
         output_size: Size of the output tensor in bytes including necessary padding
         i_max_row_num: Maximum number of rows in the input tensors
         device: Device of the input tensors
@@ -435,10 +454,14 @@ def _prepare_quantize_fp8(
     i_num = len(inputs)
     assert i_num > 0, "At least one input tensor is required"
     device = inputs[0].device
+    dtype = inputs[0].dtype
     for i in range(1, i_num):
         assert (
             inputs[i].device == inputs[i - 1].device
         ), "All inputs must be on the same device"
+        assert (
+            inputs[i].dtype == inputs[i - 1].dtype
+        ), "All inputs must be on the same dtype"
     i_ptrs = []
     i_shapes = []
     i_strides = []
@@ -447,6 +470,8 @@ def _prepare_quantize_fp8(
     i_max_row_num = 0
     output_size_per_rank = 0
     for i in range(i_num):
+        if len(inputs[i].shape) == 1:
+            inputs[i] = inputs[i].unsqueeze(1)
         assert len(inputs[i].shape) == 2, "Only 2D tensors are supported"
         i_ptrs.append(inputs[i].data_ptr())
         i_m, i_n = inputs[i].shape
@@ -480,6 +505,7 @@ def _prepare_quantize_fp8(
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
+        torch.tensor(1.0, dtype=dtype, device=device),
         output_size,
         i_max_row_num,
         device,
@@ -514,6 +540,7 @@ def fused_quantize_into_fp8(
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
+        d_i_dtype,
         output_size,
         i_max_row_num,
         device,
@@ -533,6 +560,7 @@ def fused_quantize_into_fp8(
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
+        d_i_dtype,
         output,
         output_size // all_reduce_group_size,
         all_reduce_group_size,
@@ -567,6 +595,7 @@ def fused_dequantize_from_fp8(
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
+        d_i_dtype,
         output_size,
         i_max_row_num,
         device,
@@ -580,6 +609,7 @@ def fused_dequantize_from_fp8(
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
+        d_i_dtype,
         output,
         output_size // all_reduce_group_size,
         all_reduce_group_size,
@@ -593,6 +623,7 @@ def fused_reduce_fp8(
     output: torch.Tensor,
     all_reduce_group_size: int,
     all_reduce_rank: int,
+    reduce_op: ReduceOp = ReduceOp.SUM,
 ) -> None:
     """
     Reduces rows of the output tensor for the given rank. The output tensor
@@ -615,6 +646,7 @@ def fused_reduce_fp8(
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
+        d_i_dtype,
         output_size,
         i_max_row_num,
         device,
@@ -630,6 +662,7 @@ def fused_reduce_fp8(
         output_size // all_reduce_group_size,
         all_reduce_group_size,
         all_reduce_rank,
+        1.0 if reduce_op == ReduceOp.SUM else float(all_reduce_group_size),
         BLOCK_SIZE=BLOCK_SIZE_T,
         TL_FP8_TYPE=_get_fp8_type(),
     )
