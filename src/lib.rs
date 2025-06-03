@@ -11,11 +11,14 @@ mod retry;
 mod timeout;
 
 use anyhow::Result;
+use log::info;
 use atty::Stream;
 use core::time::Duration;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
+use pyo3::ffi;
 use std::cmp;
 use std::env;
+use std::cell::Cell;
 use std::sync::Arc;
 use std::thread::available_parallelism;
 use structopt::StructOpt;
@@ -56,6 +59,68 @@ fn num_threads() -> usize {
     num_threads
 }
 
+fn set_thread_name(py: Python, name: &str) -> PyResult<()> {
+    let threading: Py<PyModule> = py.import("threading")?.into();
+    // Get the current thread
+    let current_thread = threading.getattr(py, "current_thread")?.call0(py)?;
+    // Set the thread name
+    current_thread.setattr(py, "name", name)?;
+
+    Ok(())
+}
+
+fn new_runtime(name: &str) -> std::io::Result<Runtime> {
+    // This initializes each tokio thread with Python thread state py-spy
+    // --native will work correctly for torchft based applications.
+    thread_local! {
+        static GSTATE: Cell<Option<ffi::PyGILState_STATE>> = Cell::new(None);
+        static TSTATE: Cell<*mut ffi::PyThreadState> = Cell::new(std::ptr::null_mut());
+    }
+
+    info!("Starting tokio runtime with {} threads", num_threads());
+
+    let name = name.to_string();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_threads())
+        .thread_name(name.clone())
+        .on_thread_start(move || {
+            info!("Starting tokio thread!!");
+            GSTATE.with(|gstate| {
+                let state = unsafe { ffi::PyGILState_Ensure() };
+                gstate.set(Some(state));
+            });
+            TSTATE.with(|tstate| {
+                let state = unsafe { ffi::PyEval_SaveThread() };
+                tstate.set(state);
+            });
+
+            Python::with_gil(|py| -> Result<()> {
+                // Example usage
+                set_thread_name(py, &name)?;
+                Ok(())
+            }).unwrap();
+        })
+        .on_thread_stop(|| {
+            TSTATE.with(|tstate| {
+                let state = tstate.get();
+                if !state.is_null() {
+                    unsafe { ffi::PyEval_RestoreThread(state) };
+                }
+            });
+            GSTATE.with(|gstate| {
+                if let Some(state) = gstate.get() {
+                    unsafe { ffi::PyGILState_Release(state) };
+                }
+            });
+        })
+
+        .enable_all()
+        .build()?;
+
+    Ok(runtime)
+}
+
 /// ManagerServer is a GRPC server for the manager service.
 /// There should be one manager server per replica group (typically running on
 /// the rank 0 host). The individual ranks within a replica group should use
@@ -93,11 +158,7 @@ impl ManagerServer {
         connect_timeout: Duration,
     ) -> PyResult<Self> {
         py.allow_threads(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_threads())
-                .thread_name("torchft-manager")
-                .enable_all()
-                .build()?;
+            let runtime = new_runtime("torchft-manager")?;
             let manager = runtime
                 .block_on(manager::Manager::new(
                     replica_id,
@@ -153,11 +214,7 @@ impl ManagerClient {
     #[new]
     fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
         py.allow_threads(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_threads())
-                .thread_name("torchft-mgrclnt")
-                .enable_all()
-                .build()?;
+            let runtime = new_runtime("torchft-mgrclnt")?;
             let client = runtime
                 .block_on(manager::manager_client_new(addr, connect_timeout))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -328,11 +385,7 @@ fn lighthouse_main(py: Python<'_>) -> PyResult<()> {
     let mut args = env::args();
     args.next(); // discard binary arg
     let opt = lighthouse::LighthouseOpt::from_iter(args);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .thread_name("torchft-lighths")
-        .worker_threads(num_threads())
-        .enable_all()
-        .build()?;
+    let rt = new_runtime("torchft-lighths")?;
     rt.block_on(lighthouse_main_async(opt))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(())
@@ -487,11 +540,7 @@ impl LighthouseClient {
     #[new]
     fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
         py.allow_threads(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_threads())
-                .thread_name("torchft-lhclnt")
-                .enable_all()
-                .build()?;
+            let runtime = new_runtime("torchft-lhclnt")?;
             let client = runtime
                 .block_on(manager::lighthouse_client_new(addr, connect_timeout))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -625,11 +674,7 @@ impl LighthouseServer {
         let heartbeat_timeout_ms = heartbeat_timeout_ms.unwrap_or(5000);
 
         py.allow_threads(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_threads())
-                .thread_name("torchft-lighths")
-                .enable_all()
-                .build()?;
+            let rt = new_runtime("torchft-lighths")?;
 
             let lighthouse = rt
                 .block_on(lighthouse::Lighthouse::new(lighthouse::LighthouseOpt {
