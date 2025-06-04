@@ -470,6 +470,12 @@ def _prepare_quantize_fp8(
         assert (
             inputs[i].dtype == inputs[i - 1].dtype
         ), "All inputs must be on the same dtype"
+
+    assert dtype in [
+        torch.float32,
+        torch.float16,
+        torch.bfloat16,
+    ], "Only fp32, fp16 and bf16 are supported"
     i_ptrs = []
     i_shapes = []
     i_strides = []
@@ -508,12 +514,14 @@ def _prepare_quantize_fp8(
     d_i_offsets = torch.empty(i_num, dtype=torch.int32, device=device)
     d_i_offsets.copy_(torch.tensor(i_offsets, dtype=torch.int32), non_blocking=True)
 
+    d_i_dtype = torch.empty(1, dtype=dtype, device=device)
+
     return (
         d_i_ptrs,
         d_i_shapes,
         d_i_strides,
         d_i_offsets,
-        torch.tensor(1.0, dtype=dtype, device=device),
+        d_i_dtype,
         output_size,
         i_max_row_num,
         device,
