@@ -17,6 +17,18 @@ from torchft.local_sgd import DiLoCo, LocalSGD, extract_local_tensor
 from torchft.manager import Manager
 
 
+def create_manager() -> MagicMock:
+    """
+    Creates a mock manager with some useful defaults for testing
+    the optimizer's usage of the Manager
+    """
+    manager = create_autospec(Manager)
+
+    manager.errored.return_value = None
+
+    return manager
+
+
 class SimpleModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -117,7 +129,7 @@ class DiLoCoTest(TestCase):
             model.parameters(), lr=0.7, momentum=0.9, nesterov=True
         )
 
-        manager = create_autospec(Manager)
+        manager = create_manager()
         manager._use_async_quorum = False
         with DiLoCo(
             manager, [model], inner_optimizer, outer_optimizer, sync_every=2
@@ -126,7 +138,7 @@ class DiLoCoTest(TestCase):
             initial_outer_opt_state = outer_optimizer.state_dict()
             self.assertEqual(initial_outer_opt_state["state"], {})
 
-            self.assertEqual(diloco._fragments[0]._local_step, 0)
+            self.assertEqual(diloco._local_step, 0)
             torch.testing.assert_close(
                 diloco._fragments[0].original_parameters, _params_dict(model)
             )
@@ -135,15 +147,15 @@ class DiLoCoTest(TestCase):
             loss.backward()
             inner_optimizer.step()
 
-            self.assertEqual(diloco._fragments[0]._local_step, 1)
-            self.assertEqual(manager.start_quorum.call_count, 0)
+            self.assertEqual(diloco._local_step, 1)
+            self.assertEqual(manager.start_quorum.call_count, 1)
             loss = model(inp).mean()
             loss.backward()
             inner_optimizer.step()
-            self.assertEqual(manager.start_quorum.call_count, 1)
+            self.assertEqual(manager.start_quorum.call_count, 2)
 
             manager.should_commit.return_value = True
-            self.assertEqual(diloco._fragments[0]._local_step, 2)
+            self.assertEqual(diloco._local_step, 2)
             torch.testing.assert_close(
                 diloco._fragments[0].original_parameters, _params_dict(model)
             )
@@ -174,7 +186,7 @@ class DiLoCoTest(TestCase):
             model.parameters(), lr=0.7, momentum=0.9, nesterov=True
         )
 
-        manager = create_autospec(Manager)
+        manager = create_manager()
         manager._use_async_quorum = False
         manager.should_commit.return_value = True
 
@@ -227,9 +239,13 @@ class DiLoCoTest(TestCase):
         manager.should_commit.return_value = True
 
         # Define fake allreduce: multiplies buffer by 2
-        def fake_allreduce(tensor: Tensor, should_quantize: bool) -> MagicMock:
+        def fake_allreduce(
+            tensor: Tensor, should_quantize: bool
+        ) -> torch.futures.Future[Tensor]:
             tensor.mul_(2)
-            return MagicMock(wait=lambda: None)
+            fut = torch.futures.Future()  # pyre-fixme[29]: not a function
+            fut.set_result(tensor)
+            return fut
 
         manager.allreduce.side_effect = fake_allreduce
 

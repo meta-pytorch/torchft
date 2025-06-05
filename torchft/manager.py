@@ -169,8 +169,12 @@ class Manager:
             max_retries: the maximum number of consecutive should_commit failures to allow
                 before raising an exception. If None, will retry indefinitely.
         """
-        self._load_state_dict = load_state_dict
-        self._user_state_dict = state_dict
+        self._load_state_dict_fns: Dict[str, Callable[[object], None]] = {}
+        self._user_state_dicts: Dict[str, Callable[[], object]] = {}
+
+        if load_state_dict and state_dict:
+            self.register_state_dict_fn("default", load_state_dict, state_dict)
+
         self._pending_state_dict: Optional[Dict[str, object]] = None
         self._use_async_quorum = use_async_quorum
         self._timeout = timeout
@@ -262,11 +266,26 @@ class Manager:
         self._participating_replica_rank: Optional[int] = None
         self._participating_replica_world_size: int = 0
 
+    def register_state_dict_fn(
+        self,
+        key: str,
+        load_state_dict: Callable[[T], None],
+        state_dict: Callable[[], T],
+    ) -> None:
+        # Can't register duplicate keys
+        assert key not in self._load_state_dict_fns
+        assert key not in self._user_state_dicts
+
+        self._load_state_dict_fns[key] = cast(Callable[[object], None], load_state_dict)
+        self._user_state_dicts[key] = state_dict
+
     def set_state_dict_fns(
         self, load_state_dict: Callable[[T], None], state_dict: Callable[[], T]
     ) -> None:
-        self._load_state_dict = load_state_dict
-        self._user_state_dict = state_dict
+        self._logger.warn(
+            "`set_state_dict_fns` is deprecated, please use `register_state_dict_fn` instead"
+        )
+        self.register_state_dict_fn("set_state_dict_fns", load_state_dict, state_dict)
 
     def shutdown(self, wait: bool = True) -> None:
         """
@@ -636,9 +655,17 @@ class Manager:
             self._logger.info("applying pending state dict")
 
             assert (
-                self._load_state_dict is not None
+                len(self._load_state_dict_fns) > 0
             ), "user load_state_dict is not initialized."
-            self._load_state_dict(pending_state_dict["user"])
+
+            pending_user_state_dict = cast(
+                Dict[str, object], pending_state_dict["user"]
+            )
+
+            for key in self._load_state_dict_fns.keys():
+                load_state_dict_fn = self._load_state_dict_fns[key]
+                load_state_dict_fn(pending_user_state_dict[key])
+
             self._pending_state_dict = None
             self._logger.info("Loaded state dict.")
 
@@ -734,9 +761,9 @@ class Manager:
         self._batches_committed = state_dict["batches_committed"]
 
     def _manager_state_dict(self) -> Dict[str, object]:
-        assert self._user_state_dict is not None, "user state_dict is not initialized."
+        assert len(self._user_state_dicts) > 0, "user state_dict is not initialized."
         return {
-            "user": self._user_state_dict(),
+            "user": {key: value() for key, value in self._user_state_dicts.items()},
             "torchft": self.state_dict(),
         }
 

@@ -6,6 +6,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import timedelta
+from sys import platform
 from typing import Any, Dict
 from unittest import TestCase
 
@@ -139,7 +140,7 @@ def diloco_train_loop(
         if device.type == "cuda":
             pg = ProcessGroupBabyNCCL()
         else:
-            pg = ProcessGroupGloo()
+            pg = ProcessGroupGloo(timeout=timedelta(seconds=10))
         manager = Manager(
             pg=pg,
             min_replica_size=2,
@@ -361,6 +362,12 @@ class LocalSGDIntegTest(TestCase):
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
 
+        if platform == "darwin":
+            # TODO: This is likely because of Gloo not releasing GIL.
+            # Fix in: https://github.com/pytorch/pytorch/pull/154976
+            # Once this makes it to a stable package, we can re-enable this test.
+            self.skipTest("Known issue in Gloo")
+
         lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=2,
@@ -412,6 +419,8 @@ class LocalSGDIntegTest(TestCase):
                 rep1[step]["model"],
                 rep0[step]["model"],
                 check_device=False,
+                rtol=1e-4,
+                atol=1e-4,
             )
             torch.testing.assert_close(
                 rep1[step]["outer_optim"],

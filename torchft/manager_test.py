@@ -110,7 +110,9 @@ class TestManager(TestCase):
         self.assertEqual(
             manager._manager_state_dict(),
             {
-                "user": {},
+                "user": {
+                    "default": {},
+                },
                 "torchft": {
                     "step": 0,
                     "batches_committed": 0,
@@ -118,7 +120,8 @@ class TestManager(TestCase):
             },
         )
 
-        manager.set_state_dict_fns(
+        manager.register_state_dict_fn(
+            "state",
             self.load_state_dict,
             lambda: {"new_state": 1},
         )
@@ -126,7 +129,10 @@ class TestManager(TestCase):
         self.assertEqual(
             manager._manager_state_dict(),
             {
-                "user": {"new_state": 1},
+                "user": {
+                    "default": {},
+                    "state": {"new_state": 1},
+                },
                 "torchft": {
                     "step": 0,
                     "batches_committed": 0,
