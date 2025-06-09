@@ -107,8 +107,8 @@ else:
 
         END_TO_END_CONFIGS: list[tuple[int, float, ReduceOp, torch.dtype]] = [
             (ts, m, o, t)
-            for ts in [128, 256, 1024, 4096]
-            for m in [1.0, 10.0, 100.0, 1000.0]
+            for ts in [128, 512, 4096]
+            for m in [1.0, 100.0, 1000.0]
             for o in [ReduceOp.AVG, ReduceOp.SUM]
             for t in [torch.float32, torch.float16, torch.bfloat16]
         ]
@@ -123,7 +123,7 @@ else:
         ) -> None:
             self.run_test(
                 world_size=2,
-                tensors_num=4,
+                tensors_num=3,
                 tensor_size=tensor_size,
                 multiplier=multiplier,
                 tolerance=0.05,

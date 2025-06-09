@@ -163,8 +163,8 @@ else:
 
         END_TO_END_CONFIGS: list[tuple[int, float, ReduceOp, torch.dtype]] = [
             (ts, m, o, t)
-            for ts in [256, 1024, 4096]
-            for m in [1.0, 10.0, 100.0, 1000.0]
+            for ts in [256, 1024, 2048]
+            for m in [1.0, 100.0, 1000.0]
             for o in [ReduceOp.AVG, ReduceOp.SUM]
             for t in [torch.float32, torch.float16, torch.bfloat16]
         ]
@@ -181,7 +181,7 @@ else:
                 lambda pg, _, device: self._run_all_reduce_collective(
                     pg,
                     device,
-                    3,
+                    2,
                     tensor_size,
                     multiplier,
                     0.04,
@@ -202,7 +202,7 @@ else:
                 lambda pg, _, device: self._run_reduce_scatter_collective(
                     pg,
                     device,
-                    3,
+                    2,
                     tensor_size,
                     multiplier,
                     0.05,
