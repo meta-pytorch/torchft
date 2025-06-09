@@ -164,9 +164,7 @@ class TestManager(TestCase):
 
         manager.start_quorum()
         manager.allreduce(torch.tensor([1.0])).wait()
-        self.assertEqual(len(manager._pending_work), 1)
         self.assertTrue(manager.should_commit())
-        self.assertEqual(len(manager._pending_work), 0)
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 1)
@@ -553,8 +551,6 @@ class TestManager(TestCase):
         assert error is not None
         self.assertIs(error.original_exception, e)
         self.assertEqual(wrapped_fut.value(), 2)
-
-        self.assertEqual(manager._pending_work, [wrapped_fut])
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_wrap_future_timeout(self, client_mock: MagicMock) -> None:

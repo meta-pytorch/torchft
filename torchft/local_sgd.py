@@ -11,6 +11,7 @@ This module implements a fault tolerant version of LocalSGD and related methods.
 import logging
 import math
 import threading
+from contextlib import nullcontext
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type
 
@@ -197,9 +198,10 @@ class _StreamingDiLoCoFragment:
         self._outer_optimizer = outer_optimizer
 
         # Stores pending all reduce
-        self._allreduce_futures: list[
-            torch.futures.Future[None] | torch.futures.Future[torch.Tensor]
-        ] = []
+        self._allreduce_futures: list[torch.futures.Future[torch.Tensor]] = []
+        self._stream: Optional[torch.cuda.Stream] = (
+            torch.cuda.Stream() if torch.cuda.is_available() else None
+        )
 
         if bucket_cap_mb is not None:
             self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
@@ -222,6 +224,7 @@ class _StreamingDiLoCoFragment:
                 t = t.pin_memory()
             self.original_parameters[name] = t
 
+    @torch.profiler.record_function("torchft::local_sgd::save_parameters")
     def save_parameters(self) -> None:
         with torch.no_grad():
             # TODO: consider running copy on a separate stream
@@ -229,6 +232,7 @@ class _StreamingDiLoCoFragment:
                 param_to_local = extract_local_tensor(p.data)
                 self.original_parameters[name].copy_(param_to_local, non_blocking=True)
 
+    @torch.profiler.record_function("torchft::local_sgd::restore_parameters")
     def restore_parameters(self) -> None:
         with torch.no_grad():
             # TODO: consider running copy on a separate stream
@@ -248,6 +252,7 @@ class _StreamingDiLoCoFragment:
                 else:
                     p.data.copy_(self.original_parameters[name], non_blocking=False)
 
+    @torch.profiler.record_function("torchft::local_sgd::wait")
     def wait(self) -> None:
         """
         Waits for the previously scheduled allreduce to finish
@@ -255,6 +260,9 @@ class _StreamingDiLoCoFragment:
 
         for work in self._allreduce_futures:
             work.wait()
+
+        if self._stream is not None:
+            self._stream.synchronize()
 
         self._allreduce_futures = []
 
@@ -272,22 +280,31 @@ class _StreamingDiLoCoFragment:
         step_to_sync = step - self._fragment_sync_offset - self._fragment_sync_delay
         return step_to_sync % self._sync_every == 0
 
+    @torch.profiler.record_function("torchft::local_sgd::prepare_sync")
     def prepare_sync(self) -> None:
         """
         Calculate the pseugradient, average them across the manager group and starts
         allreduce on the pseudo-gradients but doesn't wait for it to finish.
         """
-        # Set the .grad field of each parameter to its pseudogradient
-        for name, p in self._model_fragment.named_parameters():
-            local_param = extract_local_tensor(p.data)
-            pseudogradient = local_param - self.original_parameters[name].to(p.device)
-            if isinstance(p, DTensor):
-                p.grad._local_tensor = pseudogradient
-            else:
-                p.grad = pseudogradient
+        with (
+            torch.cuda.stream(self._stream)
+            if self._stream is not None
+            else nullcontext()
+        ):
+            # Set the .grad field of each parameter to its pseudogradient
+            for name, p in self._model_fragment.named_parameters():
+                local_param = extract_local_tensor(p.data)
+                pseudogradient = local_param - self.original_parameters[name].to(
+                    p.device
+                )
+                if isinstance(p, DTensor):
+                    p.grad._local_tensor = pseudogradient
+                else:
+                    p.grad = pseudogradient
 
-        self._average_grads()
+            self._average_grads()
 
+    @torch.profiler.record_function("torchft::local_sgd::perform_sync")
     def perform_sync(self) -> bool:
         """
         Overrides the sync method to wait for the scheduled allreduce to finish and
@@ -467,16 +484,6 @@ class DiLoCo:
         if fragment_update_alpha < 0 or fragment_update_alpha > 1:
             raise ValueError("fragment_update_alpha must be between 0 and 1")
 
-        # TODO: Support multiple fragments
-        # This requires changing the manager to support `should_commit` for each
-        # fragment separately.
-        if len(model_fragments) != 1:
-            raise ValueError("Multiple fragments are not supported yet")
-
-        # TODO: Support `fragment_sync_delay`
-        if fragment_sync_delay != 0:
-            raise ValueError("Fragment synchronization delay is not supported yet")
-
         # TODO: Support `fragment_update_alpha`
         if fragment_update_alpha != 0.0:
             raise ValueError(
@@ -522,6 +529,8 @@ class DiLoCo:
                 use_bucketization,
                 bucket_cap_mb,
                 should_quantize,
+                fragment_sync_delay,
+                fragment_update_alpha,
             )
             for i, model_fragment in enumerate(model_fragments)
         ]
@@ -606,15 +615,19 @@ class DiLoCo:
             step = self._local_step
 
         # Start sending fragments
-        for fragment in self._fragments:
+        for i, fragment in enumerate(self._fragments):
             if not fragment.should_prepare_fragment(step):
                 continue
 
+            logger.debug(f"preparing fragment {i} at step {step}")
+
             fragment.prepare_sync()
 
-        for fragment in self._fragments:
+        for i, fragment in enumerate(self._fragments):
             if not fragment.should_sync_fragment(step):
                 continue
+
+            logger.debug(f"syncing fragment {i} at step {step}")
 
             if not fragment.perform_sync():
                 # Cancel all the previously scheduled allreduce by simply
@@ -655,3 +668,17 @@ class DiLoCo:
             # training data by looping here. Otherwise that training data goes to
             # waste after recovery
             self._quorum_loop()
+
+            # We need to set make sure `_local_step` is still
+            # the same across all replicas if `quorum_id` changed.
+            #
+            # We can't garuntee a majority of replicas in this new quorum
+            # has the latest `max_step`.
+            #
+            # TODO: This is garuntee is currently lacking
+            # in torchft unless `shrink_only` is set.
+            #
+            # After the quorum though, everyone will have the same
+            # `local_step` because replicas with the chosen
+            # `max_step` will have the same `local_step`. That is
+            # because we don't take additional steps after commit.

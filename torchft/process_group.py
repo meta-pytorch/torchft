@@ -775,7 +775,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
 
     def errored(self) -> Optional[Exception]:
         # force a synchronization to ensure all work is complete
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
 
         return self._errored
 

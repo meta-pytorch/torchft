@@ -259,7 +259,6 @@ class Manager:
         self._quorum_id = -1
         self._errored: Optional[ExceptionWithTraceback] = None
         self._healing = False
-        self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
 
         # first step is 1
@@ -296,6 +295,7 @@ class Manager:
             self._manager.shutdown()
         self._executor.shutdown(wait=wait)
 
+    @torch.profiler.record_function("torchft::manager::allreduce")
     def allreduce(
         self, tensor: torch.Tensor, should_quantize: bool = False
     ) -> torch.futures.Future[torch.Tensor]:
@@ -331,34 +331,36 @@ class Manager:
         try:
             # Run the allreduce async and save the work object so we can wait on
             # it later.
-            fut: Optional[
-                torch.futures.Future[None]
-                | torch.futures.Future[torch.Tensor]
-                | torch.futures.Future[List[torch.Tensor]]
-            ] = None
             if should_quantize and IS_TRITON_AVAILABLE:
-                fut = allreduce_quantized([tensor], ReduceOp.AVG, self._pg)
+                assert False, "allreduce_quantized is not supported yet"
+                # TODO: Support `allreduce_quantized`
+                # fut = allreduce_quantized([tensor], ReduceOp.SUM, self._pg)
             else:
                 work = self._pg.allreduce([tensor], ReduceOp.SUM)
                 fut = work.get_future()
+
+            stream: Optional[torch.cuda.Stream] = (
+                torch.cuda.current_stream() if torch.cuda.is_available() else None
+            )
 
             # schedule grad normalization as a continuation
             # on the Future
             def callback(
                 fut: torch.futures.Future[List[torch.Tensor]],
             ) -> torch.Tensor:
-                nonlocal tensor
+                nonlocal tensor, stream
 
                 # check for exceptions
                 fut.value()
 
                 tensor /= self.num_participants()
 
+                if stream is not None:
+                    stream.wait_stream(torch.cuda.current_stream())
+
                 return tensor
 
-            assert fut is not None
-            if not should_quantize:
-                fut = fut.then(callback)
+            fut = fut.then(callback)
             fut = self.wrap_future(fut, tensor)
             return fut
 
@@ -429,7 +431,6 @@ class Manager:
                 return default
 
         fut = fut.then(callback)
-        self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
     def start_quorum(
@@ -562,7 +563,7 @@ class Manager:
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
             try:
-                with torch.profiler.record_function("torchft::manager::_pg.configure"):
+                with torch.profiler.record_function("torchft::manager::_pg::configure"):
                     self._pg.configure(
                         store_prefixed_addr, replica_rank, replica_world_size
                     )
@@ -694,20 +695,12 @@ class Manager:
         Raises:
             RuntimeError: if should_commit fails max_retries times in a row and max_retries is set
         """
-        for work in self._pending_work:
-            # check at the beginning of since .wait() may trigger errors
-            if self._errored is not None:
-                break
-
-            # We swallow the error at in a future then callback so this will
-            # never return an error.
-            work.wait()
-
         # make sure recovery is complete before committing
         if self._recovery_stream is not None:
             self._recovery_stream.synchronize()
 
-        self._pending_work = []
+        if torch.cuda.is_available():
+            torch.cuda.current_stream().synchronize()
 
         if err := self._pg.errored():
             self.report_error(err)

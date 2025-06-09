@@ -222,7 +222,13 @@ A test DDP script can be launched with torchX with:
 torchx run
 ```
 
-See [.torchxconfig](.torchxconfig), [torchx.py](./torchft/torchx.py) and the [torchX documentation](https://pytorch.org/torchx/latest/) to understand how DDP is being ran. 
+Or Diloco with:
+
+```sh
+USE_STREAMING=True torchx run ./torchft/torchx.py:hsdp --script='train_diloco.py'
+```
+
+See [.torchxconfig](.torchxconfig), [torchx.py](./torchft/torchx.py) and the [torchX documentation](https://pytorch.org/torchx/latest/) to understand how DDP is being ran.
 
 `torchx.py` could also launch HSDP jobs when `workers_per_replica` is set > 1, if the training script supports it. For an example HSDP training implementation with torchFT enabled, see [torchtitan](https://github.com/pytorch/torchtitan).
 
