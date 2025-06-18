@@ -116,7 +116,25 @@ train loop to ensure everything stays consistent during a healing operation.
 
 See the design doc linked above for more details.
 
-## Prerequisites
+## Installing from PyPI
+
+We have nighty builds available at https://pypi.org/project/torchft-nightly/
+
+To install torchft with minimal dependencies you can run:
+
+```sh
+pip install torchft-nightly
+```
+
+If you want all development dependencies you can install:
+
+```sh
+pip install torchft-nightly[dev]
+```
+
+## Installing from Source
+
+### Prerequisites
 
 Before proceeding, ensure you have the following installed:
 
@@ -141,7 +159,7 @@ or for a Red Hat-based system, run:
 sudo dnf install protobuf-compiler protobuf-devel
 ```
 
-## Installation
+### Installation
 
 ```sh
 pip install .
