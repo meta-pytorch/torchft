@@ -1,4 +1,4 @@
-src/pytorch-sphinx-theme
+src/pytorch-sphinx-theme2
 source/examples_*/
 jupyter_execute/
 build/

@@ -21,7 +21,7 @@ clean:
 	rm -rf "$(BUILDDIR)"
 	rm -rf "$(SOURCEDIR)/examples_apps" "$(SOURCEDIR)/examples_pipelines"
 
-.PHONY: help Makefile clean livehtml papermill
+.PHONY: help Makefile clean livehtml
 
 # Catch-all target: route all unknown targets to Sphinx using the new
 # "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
@@ -30,7 +30,4 @@ clean:
 
 # optional live version
 livehtml:
-	sphinx-autobuild --watch ../torchft --re-ignore ".*(examples_.*|.new|source/.*(Dockerfile|.py))" "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
-
-papermill: html
-	./papermill.sh
+	sphinx-autobuild --watch ../torchft --host :: --port 7002 --re-ignore ".*(examples_.*|.new|source/.*(Dockerfile|.py))" "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)

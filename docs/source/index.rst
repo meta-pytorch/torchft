@@ -17,18 +17,10 @@ the entire training job.
     assumptions_and_recommendations
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
     :caption: API Reference
 
-    process_group
-    manager
-    optim
-    ddp
-    local_sgd
-    data
-    checkpointing
-    parameter_server
-    coordination
+    api
 
 
 License
