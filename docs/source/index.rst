@@ -19,7 +19,7 @@ the entire training job.
 
 .. toctree::
     :glob:
-    :maxdepth: 1
+    :maxdepth: 2
     :caption: API Reference
 
     api
