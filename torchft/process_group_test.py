@@ -892,6 +892,8 @@ class MultiPgBaseTest(TestCase):
         cls.executor = ThreadPoolExecutor(max_workers=cls.WORLD_SIZE)
 
         def init_pg(rank: int) -> ProcessGroup:
+            if torch.accelerator.is_available():
+                torch.accelerator.set_device_idx(rank)
             pg = cls._create_pg(cls.BACKEND)
             pg.configure(cls.store_addr, rank, cls.WORLD_SIZE)
             return pg
@@ -944,6 +946,7 @@ class MultiPgBaseTest(TestCase):
             if "cuda" in device:
                 device = f"cuda:{rank}"
             tensor = torch.tensor([rank + 1], device=device)
+
             fut = self.executor.submit(func, pg, rank, tensor)
             futures.append(fut)
 
