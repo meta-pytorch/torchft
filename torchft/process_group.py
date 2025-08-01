@@ -69,6 +69,7 @@ from torch.utils._pytree import tree_any
 from torchft.device_mesh import *  # noqa: F401
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
+from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
     from torchft.manager import Manager
@@ -182,6 +183,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
+    # pyre-fixme[14]: inconsistent override
     def barrier(self, opts: BarrierOptions) -> Work:
         """
         Synchronizes all processes.
@@ -495,7 +497,7 @@ class ProcessGroupWrapper(ProcessGroup):
                 opts,
             )
 
-    def barrier(self, opts: BarrierOptions) -> Work:
+    def barrier(self, opts: Optional[BarrierOptions] = None) -> Work:
         with self._run_context():
             return self._wrap_work(self.parent.barrier(self._opts_hook(opts)), opts)
 
@@ -793,21 +795,6 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         return "torchft-nccl"
 
 
-class _DummyWork(dist._Work):
-    def __init__(self, result: object) -> None:
-        super().__init__()
-        self.result_ = result
-        # pyre-fixme[29]: Future is not a function
-        self.future_: torch.futures.Future[object] = torch.futures.Future()
-        self.future_.set_result(result)
-
-    def wait(self, timeout: Optional[timedelta] = None) -> bool:
-        return True
-
-    def get_future(self) -> torch.futures.Future[object]:
-        return self.future_
-
-
 class ProcessGroupDummy(ProcessGroup):
     """
     This process group discards all data passed to it and returns success. This
@@ -883,7 +870,7 @@ class ProcessGroupDummy(ProcessGroup):
         self._work.append(res)
         return res
 
-    def barrier(self, opts: BarrierOptions) -> Work:
+    def barrier(self, opts: Optional[BarrierOptions] = None) -> Work:
         return _DummyWork(None)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
@@ -1514,7 +1501,7 @@ class ProcessGroupBaby(ProcessGroup):
         self, op_id: int, stream: Optional[torch.cuda.Stream]
     ) -> Future[object]:
         with self._futures_lock:
-            fut = Future()  # pyre-fixme[29]: is not a function
+            fut = Future()
             self._futures[op_id] = _FutureMetadata(future=fut, stream=stream)
             assert self._pipe is not None
             self._pipe.send(("future", op_id))
@@ -1646,7 +1633,7 @@ class ProcessGroupBaby(ProcessGroup):
             opts,
         )
 
-    def barrier(self, opts: BarrierOptions) -> Work:
+    def barrier(self, opts: Optional[BarrierOptions] = None) -> Work:
         return self._run_func("barrier", opts)
 
     def broadcast(

@@ -18,6 +18,7 @@ from torch.distributed.distributed_c10d import (
     AllreduceOptions,
     AllToAllOptions,
     ReduceScatterOptions,
+    Work,
 )
 from torch.futures import Future
 
@@ -161,7 +162,7 @@ def reduce_scatter_quantized(
     opts: ReduceScatterOptions | ReduceOp,
     process_group: "ProcessGroup",
     sync_stream: cuda.Stream | None = None,
-) -> Future[None]:
+) -> Work:
     """
     Performs a quantized reduce-scatter operation on a list of tensors.
 
@@ -195,10 +196,10 @@ def reduce_scatter_quantized(
     """
 
     if isinstance(opts, ReduceOp):
-        reducescatter_opts = ReduceScatterOptions()
+        reducescatter_opts: ReduceScatterOptions = ReduceScatterOptions()
         reducescatter_opts.reduceOp = opts
     else:
-        reducescatter_opts = opts
+        reducescatter_opts: ReduceScatterOptions = opts
 
     # Check if the reduceOp is AVG or SUM
     if reducescatter_opts.reduceOp not in {
@@ -210,15 +211,15 @@ def reduce_scatter_quantized(
             f"for quantized reduce-scatter, only AVG and SUM are supported"
         )
 
-    rank = process_group.rank()
-    world_size = process_group.size()
+    rank: int = process_group.rank()
+    world_size: int = process_group.size()
 
     reduce_output_sizes = [
         torch.Size((s[0] // world_size, *s[1:]))
         for s in get_padded_sizes(inputs, world_size)
     ]
     reduce_output_numels = [s.numel() for s in reduce_output_sizes]
-    reduce_outputs = [
+    reduce_outputs: list[torch.Tensor] = [
         o.view(s)
         for o, s in zip(
             output.split(reduce_output_numels),
@@ -239,48 +240,51 @@ def reduce_scatter_quantized(
         quantized_inputs = fused_quantize_into_fp8(inputs, world_size)
 
         # Allocate output tensor where all-reduce results will be stored
-        quantized_inputs_out = torch.zeros_like(quantized_inputs)
+        quantized_inputs_out: torch.Tensor = torch.zeros_like(quantized_inputs)
         # Collect chunks and their scales from other ranks
-        process_group.alltoall_base(
+        work = process_group.alltoall_base(
             quantized_inputs_out.view(world_size, -1),
             quantized_inputs.view(world_size, -1),
             [],
             [],
             _to_alltoall_options(reducescatter_opts),
-        ).wait()
+        )
+        work.wait()
 
-        # Reduce chunks locally in higher precision after dequantization.
-        # The output is again quantized.
-        fused_reduce_fp8(
-            inputs,
-            quantized_inputs_out,
-            world_size,
-            rank,
-            reducescatter_opts.reduceOp,
-        )
+        fut = work.get_future()
 
-        # Get view into the output tensor that corresponds to the
-        # current rank
-        quantized_reduce_scatter = (
-            quantized_inputs_out.view(world_size, -1).split(1)[rank].squeeze(0)
-        )
-        # Dequantize the result back to the original precision for
-        # the current rank
-        fused_dequantize_from_fp8(
-            reduce_outputs,
-            quantized_reduce_scatter,
-            1,
-        )
+        def callback(fut: Future[list[torch.Tensor]]) -> None:
+            nonlocal inputs, quantized_inputs_out, world_size, sync_stream, rank, reduce_outputs, reducescatter_opts
 
-        # pyre-ignore[29]
-        return _QuantizedOpFuture(
-            sync_stream,
-            [
-                quantized_inputs,
-                quantized_inputs_out,
-            ],
-            [output],
-        )
+            with torch.cuda.stream(sync_stream):
+                # Setup stream dependency
+                fut.wait()
+                # Reduce chunks locally in higher precision after dequantization.
+                # The output is again quantized.
+                fused_reduce_fp8(
+                    inputs,
+                    quantized_inputs_out,
+                    world_size,
+                    rank,
+                    reducescatter_opts.reduceOp,
+                )
+
+                # Get view into the output tensor that corresponds to the
+                # current rank
+                quantized_reduce_scatter = (
+                    quantized_inputs_out.view(world_size, -1).split(1)[rank].squeeze(0)
+                )
+                # Dequantize the result back to the original precision for
+                # the current rank
+                fused_dequantize_from_fp8(
+                    reduce_outputs,
+                    quantized_reduce_scatter,
+                    1,
+                )
+
+        fut.add_done_callback(callback)
+
+        return work
 
 
 def allreduce_quantized(
@@ -288,7 +292,7 @@ def allreduce_quantized(
     opts: AllreduceOptions | ReduceOp,
     process_group: "ProcessGroup",
     sync_stream: cuda.Stream | None = None,
-) -> Future[list[torch.Tensor]]:
+) -> Work:
     """
     Performs a quantized all-reduce operation on a list of tensors.
 
@@ -379,17 +383,26 @@ def allreduce_quantized(
             [torch.split(quantized_tensors_out.view(world_size, -1), 1)[rank]],
             _to_allgather_options(allreduce_opts),
         )
+
+        # NOTE: This is not supposed to be used with gloo, only with NCCL.
+        # So we setup the stream dependency here by calling work.wait(),
+        # which doesn't block the CPU.
+        #
+        # The future callback below will run after the work has been
+        # completed.
+
         work.wait()
         fut = work.get_future()
 
-        def callback(fut: Future[list[torch.Tensor]]) -> list[torch.Tensor]:
+        def callback(fut: Future[list[torch.Tensor]]) -> None:
             # Dequantize and copy to output buffer.
             nonlocal tensors, quantized_tensors, world_size, sync_stream
 
             with torch.cuda.stream(sync_stream):
+                # Setup stream dependency
+                fut.wait()
                 # Dequantize the result back to the original precision
                 fused_dequantize_from_fp8(tensors, quantized_tensors, world_size)
-                return tensors
 
-        fut = fut.then(callback)
-        return fut
+        fut.add_done_callback(callback)
+        return work

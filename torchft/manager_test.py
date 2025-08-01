@@ -16,7 +16,8 @@ from torch.distributed import TCPStore
 from torchft._torchft import QuorumResult
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
-from torchft.process_group import ProcessGroup, _DummyWork
+from torchft.process_group import ProcessGroup
+from torchft.work import _DummyWork
 
 
 def mock_should_commit(
@@ -400,7 +401,7 @@ class TestManager(TestCase):
 
         self.assertFalse(manager._errored)
 
-        bad_fut = torch.futures.Future()  # pyre-fixme[29]: not a function
+        bad_fut = torch.futures.Future()
         bad_fut.set_exception(RuntimeError("injected failure"))
         manager._pg.allreduce.return_value.get_future.return_value = bad_fut
         manager.allreduce(torch.tensor([1.0])).wait()
@@ -541,7 +542,7 @@ class TestManager(TestCase):
 
         self.assertIsNone(manager.errored())
 
-        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
+        fut = torch.futures.Future()
         wrapped_fut = manager.wrap_future(fut, 2)
         self.assertIsNone(manager.errored())
 
@@ -558,7 +559,7 @@ class TestManager(TestCase):
 
         self.assertFalse(manager.errored())
 
-        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
+        fut = torch.futures.Future()
         wrapped_fut = manager.wrap_future(fut, 2)
         wrapped_fut.wait()
         error = manager.errored()
@@ -586,16 +587,18 @@ class TestManager(TestCase):
         manager._pg.allreduce.return_value = _DummyWork(None)
 
         self.assertTrue(manager.is_participating())
-        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
-        fut = manager.allreduce(torch.tensor([1.0]))
+        work = manager.allreduce(torch.tensor([1.0]))
+        work.synchronize()
+        fut = work.get_future()
         result = fut.value()
         torch.testing.assert_close(result, torch.tensor([1.0 / 5]))
 
         # check healing numerics
         manager._healing = True
         self.assertFalse(manager.is_participating())
-        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
-        fut = manager.allreduce(torch.tensor([1.0]))
+        work = manager.allreduce(torch.tensor([1.0]))
+        work.synchronize()
+        fut = work.get_future()
         result = fut.value()
         torch.testing.assert_close(result, torch.tensor([0.0]))
 

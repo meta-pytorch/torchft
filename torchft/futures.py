@@ -148,7 +148,6 @@ class _TimeoutManager:
 
         loop = self._maybe_start_event_loop()
 
-        # pyre-fixme[29]: Future is not a function
         timed_fut: Future[T] = Future()
         handle: _TimerHandle = _TimerHandle()
         loop.call_soon_threadsafe(

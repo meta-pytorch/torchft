@@ -94,8 +94,8 @@ else:
                     )
                 ]
 
-                fut = allreduce_quantized(tensors, reduce_op, pg)
-                fut.wait()
+                work = allreduce_quantized(tensors, reduce_op, pg)
+                work.wait()
 
                 work = pg.allreduce([expected], reduce_op)
                 work.get_future().wait()
@@ -141,8 +141,8 @@ else:
                 opts = ReduceScatterOptions()
                 opts.reduceOp = reduce_op
 
-                fut = reduce_scatter_quantized(actual_output, tensors, opts, pg)
-                fut.wait()
+                work = reduce_scatter_quantized(actual_output, tensors, opts, pg)
+                work.get_future().wait()
 
                 padded_sizes = get_padded_sizes(tensors, world_size)
                 padded_numel = sum(s.numel() for s in padded_sizes)
