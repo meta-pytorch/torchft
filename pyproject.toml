@@ -16,9 +16,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://pytorch-labs.github.io/torchft"
-Repository = "https://github.com/pytorch-labs/torchft"
-Issues = "https://github.com/pytorch-labs/torchft/issues"
+Documentation = "https://docs.pytorch.org/torchft"
+Repository = "https://github.com/pytorch/torchft"
+Issues = "https://github.com/pytorch/torchft/issues"
 
 [project.optional-dependencies]
 dev = [
