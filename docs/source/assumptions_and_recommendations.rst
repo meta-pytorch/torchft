@@ -1,4 +1,4 @@
-:github_url: https://github.com/meta-pytorch/torchft/assumptions-and-recommendations
+:github_url: https://github.com/pytorch/torchft/assumptions-and-recommendations
 
 Assumptions and Recommendations
 ===============================
