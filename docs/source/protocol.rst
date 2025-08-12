@@ -1,4 +1,4 @@
-:github_url: https://github.com/meta-pytorch/torchft/protocol
+:github_url: https://github.com/pytorch/torchft/protocol
 
 Protocol
 ========

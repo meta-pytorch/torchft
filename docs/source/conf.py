@@ -45,7 +45,7 @@ FBCODE = "fbcode" in os.getcwd()
 #
 needs_sphinx = "1.6"
 
-user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:25.0) Gecko/20100101 Firefox/25.0 github.com/meta-pytorch/torchft"
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:25.0) Gecko/20100101 Firefox/25.0 github.com/pytorch/torchft"
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom

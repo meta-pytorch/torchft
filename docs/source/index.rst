@@ -1,4 +1,4 @@
-:github_url: https://github.com/meta-pytorch/torchft
+:github_url: https://github.com/pytorch/torchft
 
 torchft
 ========
@@ -7,7 +7,7 @@ This repository implements primitives and E2E solutions for doing a per-step
 fault tolerance so you can keep training if errors occur without interrupting
 the entire training job.
 
-**GETTING STARTED?** See Install and Usage in `the README <https://github.com/meta-pytorch/torchft>`_.
+**GETTING STARTED?** See Install and Usage in `the README <https://github.com/pytorch/torchft>`_.
 
 .. toctree::
     :maxdepth: 1
@@ -26,7 +26,7 @@ the entire training job.
 License
 ---------
 
-torchft is BSD 3-Clause licensed. See `LICENSE <https://github.com/meta-pytorch/torchft/blob/main/LICENSE>`_ for more details.
+torchft is BSD 3-Clause licensed. See `LICENSE <https://github.com/pytorch/torchft/blob/main/LICENSE>`_ for more details.
 
 Copyright © Meta Platforms, Inc
 
