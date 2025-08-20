@@ -253,13 +253,40 @@ impl Manager {
             let result = tokio::time::timeout(timeout, client.quorum(request)).await;
 
             match result {
-                Ok(response) => {
-                    return response;
+                Ok(Ok(response)) => {
+                    info!("Got quorum response success: {:?}", response);
+                    return Ok(response);
+                }
+                Ok(Err(e)) => {
+                    info_with_replica!(
+                        self.replica_id,
+                        "lighthouse quorum failed. error: {}",
+                        e.to_string()
+                    );
+
+                    if retry_count == self.quorum_retries {
+                        return Err(Status::internal(format!(
+                            "lighthouse quorum failed after {} retries. error: {}",
+                            retry_count,
+                            e.to_string(),
+                        )));
+                    }
+
+                    // In general, quorum failure will return immediately,
+                    // but not waiting for the timeout.
+                    tokio::time::sleep(timeout).await;
+
+                    // Reset the client since the lighthouse server might have failed
+                    // If this also fails, consider increasing `connect_timeout`.
+                    let _ = self.create_lighthouse_client().await;
+
+                    retry_count += 1;
+                    info!("lighthouse quorum retried: {}", retry_count);
                 }
                 Err(e) => {
                     info_with_replica!(
                         self.replica_id,
-                        "lighthouse quorum failed. error: {}",
+                        "lighthouse quorum timeout. error: {}",
                         e.to_string()
                     );
 
