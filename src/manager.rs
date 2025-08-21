@@ -254,7 +254,6 @@ impl Manager {
 
             match result {
                 Ok(Ok(response)) => {
-                    info!("Got quorum response success: {:?}", response);
                     return Ok(response);
                 }
                 Ok(Err(e)) => {
@@ -281,7 +280,6 @@ impl Manager {
                     let _ = self.create_lighthouse_client().await;
 
                     retry_count += 1;
-                    info!("lighthouse quorum retried: {}", retry_count);
                 }
                 Err(e) => {
                     info_with_replica!(
