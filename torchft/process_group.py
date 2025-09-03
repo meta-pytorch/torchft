@@ -69,7 +69,7 @@ from torch.utils._pytree import tree_any
 from torchft.device_mesh import *  # noqa: F401
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
-from torchft.utils import get_stream_context
+from torchft.utils import get_stream_context, record_event
 from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
@@ -793,7 +793,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
 
     def errored(self) -> Optional[Exception]:
         # force a synchronization to ensure all work is complete
-        torch.cuda.current_stream().synchronize()
+        torch.accelerator.current_stream().synchronize()
 
         return self._errored
 
@@ -1491,7 +1491,7 @@ class ProcessGroupBaby(ProcessGroup):
                                 dict[str, object],
                                 int,
                                 int,
-                                Optional[torch.Event],
+                                Optional[Union[torch.cuda.Event, torch.xpu.Event]],
                             ],
                             op[1:],
                         )
@@ -1539,13 +1539,7 @@ class ProcessGroupBaby(ProcessGroup):
 
                         # Register event on the stream that we can pass to the main
                         # process.
-                        event = (
-                            torch.accelerator.current_stream().record_event(
-                                torch.Event(interprocess=True)
-                            )
-                            if metadata.stream is not None
-                            else None
-                        )
+                        event = record_event() if metadata.stream is not None else None
 
                     req_pipe.send((op_id, event))
                 elif cmd == "del":
@@ -1562,9 +1556,7 @@ class ProcessGroupBaby(ProcessGroup):
                             with metadata.set_stream():
                                 fut.wait()
                                 event = (
-                                    torch.accelerator.current_stream().record_event(
-                                        torch.Event(interprocess=True)
-                                    )
+                                    record_event()
                                     if metadata.stream is not None
                                     else None
                                 )
@@ -1598,7 +1590,13 @@ class ProcessGroupBaby(ProcessGroup):
                     break
 
                 op_id, mode, data, event = cast(
-                    Tuple[int, str, object, Optional[torch.Event]], cmd
+                    Tuple[
+                        int,
+                        str,
+                        object,
+                        Optional[Union[torch.cuda.Event, torch.xpu.Event]],
+                    ],
+                    cmd,
                 )
                 with self._futures_lock:
                     meta = self._futures[op_id]
@@ -1631,7 +1629,7 @@ class ProcessGroupBaby(ProcessGroup):
 
         assert self._pipe is not None
         op_id, event = cast(
-            Tuple[int, Optional[torch.Event]],
+            Tuple[int, Optional[Union[torch.cuda.Event, torch.xpu.Event]]],
             self._pipe.recv(timeout or self._timeout),
         )
         assert op_id == op_id
@@ -1660,13 +1658,7 @@ class ProcessGroupBaby(ProcessGroup):
         stream_id = (
             torch.accelerator.current_stream().stream_id if is_accelerator else None
         )
-        event = (
-            torch.accelerator.current_stream().record_event(
-                torch.Event(interprocess=True)
-            )
-            if is_accelerator
-            else None
-        )
+        event = record_event() if is_accelerator else None
 
         op_id = self._next_op_id
         self._next_op_id += 1
