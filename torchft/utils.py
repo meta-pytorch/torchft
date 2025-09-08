@@ -51,6 +51,6 @@ def record_event() -> None:
     accelerator types (CUDA, XPU).
     """
     if torch.xpu.is_available():
-        torch.xpu.current_stream().record_event(torch.xpu.Event(interprocess=True))
+        torch.xpu.current_stream().record_event(torch.xpu.Event())
     else:
         torch.cuda.current_stream().record_event(torch.cuda.Event(interprocess=True))

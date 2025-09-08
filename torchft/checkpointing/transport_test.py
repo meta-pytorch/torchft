@@ -60,7 +60,10 @@ def run_multi_recovery_test(
     metadata: str = ""
 
     dist.init_process_group(
-        backend="gloo", rank=0, world_size=1, store=dist.HashStore()
+        backend="gloo",
+        rank=0,
+        world_size=1,
+        store=dist.HashStore(),  # pyre-fixme[6]: Expected `Optional[Store]` but got `HashStore`
     )
 
     def run(rank: int) -> CheckpointTransport[dict[str, object]]:
