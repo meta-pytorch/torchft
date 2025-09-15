@@ -877,14 +877,13 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
 
         self._errored = None
 
-        # opts = None
-        # opts = BaseProcessGroupXCCL.Options()
+        opts = BaseProcessGroupXCCL.Options()
         # opts.config.blocking = False
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.XCCL)
         # pyre-fixme[16]: no attribute ProcessGroupXCCL
-        backend_class = BaseProcessGroupXCCL(store, rank, world_size)  # , opts)
+        backend_class = BaseProcessGroupXCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         backend_class.eager_connect_single_device(
             torch.device(torch.accelerator.current_device_index())
