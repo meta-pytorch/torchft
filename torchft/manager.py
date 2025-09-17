@@ -58,7 +58,7 @@ from torchft._torchft import ManagerClient, ManagerServer
 from torchft.checkpointing import CheckpointTransport, HTTPTransport
 from torchft.checkpointing._rwlock import RWLock
 from torchft.futures import future_timeout
-from torchft.utils import get_stream_context
+from torchft.utils import current_stream, get_stream_context
 from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
@@ -790,7 +790,9 @@ class Manager:
             "torchft::manager::should_commit::current_stream::synchronize"
         ):
             if torch.accelerator.is_available():
-                torch.accelerator.current_stream().synchronize()
+
+                # pyre-fixme[16]: no attribute synchronize
+                current_stream().synchronize()
 
         if err := self._pg.errored():
             self.report_error(err)

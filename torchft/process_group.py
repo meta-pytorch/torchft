@@ -69,7 +69,7 @@ from torch.utils._pytree import tree_any
 from torchft.device_mesh import *  # noqa: F401
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
-from torchft.utils import get_stream_context, record_event
+from torchft.utils import current_stream, get_stream_context, record_event
 from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
@@ -793,7 +793,8 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
 
     def errored(self) -> Optional[Exception]:
         # force a synchronization to ensure all work is complete
-        torch.accelerator.current_stream().synchronize()
+        # pyre-fixme[16]: no attribute synchronize
+        current_stream().synchronize()
 
         return self._errored
 
@@ -877,6 +878,7 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
 
         self._errored = None
 
+        # pyre-fixme[16]: no attribute ProcessGroupXCCL
         opts = BaseProcessGroupXCCL.Options()
         # opts.config.blocking = False
 
