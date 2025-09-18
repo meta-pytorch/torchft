@@ -7,23 +7,20 @@
 
 import argparse
 import asyncio
+import atexit
 import os
-
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict
-import atexit
 
 import torch
-
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._src.actor.allocator import RemoteAllocator, TorchXRemoteAllocInitializer
-from monarch.actor import Actor, current_rank, endpoint, ProcMesh, this_host
+from monarch.actor import Actor, ProcMesh, current_rank, endpoint, this_host
 from monarch.tools import commands
 from monarch.tools.components import hyperactor
 from monarch.tools.config import Config
 from monarch.utils import setup_env_for_distributed
-
 from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
@@ -73,7 +70,9 @@ class MonarchSlurm:
     ) -> ProcMesh:
         allocator = RemoteAllocator(
             world_id=MonarchSlurm.job_name_prefix,
-            initializer=TorchXRemoteAllocInitializer(f"slurm:///{cls.job_handles[mesh_name]}"),
+            initializer=TorchXRemoteAllocInitializer(
+                f"slurm:///{cls.job_handles[mesh_name]}"
+            ),
         )
         alloc = allocator.allocate(
             AllocSpec(AllocConstraints(), hosts=num_hosts, gpus=num_gpus)
@@ -84,13 +83,16 @@ class MonarchSlurm:
 
 # ==== allocation boilerplate ====
 
+
 class LighthouseActor(Actor):
     def __init__(self) -> None:
         self.lighthouse = None
 
     @endpoint
     def start_lighthouse(self) -> str:
+        # inline import because of https://github.com/meta-pytorch/monarch/issues/804
         from torchft.coordination import LighthouseServer
+
         self.lighthouse = LighthouseServer(
             bind="[::]:0", min_replicas=1, join_timeout_ms=10000
         )
@@ -217,7 +219,9 @@ class OrchestrationManager:
         )
 
         for replica_id in range(self.spec.replica_count):
-            await MonarchSlurm.get_or_create_job(f"replica_{replica_id}", self.spec.hosts_per_replica)
+            await MonarchSlurm.get_or_create_job(
+                f"replica_{replica_id}", self.spec.hosts_per_replica
+            )
 
         mesh_futures = {}
         for i in range(self.spec.replica_count):
@@ -304,6 +308,7 @@ class OrchestrationManager:
 
 
 # === CLI / CONFIG === #
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -398,6 +403,8 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         hosts_per_replica=args.host_per_replica,
         gpus_per_node=args.gpu_per_node,
     )
+
+
 # === CLI / CONFIG === #
 
 
