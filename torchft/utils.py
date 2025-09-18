@@ -56,12 +56,12 @@ def record_event() -> None:
         torch.cuda.current_stream().record_event(torch.cuda.Event(interprocess=True))
 
 
-def current_stream() -> None:
+def synchronize() -> None:
     """
-    This function provides a unified way to get current stream across different
+    This function provides a unified way to synchronize current stream across different
     accelerator types (CUDA, XPU).
     """
-    if torch.xpu.is_available():
-        torch.xpu.current_stream()
-    else:
-        torch.cuda.current_stream()
+    if torch.cuda.is_available():
+        torch.cuda.current_stream().synchronize()
+    elif torch.xpu.is_available():
+        torch.xpu.current_stream().synchronize()
