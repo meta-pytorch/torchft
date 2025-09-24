@@ -252,7 +252,7 @@ impl Manager {
 
             let result = tokio::time::timeout(timeout, client.quorum(request)).await;
 
-            let mut sleep_time = 100;
+            let mut sleep_duration = timeout;
             match result {
                 Ok(Ok(response)) => {
                     return Ok(response);
@@ -265,7 +265,6 @@ impl Manager {
                     );
                     // In general, quorum failure will return immediately,
                     // but not waiting for the timeout.
-                    sleep_time = timeout;
                 }
                 Err(e) => {
                     info_with_replica!(
@@ -273,6 +272,7 @@ impl Manager {
                         "lighthouse quorum timeout. error: {}",
                         e.to_string()
                     );
+                    sleep_duration = tokio::time::Duration::from_millis(100);
                 }
             }
 
@@ -283,7 +283,7 @@ impl Manager {
                 )));
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_time)).await;
+            tokio::time::sleep(sleep_duration).await;
 
             // Reset the client since the lighthouse server might have failed
             // If this also fails, consider increasing `connect_timeout`.
