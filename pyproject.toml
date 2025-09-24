@@ -27,7 +27,7 @@ dev = [
     "parameterized",
     "expecttest",
     "numpy",
-    "torchx",
+    "torchx-nightly",
     "lintrunner",
     "lintrunner-adapters",
 ]

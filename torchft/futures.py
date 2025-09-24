@@ -1,4 +1,5 @@
 import asyncio
+import os
 import queue
 import sys
 import threading
@@ -11,7 +12,11 @@ from unittest.mock import Mock
 import torch
 from torch.futures import Future
 
+from torchft.utils import get_stream_context
+
 T = TypeVar("T")
+
+WATCHDOG_TIMEOUT_SEC = "TORCHFT_WATCHDOG_TIMEOUT_SEC"
 
 
 class _TimerHandle:
@@ -59,7 +64,9 @@ class _TimeoutManager:
 
         # Give this much time the the `_event_loop_thread` to confirm that
         # it is not stuck
-        self._watchdog_interval = timedelta(seconds=30)
+        self._watchdog_interval = timedelta(
+            seconds=int(os.environ.get(WATCHDOG_TIMEOUT_SEC, "30"))
+        )
 
         # This queue is used to delete events on the main thread as cudaEventDestroy
         # can block if the CUDA queue is full.
@@ -161,12 +168,14 @@ class _TimeoutManager:
             handle,
         )
 
-        stream: Optional[torch.cuda.Stream] = (
-            torch.cuda.current_stream() if torch.cuda.is_available() else None
+        stream: Optional[torch.Stream] = (
+            torch.accelerator.current_stream()
+            if torch.accelerator.is_available()
+            else None
         )
 
         def callback(fut: Future[T]) -> None:
-            with torch.cuda.stream(stream) if stream is not None else nullcontext():
+            with get_stream_context(stream):
                 handle.cancel()
                 try:
                     timed_fut.set_result(fut.wait())
@@ -186,7 +195,7 @@ class _TimeoutManager:
 
         loop = self._maybe_start_event_loop()
 
-        event: torch.cuda.Event = torch.cuda.Event()
+        event: torch.Event = torch.Event()
         event.record()
 
         def handler() -> None:

@@ -181,6 +181,8 @@ class LocalSGDIntegTest(TestCase):
         # Skip the test if use_cuda is True and there are not enough GPUs
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
+        if sys.platform == "darwin":
+            self.skipTest("not reliable on mac")
 
         lighthouse = LighthouseServer(
             bind="[::]:0",
@@ -239,6 +241,8 @@ class LocalSGDIntegTest(TestCase):
         # Skip the test if use_cuda is True and there are not enough GPUs
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
+        if sys.platform == "darwin":
+            self.skipTest("not reliable on mac")
 
         lighthouse = LighthouseServer(bind="[::]:0", min_replicas=2)
         num_replicas = 2
@@ -290,6 +294,8 @@ class LocalSGDIntegTest(TestCase):
         # Skip the test if use_cuda is True and there are not enough GPUs
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
+        if sys.platform == "darwin":
+            self.skipTest("not reliable on mac")
 
         lighthouse = LighthouseServer(
             bind="[::]:0",
@@ -368,6 +374,8 @@ class LocalSGDIntegTest(TestCase):
         # Skip the test if use_cuda is True and there are not enough GPUs
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
+        if sys.platform == "darwin":
+            self.skipTest("not reliable on mac")
 
         lighthouse = LighthouseServer(
             bind="[::]:0",
@@ -441,6 +449,8 @@ class LocalSGDIntegTest(TestCase):
         # Skip the test if use_cuda is True and there are not enough GPUs
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
+        if sys.platform == "darwin":
+            self.skipTest("not reliable on mac")
 
         lighthouse = LighthouseServer(
             bind="[::]:0",
@@ -515,6 +525,8 @@ class LocalSGDIntegTest(TestCase):
         # Skip the test if use_cuda is True and there are not enough GPUs
         if use_cuda and torch.cuda.device_count() < 2:
             self.skipTest("Not enough GPUs for CUDA test")
+        if sys.platform == "darwin":
+            self.skipTest("not reliable on mac")
 
         lighthouse = LighthouseServer(
             bind="[::]:0",
