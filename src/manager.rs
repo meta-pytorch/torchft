@@ -265,6 +265,7 @@ impl Manager {
                     );
                     sleep_time = timeout.as_millis() as u64
                         / (std::cmp::max(self.quorum_retries + 1, 1 as i64)) as u64;
+                    sleep_time = std::cmp::max(100, sleep_time);
                 }
                 Err(e) => {
                     info_with_replica!(
