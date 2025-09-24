@@ -252,7 +252,7 @@ impl Manager {
 
             let result = tokio::time::timeout(timeout, client.quorum(request)).await;
 
-            let mut sleep_duration = timeout;
+            let mut sleep_time = 100;
             match result {
                 Ok(Ok(response)) => {
                     return Ok(response);
@@ -263,8 +263,8 @@ impl Manager {
                         "lighthouse quorum failed. error: {}",
                         e.to_string()
                     );
-                    // In general, quorum failure will return immediately,
-                    // but not waiting for the timeout.
+                    sleep_time = timeout.as_millis() as u64
+                        / (std::cmp::max(self.quorum_retries + 1, 1 as i64)) as u64;
                 }
                 Err(e) => {
                     info_with_replica!(
@@ -272,7 +272,6 @@ impl Manager {
                         "lighthouse quorum timeout. error: {}",
                         e.to_string()
                     );
-                    sleep_duration = tokio::time::Duration::from_millis(100);
                 }
             }
 
@@ -283,7 +282,7 @@ impl Manager {
                 )));
             }
 
-            tokio::time::sleep(sleep_duration).await;
+            tokio::time::sleep(Duration::from_millis(sleep_time)).await;
 
             // Reset the client since the lighthouse server might have failed
             // If this also fails, consider increasing `connect_timeout`.
@@ -617,6 +616,10 @@ fn compute_quorum_results(
 mod tests {
     use super::*;
     use crate::lighthouse::{Lighthouse, LighthouseOpt};
+    use crate::torchftpb::lighthouse_service_server::{LighthouseService, LighthouseServiceServer};
+    use crate::torchftpb::LighthouseHeartbeatResponse;
+    use tokio::net::TcpListener;
+    use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
 
     async fn should_commit(group_rank: i64, should_commit: bool) -> Result<ShouldCommitResponse> {
         let mut client = manager_client_new(
@@ -1085,6 +1088,112 @@ mod tests {
 
         let results = compute_quorum_results("replica_0", 0, &quorum, true)?;
         assert_eq!(results.commit_failures, 2);
+
+        Ok(())
+    }
+
+    #[derive(Default)]
+    pub struct MockLighthouse {
+        request_count: Arc<Mutex<usize>>,
+        fail_count: usize,
+    }
+
+    impl MockLighthouse {
+        pub fn new(fail_count: usize) -> Self {
+            Self {
+                request_count: Arc::new(Mutex::new(0)),
+                fail_count,
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl LighthouseService for MockLighthouse {
+        async fn quorum(
+            &self,
+            request: Request<LighthouseQuorumRequest>,
+        ) -> Result<Response<LighthouseQuorumResponse>, Status> {
+            let mut count = self.request_count.lock().await;
+            *count += 1;
+            let current_count = *count;
+
+            if current_count <= self.fail_count {
+                return Err(Status::internal(format!(
+                    "simulated failure (request {}/{})",
+                    current_count, self.fail_count
+                )));
+            }
+
+            let requester = request.into_inner().requester.unwrap_or_default();
+
+            Ok(Response::new(LighthouseQuorumResponse {
+                quorum: Some(Quorum {
+                    participants: vec![requester],
+                    quorum_id: 1,
+                    created: None,
+                }),
+            }))
+        }
+
+        async fn heartbeat(
+            &self,
+            _request: Request<LighthouseHeartbeatRequest>,
+        ) -> Result<Response<LighthouseHeartbeatResponse>, Status> {
+            Ok(Response::new(LighthouseHeartbeatResponse {}))
+        }
+    }
+
+    pub async fn start_mock_lighthouse(
+        fail_count: usize,
+    ) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("[::]:0").await?;
+        let addr = listener.local_addr()?;
+        let mock_service = LighthouseServiceServer::new(MockLighthouse::new(fail_count));
+        let incoming = TcpListenerStream::new(listener);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(mock_service)
+                .serve_with_incoming(incoming)
+                .await
+                .expect("Mock Lighthouse server failed to start");
+        });
+        Ok(addr)
+    }
+
+    #[tokio::test]
+    async fn test_get_quorum_when_lighthouse_down() -> Result<()> {
+        let addr = start_mock_lighthouse(1).await.unwrap();
+
+        let manager = Manager::new(
+            "rep_id".to_string(),
+            format!("http://{}", addr.to_string()),
+            "localhost".to_string(),
+            "[::]:0".to_string(),
+            "store_addr".to_string(),
+            1,
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+            1,
+        )
+        .await?;
+        let manager_fut = tokio::spawn(manager.clone().run());
+
+        let mut client = manager_client_new(manager.address(), Duration::from_secs(3)).await?;
+
+        let mut request = tonic::Request::new(ManagerQuorumRequest {
+            group_rank: 0,
+            step: 123,
+            checkpoint_metadata: "addr".to_string(),
+            shrink_only: false,
+            init_sync: true,
+            commit_failures: 3,
+        });
+        request.set_timeout(Duration::from_secs(3));
+        let resp = client.quorum(request).await?.into_inner();
+
+        manager_fut.abort();
+
+        assert_eq!(resp.quorum_id, 1);
 
         Ok(())
     }
