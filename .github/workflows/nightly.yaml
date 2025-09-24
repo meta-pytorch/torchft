@@ -4,6 +4,8 @@ on:
   # run every day at 11:15am
   schedule:
     - cron:  '15 11 * * *'
+  # allow manual triggering
+  workflow_dispatch:
 
 jobs:
   nightly:
