@@ -1146,7 +1146,7 @@ mod tests {
 
     pub async fn start_mock_lighthouse(
         fail_count: usize,
-    ) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("[::]:0").await?;
         let addr = listener.local_addr()?;
         let mock_service = LighthouseServiceServer::new(MockLighthouse::new(fail_count));
@@ -1158,7 +1158,11 @@ mod tests {
                 .await
                 .expect("Mock Lighthouse server failed to start");
         });
-        Ok(addr)
+        Ok(format!(
+            "http://{}:{}",
+            gethostname::gethostname().into_string().unwrap(),
+            addr.port()
+        ))
     }
 
     #[tokio::test]
@@ -1167,7 +1171,7 @@ mod tests {
 
         let manager = Manager::new(
             "rep_id".to_string(),
-            format!("http://{}", addr.to_string()),
+            addr,
             "localhost".to_string(),
             "[::]:0".to_string(),
             "store_addr".to_string(),
