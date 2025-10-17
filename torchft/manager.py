@@ -1253,14 +1253,19 @@ class _ManagedWork(dist._Work):
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
         self._assert_same_stream()
 
-        with get_stream_context(self._stream):
-            self._work.wait()
-            self._set_future_callback()
+        try:
+            with get_stream_context(self._stream):
+                self._work.wait()
+                self._set_future_callback()
 
-        with get_stream_context(self._stream):
-            self._managed_fut_tail.wait()
+            with get_stream_context(self._stream):
+                self._managed_fut_tail.wait()
 
-        return True
+            return True
+        except Exception as e:
+            self._manager._logger.exception(f"got exception waiting for work {e}")
+            self._manager.report_error(e)
+            return False
 
     def block_current_stream(self, timeout: Optional[timedelta] = None) -> None:
         self._assert_same_stream()
