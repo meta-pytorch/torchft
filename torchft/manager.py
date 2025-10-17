@@ -88,6 +88,8 @@ CONNECT_TIMEOUT_SEC_ENV: str = "TORCHFT_CONNECT_TIMEOUT_SEC"
 # crash if call to quorum fails, all replicas will crash.
 QUORUM_RETRIES_ENV: str = "TORCHFT_QUORUM_RETRIES"
 
+TORCH_FR_DUMP_TEMP_FILE_ENV: str = "TORCH_FR_DUMP_TEMP_FILE"
+
 T = TypeVar("T")
 
 
@@ -107,6 +109,17 @@ def get_timeout(
         return timedelta(seconds=int(timeout_sec_env))
 
     return default_timeout_sec
+
+
+def extract_trailing_digits(s: str) -> int:
+    """
+    Extracts the trailing digits from the end of the string s.
+    Returns an empty string if no trailing digits are found.
+    """
+    i = len(s) - 1
+    while i >= 0 and s[i].isdigit():
+        i -= 1
+    return int(s[i + 1 :]) if i < len(s) - 1 else 0
 
 
 class WorldSizeMode(Enum):
@@ -223,6 +236,9 @@ class Manager:
         self._load_state_dict_fns: Dict[str, Callable[[object], None]] = {}
         self._user_state_dicts: Dict[str, Callable[[], object]] = {}
 
+        self._original_fr_dump_temp_file: Optional[str] = os.environ.get(
+            TORCH_FR_DUMP_TEMP_FILE_ENV
+        )
         self._replica_id = replica_id
 
         # Protects state dict
@@ -257,7 +273,7 @@ class Manager:
         store_port = store_port or int(os.environ["MASTER_PORT"])
         self._group_rank: int = rank if rank is not None else int(os.environ["RANK"])
         group_rank = self._group_rank
-        group_world_size = world_size or int(os.environ["WORLD_SIZE"])
+        self._group_world_size: int = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
 
         if checkpoint_transport is None:
@@ -310,7 +326,7 @@ class Manager:
                 hostname=hostname,
                 bind=bind,
                 store_addr=f"{store_addr}:{store_port}",
-                world_size=group_world_size,
+                world_size=self._group_world_size,
                 heartbeat_interval=heartbeat_interval,
                 connect_timeout=connect_timeout,
                 quorum_retries=self._quorum_retries,
@@ -337,6 +353,8 @@ class Manager:
         self._participating_replica_rank: Optional[int] = None
         self._participating_replica_world_size: int = 0
         self._is_state_dict_read_allowed = True
+
+        self._update_fr_path()
 
     def allow_state_dict_read(self) -> None:
         if self._is_state_dict_read_allowed:
@@ -674,16 +692,21 @@ class Manager:
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
             try:
+                self._quorum_id = quorum_id
                 with torch.profiler.record_function("torchft::manager::_pg::configure"):
+                    # Reset GPU state for Flight Recorder
                     if torch.accelerator.is_available():
                         torch.accelerator.synchronize()
+                    torch._C._distributed_c10d._reset_fr_recording_nccl()  # pyre-ignore
+                    self._update_fr_path()
+
                     self._pg.configure(
                         store_prefixed_addr,
                         self._replica_id if self._replica_id is not None else "0",
                         replica_rank,
                         replica_world_size,
+                        quorum_id,
                     )
-                self._quorum_id = quorum_id
             except Exception as e:
                 self._logger.exception(f"got exception in pg configure: {e}")
                 self.report_error(e)
@@ -757,6 +780,21 @@ class Manager:
                     if recovery_stream is not None
                     else None
                 )
+
+    def _update_fr_path(self) -> None:
+        if self._original_fr_dump_temp_file is not None:
+            folder = f"{self._original_fr_dump_temp_file}_quorum_{self._quorum_id}"
+            os.makedirs(folder, exist_ok=True)
+
+            filename = (
+                self._group_rank
+                if self._replica_id is None
+                else (
+                    extract_trailing_digits(self._replica_id) * self._group_world_size
+                    + self._group_rank
+                )
+            )
+            os.environ[TORCH_FR_DUMP_TEMP_FILE_ENV] = f"{folder}/{filename}"
 
     def _apply_pending_state_dict(self) -> None:
         assert self._healing, "must be in healing state"
@@ -1253,14 +1291,19 @@ class _ManagedWork(dist._Work):
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
         self._assert_same_stream()
 
-        with get_stream_context(self._stream):
-            self._work.wait()
-            self._set_future_callback()
+        try:
+            with get_stream_context(self._stream):
+                self._work.wait()
+                self._set_future_callback()
 
-        with get_stream_context(self._stream):
-            self._managed_fut_tail.wait()
+            with get_stream_context(self._stream):
+                self._managed_fut_tail.wait()
 
-        return True
+            return True
+        except Exception as e:
+            self._manager._logger.exception(f"got exception waiting for work {e}")
+            self._manager.report_error(e)
+            return False
 
     def block_current_stream(self, timeout: Optional[timedelta] = None) -> None:
         self._assert_same_stream()

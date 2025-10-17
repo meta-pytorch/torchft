@@ -278,7 +278,12 @@ class ProcessGroup(BaseProcessGroup):
         raise NotImplementedError("not implemented")
 
     def configure(
-        self, store_addr: str, replica_id: str, rank: int, world_size: int
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
     ) -> None:
         """
         This reconfigures the ProcessGroup to use a new store, rank and world size.
@@ -408,6 +413,7 @@ class ProcessGroupWrapper(ProcessGroup):
         self._timeout = timeout
         self._replica_id: str | None = None
         self._rank: int | None = None
+        self._quorum_id: int | None = None
 
         self.errors_logger: logging.Logger = logging.getLogger("torchft_errors")
 
@@ -419,13 +425,19 @@ class ProcessGroupWrapper(ProcessGroup):
         raise NotImplementedError("not implemented")
 
     def configure(
-        self, store_addr: str, replica_id: str, rank: int, world_size: int
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
     ) -> None:
         pg = self._pg
         self._replica_id = replica_id
+        self._quorum_id = quorum_id
         self._rank = rank
         if isinstance(pg, ProcessGroup):
-            pg.configure(store_addr, replica_id, rank, world_size)
+            pg.configure(store_addr, replica_id, rank, world_size, quorum_id)
             return
 
         # abort if already initialized
@@ -443,6 +455,7 @@ class ProcessGroupWrapper(ProcessGroup):
                     "job_id": os.environ.get("JOB_ID", "unknown"),
                     "replica_id": self._replica_id,
                     "rank": self._rank,
+                    "quorum_id": self._quorum_id,
                     "error": "process_group_abort",
                 },
             )
@@ -615,6 +628,8 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         # pyre-fixme[16]: no attribute ProcessGroupGloo
         backend_class = BaseProcessGroupGloo(store, rank, world_size, self._timeout)
         backend_class._set_sequence_number_for_group()
+        backend_class.options.global_ranks_in_group = list(range(world_size))
+        backend_class.options.group_name = f"torchft_quorum_{self._quorum_id}"
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
         )
@@ -813,6 +828,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         opts = BaseProcessGroupNCCL.Options()
         opts.config.blocking = False
         opts.global_ranks_in_group = list(range(world_size))
+        opts.group_name = f"torchft_quorum_{self._quorum_id}"
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
@@ -979,7 +995,12 @@ class ProcessGroupDummy(ProcessGroup):
         self.configure_count = 0
 
     def configure(
-        self, store_addr: str, replica_id: str, rank: int, world_size: int
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
     ) -> None:
         self.configure_count += 1
 
@@ -1138,11 +1159,16 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
         self._error: Optional[Exception] = None
 
     def configure(
-        self, store_addr: str, replica_id: str, rank: int, world_size: int
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
     ) -> None:
         self._error = None
 
-        super().configure(store_addr, replica_id, rank, world_size)
+        super().configure(store_addr, replica_id, rank, world_size, quorum_id)
 
     def report_error(self, e: Exception) -> None:
         """
@@ -1194,11 +1220,16 @@ class FakeProcessGroupWrapper(ProcessGroupWrapper):
         self._future_error: Optional[Exception] = None
 
     def configure(
-        self, store_addr: str, replica_id: str, rank: int, world_size: int
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
     ) -> None:
         self._future_error = None
 
-        super().configure(store_addr, replica_id, rank, world_size)
+        super().configure(store_addr, replica_id, rank, world_size, quorum_id)
 
     def report_future_error(self, e: Exception) -> None:
         """
@@ -1412,7 +1443,12 @@ class ProcessGroupBaby(ProcessGroup):
             self._p.kill()
 
     def configure(
-        self, store_addr: str, replica_id: str, rank: int, world_size: int
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
     ) -> None:
         self._world_size = world_size
 

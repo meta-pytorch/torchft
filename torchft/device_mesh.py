@@ -69,6 +69,7 @@ class ManagedDeviceMesh(DeviceMesh):
         self.replicate_dim_name: str = mesh_dim_names[replicate_dim]
         self.parent = parent
         self.flatten_meshes: Dict[str, DeviceMesh] = {}
+        self._flatten_mapping: Dict[str, "DeviceMesh"] = {}
         self._device_type: str
         if mesh is not None:
             self._device_type = mesh.device_type
