@@ -126,11 +126,11 @@ class FailureController:
                         f"[FailureController] Failure injection ({last_failure}) sent to replica {last_replica.rid}"
                     )
                 except Exception as e:
-                    logger.info(
+                    logger.exception(
                         f"[FailureController] Failed to inject failure in replica {last_replica.rid}: {e}"
                     )
                 await asyncio.sleep(rest_time)
             except Exception as e:
-                logger.info(
+                logger.exception(
                     f"[FailureController] Something went wrong while injecting failure: {e}"
                 )
