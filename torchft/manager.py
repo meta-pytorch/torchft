@@ -387,7 +387,7 @@ class Manager:
         self,
         tensor: torch.Tensor,
         should_quantize: bool = False,
-        reduce_op: ReduceOp = ReduceOp.SUM,
+        reduce_op: ReduceOp = ReduceOp.AVG,
     ) -> Work:
         """
         Fault tolerant allreduce the tensor and return a Future that will be completed when
@@ -416,6 +416,15 @@ class Manager:
         if not self.is_participating():
             tensor.zero_()
 
+        # special logic for average
+        pg_reduce_op = reduce_op
+        if reduce_op == ReduceOp.AVG:
+            if not torch.is_floating_point(tensor):
+                raise ValueError(
+                    "average reduce op is only supported for floating point tensors"
+                )
+            pg_reduce_op = ReduceOp.SUM
+
         # TODO: increase timeout when waiting when healing
         try:
             # Run the allreduce async and save the work object so we can wait on
@@ -423,14 +432,14 @@ class Manager:
             if should_quantize and IS_TRITON_AVAILABLE:
                 work = allreduce_quantized(
                     [tensor],
-                    reduce_op,
+                    pg_reduce_op,
                     self._pg,
                     # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
                     torch.accelerator.current_stream(),
                 )
             else:
                 opts = AllreduceOptions()
-                opts.reduceOp = reduce_op
+                opts.reduceOp = pg_reduce_op
                 work = self._pg.allreduce([tensor], opts)
 
             # schedule grad normalization as a continuation
@@ -440,7 +449,7 @@ class Manager:
                 fut: torch.futures.Future[list[torch.Tensor]],
             ) -> torch.Tensor:
                 nonlocal tensor
-                if reduce_op == ReduceOp.SUM:
+                if reduce_op == ReduceOp.AVG:
                     tensor /= num_participants
                 return tensor
 

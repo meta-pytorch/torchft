@@ -13,7 +13,7 @@ from unittest import TestCase
 from unittest.mock import create_autospec, MagicMock, patch
 
 import torch
-from torch.distributed import TCPStore
+from torch.distributed import ReduceOp, TCPStore
 
 from torchft._torchft import QuorumResult
 from torchft.checkpointing._rwlock import RWLock
@@ -590,10 +590,28 @@ class TestManager(TestCase):
         manager._pg.allreduce.return_value = _DummyWork(None)
 
         self.assertTrue(manager.is_participating())
-        tensor = torch.tensor([1.0])
-        work = manager.allreduce(tensor)
-        work.wait()
-        torch.testing.assert_close(tensor, torch.tensor([1.0 / 5]))
+
+        for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.long):
+            orig = torch.tensor([10], dtype=dtype)
+
+            if torch.is_floating_point(orig):
+                tensor = orig.clone()
+                manager.allreduce(tensor).wait()
+                torch.testing.assert_close(tensor, orig / 5)
+
+                tensor = orig.clone()
+                manager.allreduce(tensor, reduce_op=ReduceOp.AVG).wait()
+                torch.testing.assert_close(tensor, orig / 5)
+
+            for reduce_op in [
+                ReduceOp.SUM,
+                ReduceOp.MAX,
+                ReduceOp.MIN,
+                ReduceOp.PRODUCT,
+            ]:
+                tensor = orig.clone()
+                manager.allreduce(tensor, reduce_op=reduce_op).wait()
+                torch.testing.assert_close(tensor, orig)
 
         # check healing numerics
         manager._healing = True
