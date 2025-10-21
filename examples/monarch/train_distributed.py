@@ -14,12 +14,8 @@ from dataclasses import dataclass
 from typing import Dict
 
 import torch
-from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
-from monarch._src.actor.allocator import RemoteAllocator, TorchXRemoteAllocInitializer
-from monarch.actor import Actor, current_rank, endpoint, ProcMesh, this_host
-from monarch.tools import commands
-from monarch.tools.components import hyperactor
-from monarch.tools.config import Config
+from monarch.actor import Actor, current_rank, endpoint, HostMesh, ProcMesh, this_host
+from monarch.job import SlurmJob
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
@@ -27,35 +23,24 @@ from torchtitan.train import Trainer
 from utils.failure import Failure, FailureActor, FailureController
 
 
-# ==== Allocation boilerplate - much of this will be upstreamed into Monarch ====
+# ==== Allocation boilerplate ====
 class MonarchSlurm:
-    # Cluster Configuration - update these values for your specific cluster
-    machine: str = "gpu.xlarge"
-    machine_memory: int = 2062607
     job_name_prefix: str = "monarch-torchft"
 
     def __init__(self):
-        self.job_handles: Dict[str, str] = {}
+        self.job_handles: Dict[str, SlurmJob] = {}
         atexit.register(self.kill_jobs)
 
-    def get_config(self, mesh_name: str, nodes_per_mesh: int) -> Config:
-        mesh = [f"{mesh_name}:{nodes_per_mesh}:{MonarchSlurm.machine}"]
-        # to enable relative import of utils on actors
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        env = {"PYTHONPATH": current_dir}
-
-        appdef = hyperactor.host_mesh(meshes=mesh, env=env)
-
-        for role in appdef.roles:
-            role.resource.memMB = MonarchSlurm.machine_memory
-
-        return Config(scheduler="slurm", appdef=appdef)
-
-    async def get_or_create_job(self, mesh_name: str, nodes_per_mesh: int = 1) -> None:
-        config = self.get_config(mesh_name, nodes_per_mesh)
-        job_name = f"{MonarchSlurm.job_name_prefix}-{mesh_name}"
-        server_spec = await commands.get_or_create(job_name, config, force_restart=True)
-        self.job_handles[mesh_name] = server_spec.name
+    async def get_or_create_job(
+        self, mesh_name: str, nodes_per_mesh: int = 1, gpus_per_node: int = 8
+    ) -> None:
+        job = SlurmJob(
+            meshes={mesh_name: nodes_per_mesh},
+            gpus_per_node=gpus_per_node,
+            job_name=f"{self.job_name_prefix}-{mesh_name}",
+        )
+        job.apply()
+        self.job_handles[mesh_name] = job
 
     def kill_jobs(self):
         for mesh_name in self.job_handles.keys():
@@ -63,29 +48,17 @@ class MonarchSlurm:
 
     def kill_job(self, mesh_name: str):
         try:
-            job_handle = self.job_handles[mesh_name]
+            job = self.job_handles[mesh_name]
             logger.info(f"Destroying job for mesh {mesh_name}")
-            commands.kill(f"slurm:///{job_handle}")
+            job.kill()
         except Exception as e:
-            logger.warning(f"Failed to destroy job for {mesh_name}: {e}")
+            logger.exception(f"Failed to destroy job for {mesh_name}: {e}")
 
-    def proc_mesh(
-        self,
-        mesh_name: str,
-        num_hosts: int = 1,
-        num_gpus: int = 8,
-    ) -> ProcMesh:
-        allocator = RemoteAllocator(
-            world_id=MonarchSlurm.job_name_prefix,
-            initializer=TorchXRemoteAllocInitializer(
-                f"slurm:///{self.job_handles[mesh_name]}"
-            ),
-        )
-        alloc = allocator.allocate(
-            AllocSpec(AllocConstraints(), hosts=num_hosts, gpus=num_gpus)
-        )
-
-        return ProcMesh.from_alloc(alloc)
+    def proc_mesh(self, mesh_name: str, num_procs: int) -> ProcMesh:
+        job = self.job_handles[mesh_name]
+        mesh: HostMesh = getattr(job.state(cached_path=None), mesh_name)
+        proc_mesh = mesh.spawn_procs({"gpus": num_procs})
+        return proc_mesh
 
 
 # ==== allocation boilerplate ====
@@ -177,13 +150,12 @@ class ReplicaActor(Actor):
         init_logger()
         logger.info(f"{self.uid} Spawning trainers")
 
-        trainers_proc_mesh: ProcMesh | None = None
-        try:
-            trainers_proc_mesh = self.scheduler.proc_mesh(
-                f"replica_{self.replica_id}",
-                self.spec.hosts_per_replica,
-                self.spec.gpus_per_node,
-            )
+        trainers_proc_mesh = self.scheduler.proc_mesh(
+            f"replica_{self.replica_id}",
+            num_procs=self.spec.gpus_per_node,
+        )
+
+        async with trainers_proc_mesh:
             await trainers_proc_mesh.logging_option(stream_to_client=True)
             await setup_env_for_distributed(trainers_proc_mesh)
 
@@ -200,11 +172,6 @@ class ReplicaActor(Actor):
 
             logger.info(f"{self.uid} Starting trainers")
             await training_actors.start_training.call(self.spec.lighthouse_address)
-            await trainers_proc_mesh.stop()
-        except Exception as e:
-            if trainers_proc_mesh:
-                await trainers_proc_mesh.stop()
-            raise e
 
     @endpoint
     async def inject_failure(self, failure_type: Failure):
@@ -216,8 +183,7 @@ class ReplicaActor(Actor):
 
                 await self.failure_actors.fail.choose(failure_type)
             except Exception as e:
-                error_msg = f"{self.uid} Injected failure: {e}"
-                logger.error(error_msg)
+                logger.exception(f"{self.uid} Injected failure: {e}")
         else:
             error_msg = f"{self.uid} No failure actors available"
             logger.error(error_msg)
@@ -268,7 +234,7 @@ class OrchestrationManager:
     async def start_lighthouse(self) -> None:
         if self.spec.remote_lighthouse:
             await self.scheduler.get_or_create_job("lighthouse")
-            self.lighthouse_mesh = self.scheduler.proc_mesh("lighthouse", num_gpus=1)
+            self.lighthouse_mesh = self.scheduler.proc_mesh("lighthouse", num_procs=1)
         else:
             self.lighthouse_mesh = this_host().spawn_procs({"gpus": 1})
 
@@ -287,7 +253,7 @@ class OrchestrationManager:
                 await self.lighthouse_mesh.stop()
             logger.info("[Controller] Lighthouse stopped")
         except Exception as e:
-            logger.warning(f"[Controller] Failed to stop lighthouse: {e}")
+            logger.exception(f"[Controller] Failed to stop lighthouse: {e}")
 
     async def _run_replica(self, replica_id: int, attempt_number: int) -> None:
         if attempt_number >= MAX_ATTEMPT:
@@ -300,7 +266,7 @@ class OrchestrationManager:
             await self._teardown(replica_id)
         except Exception as e:
             await self._teardown(replica_id)
-            logger.info(f"[Controller] replica {replica_id} failed: {e}")
+            logger.exception(f"[Controller] replica {replica_id} failed: {e}")
             await self._run_replica(replica_id, attempt_number + 1)
 
     async def _spin_up_replica(self, replica_id: int, attempt_number: int = 0) -> None:
@@ -332,11 +298,18 @@ class OrchestrationManager:
     async def _teardown(self, replica_id: int) -> None:
         try:
             replica = self.replicas[replica_id]
-            await replica.proc_mesh.stop()
+            try:
+                await replica.proc_mesh.stop()
+            except Exception as e:
+                logger.exception(
+                    f"[Controller] Failed to stop replica {replica_id}, it may already be stopped. {e}"
+                )
             del self.replicas[replica_id]
             del replica.proc_mesh
         except Exception as e:
-            logger.error(f"[Controller] Failed to _teardown replica {replica_id}: {e}")
+            logger.exception(
+                f"[Controller] Failed to teardown replica {replica_id}: {e}"
+            )
 
 
 # === CLI / CONFIG === #
