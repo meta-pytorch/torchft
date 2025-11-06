@@ -1,6 +1,6 @@
 # pytorch_sphinx_theme2 recommended
 sphinx==5.3.0
--e git+https://github.com/pytorch/pytorch_sphinx_theme.git@pytorch_sphinx_theme2#egg=pytorch_sphinx_theme2
+pytorch_sphinx_theme2==0.2.0
 sphinxcontrib.katex==0.8.6
 sphinxext-opengraph==0.9.1
 #breathe==4.34.0  # only if generating C++
