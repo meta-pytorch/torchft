@@ -45,7 +45,6 @@ import torch.multiprocessing as mp
 
 # pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
-    DeviceMesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
@@ -67,7 +66,6 @@ from torch.futures import Future
 from torch.utils._pytree import tree_any
 
 # We import these for backwards compatibility
-from torchft.device_mesh import *  # noqa: F401
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
 from torchft.utils import get_stream_context, record_event, synchronize

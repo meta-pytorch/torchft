@@ -1,15 +1,13 @@
 import copy
 import logging
 import os
-from contextlib import ExitStack
 from datetime import timedelta
-from typing import Any, cast, Dict, List
+from typing import Any, Dict
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DeviceMesh, DTensor
 
-from torchft.device_mesh import ft_init_device_mesh, ManagedDeviceMesh
 from torchft.local_sgd import DiLoCo
 from torchft.manager import Manager
 from torchft.manager_integ_test import MyModel, Runner
@@ -113,7 +111,7 @@ class DiLoCoTrainer:
 
         self.manager: Manager = self.setup_manager()
 
-        self.ft_device_mesh: None | ManagedDeviceMesh = None
+        self.device_mesh: None | DeviceMesh = None
         self.setup_distributed()
 
         self.criterion: nn.CrossEntropyLoss = nn.CrossEntropyLoss()
@@ -197,12 +195,9 @@ class DiLoCoTrainer:
                 os.environ["WORLD_SIZE"] = str(self.runner.world_size)
                 os.environ["RANK"] = str(self.rank)
 
-        self.ft_device_mesh = ft_init_device_mesh(
-            device_type=self.device.type,
-            mesh_shape=(self.runner.world_size, 1),
-            mesh_dim_names=("replicate", "none"),
-            replicate_dim=0,
-            manager=self.manager,
+        self.device_mesh = DeviceMesh(
+            self.device.type,
+            torch.arange(self.runner.world_size),
         )
 
         # Convert model parameters to DTensor
@@ -211,7 +206,7 @@ class DiLoCoTrainer:
                 for param in layer.parameters():
                     param = DTensor.from_local(
                         param,
-                        device_mesh=self.ft_device_mesh,
+                        device_mesh=self.device_mesh,
                     )
 
     def load_state_dict(self, state_dict: Dict[str, Dict[str, object]]) -> None:

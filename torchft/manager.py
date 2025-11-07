@@ -446,7 +446,7 @@ class Manager:
             # on the Future
             @torch.profiler.record_function("torchft::manager::allreduce::callback")
             def callback(
-                fut: torch.futures.Future[list[torch.Tensor]],
+                fut: torch.futures.Future[torch.Tensor],
             ) -> torch.Tensor:
                 nonlocal tensor
                 if reduce_op == ReduceOp.AVG:
@@ -455,6 +455,7 @@ class Manager:
 
             managed_work = _ManagedWork(self, work, tensor)
             fut = managed_work.get_future()
+            fut = cast(torch.futures.Future[torch.Tensor], fut)
             fut = fut.then(callback)
             return managed_work
 
