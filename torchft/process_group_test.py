@@ -34,14 +34,10 @@ from torch.distributed import (
     ReduceOp,
     TCPStore,
 )
-from torch.distributed.device_mesh import init_device_mesh
-
 from torchft.manager import Manager
 from torchft.process_group import (
     _ErrorSwallowingWork,
     ErrorSwallowingProcessGroupWrapper,
-    extend_device_mesh,
-    ft_init_device_mesh,
     ManagedProcessGroup,
     ProcessGroup,
     ProcessGroupBabyGloo,
@@ -729,29 +725,6 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
-    def test_device_mesh(self) -> None:
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = str(0)
-        os.environ["RANK"] = str(0)
-        os.environ["WORLD_SIZE"] = str(1)
-
-        mesh_1d = init_device_mesh("cpu", mesh_shape=(1,), mesh_dim_names=("tp",))
-
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
-        pg = ProcessGroupGloo()
-        pg.register("test_device_mesh")
-        pg.configure(store_addr, "0", 0, 1)
-
-        mesh_2d = extend_device_mesh(mesh_1d, pg)
-        mesh_2d.get_group("dp")
-        assert mesh_2d.ndim == 2
-
-        pg.unregister()
-
     def test_functional_collectives(self) -> None:
         dummy_init_pg()
 
@@ -811,53 +784,6 @@ class ProcessGroupTest(TestCase):
         works = _test_pg(pg)
 
         self.assertEqual(manager.allreduce.call_count, 2)
-
-
-class DeviceMeshTest(TestCase):
-    @staticmethod
-    def _test_init_device_mesh(world_size: int, rank: int) -> None:
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(12346)
-        os.environ["RANK"] = str(rank)
-        os.environ["WORLD_SIZE"] = str(4)
-
-        testcase = TestCase()
-
-        manager = Mock(spec=Manager)
-        # Even though we only have 4 workers, we can still initialize (2, 4) mesh.
-        # That's because the replicate group is NOT phystically created in the
-        # real mesh but is virtually added to the mesh via ManagedDeviceMesh.
-        device_mesh = ft_init_device_mesh(
-            device_type="cpu",
-            mesh_shape=(2, world_size),
-            mesh_dim_names=("dp_replicate", "dp_shard"),
-            replicate_dim=0,
-            manager=manager,
-        )
-
-        testcase.assertTrue(
-            isinstance(device_mesh.get_group("dp_replicate"), ManagedProcessGroup)
-        )
-        testcase.assertTrue(
-            not isinstance(device_mesh.get_group("dp_shard"), ManagedProcessGroup)
-        )
-        replicate_group = device_mesh.get_group("dp_replicate")
-        testcase.assertEqual(
-            cast(ManagedProcessGroup, replicate_group)._manager, manager
-        )
-        replicate_mesh = device_mesh["dp_replicate"]
-        testcase.assertEqual(replicate_mesh.get_group(), replicate_group)
-        flatten_mesh = device_mesh._flatten("dp")
-        manager.num_participants.return_value = 1
-        testcase.assertEqual(flatten_mesh.size(), world_size)
-        testcase.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
-
-    def test_init_device_mesh(self) -> None:
-        with ProcessPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for i in range(4):
-                future = executor.submit(self._test_init_device_mesh, 4, i)
-                futures.append(future)
 
 
 class MultiPgBaseTest(TestCase):
