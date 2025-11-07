@@ -20,7 +20,6 @@ from torch.distributed.tensor import DTensor, Replicate
 
 from torchft._test.diloco_trainer import DiLoCoTrainer, MultiMyModel
 from torchft._torchft import LighthouseServer
-from torchft.device_mesh import ft_init_device_mesh
 from torchft.local_sgd import DiLoCo, LocalSGD
 from torchft.manager import Manager
 from torchft.manager_integ_test import (

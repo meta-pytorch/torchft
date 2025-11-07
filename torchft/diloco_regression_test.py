@@ -18,7 +18,6 @@ from torch import nn, optim
 
 from torchft._test.diloco_trainer import DiLoCoTrainer, MultiModel
 from torchft._torchft import LighthouseServer
-from torchft.device_mesh import ft_init_device_mesh
 from torchft.local_sgd import DiLoCo
 from torchft.manager import Manager
 from torchft.manager_integ_test import EventInjector, EventInjectorEvent, Runner
