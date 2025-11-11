@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchft.comms import TorchCommGloo, TorchCommNCCL
 from torchft.data import DistributedSampler
 from torchft.ddp import DistributedDataParallel
 from torchft.manager import Manager
@@ -31,4 +32,6 @@ __all__ = (
     "ProcessGroupBabyNCCL",
     "ProcessGroupBabyXCCL",
     "ProcessGroupGloo",
+    "TorchCommNCCL",
+    "TorchCommGloo",
 )

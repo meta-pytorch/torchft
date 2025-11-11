@@ -41,10 +41,10 @@ jobs:
 
         # Optionally install torch nightly, pulls latest CUDA from pip otherwise
         if [ "${{ matrix.torch-version }}" = "nightly" ]; then
-          pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+          pip install --pre torch torchvision torchaudio torchcomms --index-url https://download.pytorch.org/whl/nightly/cu128
         fi
         if [ "${{ matrix.torch-version }}" = "test" ]; then
-          pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
+          pip install --pre torch torchvision torchaudio torchcomms --index-url https://download.pytorch.org/whl/test/cu128
         fi
 
         # Install dependencies
