@@ -42,6 +42,7 @@ from typing import (
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torchcomms
 
 # pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
@@ -167,7 +168,7 @@ class ProcessGroup(BaseProcessGroup):
     def allreduce(
         self,
         tensors: List[torch.Tensor],
-        opts: Union[AllreduceOptions, ReduceOp],
+        opts: Union[AllreduceOptions, ReduceOp, torchcomms.ReduceOp],
     ) -> Work:
         """
         Reduces the tensor data across all machines in such a way that all get the final result.
@@ -555,7 +556,9 @@ class ProcessGroupWrapper(ProcessGroup):
             )
 
     def allreduce_coalesced(
-        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+        self,
+        tensors: List[torch.Tensor],
+        opts: Union[AllreduceOptions, ReduceOp, torchcomms.ReduceOp],
     ) -> Work:
         with self._run_context():
             return self._wrap_work(
@@ -1068,7 +1071,9 @@ class ProcessGroupDummy(ProcessGroup):
         return res
 
     def allreduce_coalesced(
-        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+        self,
+        tensors: List[torch.Tensor],
+        opts: Union[AllreduceOptions, ReduceOp, torchcomms.ReduceOp],
     ) -> Work:
         res = _DummyWork(tensors)
         self._work.append(res)
@@ -1331,6 +1336,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
     """
 
     def __init__(self, manager: "Manager") -> None:
+        assert isinstance(manager._pg, ProcessGroup)
         super().__init__(pg=manager._pg)
 
         self._manager = manager
@@ -1350,6 +1356,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
         return self._manager.num_participants()
 
     def getBackendName(self) -> str:
+        assert isinstance(self._manager._pg, ProcessGroup)
         return self._manager._pg.getBackendName()
 
 
@@ -1827,7 +1834,7 @@ class ProcessGroupBaby(ProcessGroup):
     def allreduce(
         self,
         tensors: List[torch.Tensor],
-        opts: Union[dist.AllreduceOptions, dist.ReduceOp],
+        opts: Union[AllreduceOptions, ReduceOp, torchcomms.ReduceOp],
     ) -> Work:
         _assert_list(tensors)
         _maybe_share_tensors(tensors)

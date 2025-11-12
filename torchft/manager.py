@@ -57,6 +57,7 @@ from torch.distributed.distributed_c10d import AllreduceOptions, ReduceOp, Work
 from torchft._torchft import ManagerClient, ManagerServer
 from torchft.checkpointing import CheckpointTransport, HTTPTransport
 from torchft.checkpointing._rwlock import RWLock
+from torchft.comms import TorchComm
 from torchft.futures import future_timeout
 from torchft.utils import get_stream_context, synchronize
 from torchft.work import _DummyWork
@@ -163,7 +164,7 @@ class Manager:
 
     def __init__(
         self,
-        pg: "ProcessGroup",
+        pg: Union["ProcessGroup", TorchComm],
         load_state_dict: Optional[Callable[[T], None]],
         state_dict: Optional[Callable[[], T]],
         min_replica_size: int,
@@ -188,6 +189,7 @@ class Manager:
     ) -> None:
         """
         Args:
+            pg: process group or torchcomms wrapper to use for communication.
             load_state_dict: function to load the state dict when recovering
             state_dict: function to save the state dict with recovering
             min_replica_size: minimum number of replicas on each step
@@ -221,7 +223,7 @@ class Manager:
             replica_id: if rank==0, the replica_id for this group
             hostname: if rank==0, the hostname to advertise to the lighthouse server
             checkpoint_transport: the checkpoint transport to use for
-                transfering checkpoints to recovering replicas, defaults to HTTPTransport
+                transferring checkpoints to recovering replicas, defaults to HTTPTransport
             init_sync: whether to synchronize the model weights on step 0. If
                 all of the model weights are initialized identically via
                 ``torch.set_seed`` you should set this to False.
@@ -456,7 +458,9 @@ class Manager:
         try:
             # Run the allreduce async and save the work object so we can wait on
             # it later.
+            # TODO: Support quantization with torchcomms
             if should_quantize and IS_TRITON_AVAILABLE:
+                assert isinstance(self._pg, ProcessGroup)
                 work = allreduce_quantized(
                     [tensor],
                     pg_reduce_op,
@@ -473,16 +477,16 @@ class Manager:
             # on the Future
             @torch.profiler.record_function("torchft::manager::allreduce::callback")
             def callback(
-                fut: torch.futures.Future[torch.Tensor],
+                fut: torch.futures.Future[list[torch.Tensor]],
             ) -> torch.Tensor:
                 nonlocal tensor
                 if reduce_op == ReduceOp.AVG:
                     tensor /= num_participants
                 return tensor
 
-            managed_work = _ManagedWork(self, work, tensor)
+            managed_work = _ManagedWork(self, work, [tensor])
             fut = managed_work.get_future()
-            fut = cast(torch.futures.Future[torch.Tensor], fut)
+            fut = cast(torch.futures.Future[list[torch.Tensor]], fut)
             fut = fut.then(callback)
             return managed_work
 
@@ -1223,13 +1227,13 @@ class _ManagedWork(dist._Work):
     ) -> None:
         super().__init__()
         # Underlying `Work` retruned from process group operations
-        self._work = work
+        self._work: dist._Work = work
 
         # Used to report errors to the manager through `wrap_future()`
-        self._manager = manager
+        self._manager: Manager = manager
 
         # The value returned by the final future in the callback chain
-        self._value = value
+        self._value: object = value
 
         # The head of the callback chain
         self._managed_fut_head = _ManagedFuture[object](weakref.ref(self))
