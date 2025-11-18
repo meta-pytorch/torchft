@@ -41,6 +41,7 @@ TOTAL_BATCH_SIZE = BATCH_SIZE * 6
 CHECKPOINT_ENABLED = True
 CHECKPOINT_PATH = "./tmp/train_ddp2_checkpoint/ckpt"
 
+
 def save_model(m, optimizer, manager):
     state_dict_to_save = {
         "model": m.state_dict(),
@@ -64,6 +65,7 @@ def save_model(m, optimizer, manager):
             except ValueError:
                 continue
 
+
 def load_model(m, optimizer, manager):
     if os.path.exists(f"{CHECKPOINT_PATH}_latest"):
         with open(f"{CHECKPOINT_PATH}_latest", "r") as f:
@@ -73,6 +75,7 @@ def load_model(m, optimizer, manager):
         m.load_state_dict(loaded_state_dict["model"])
         optimizer.load_state_dict(loaded_state_dict["optim"])
         manager.load_state_dict(loaded_state_dict["torchft"])
+
 
 @record
 def main() -> None:
@@ -129,9 +132,13 @@ def main() -> None:
         )
 
         # drop_last to ensure all replicas have the same number of batches
-        dataloader = DataLoader(trainset, batch_size=BATCH_SIZE,
-                                num_workers=0, sampler=sampler,
-                                drop_last=True)
+        dataloader = DataLoader(
+            trainset,
+            batch_size=BATCH_SIZE,
+            num_workers=0,
+            sampler=sampler,
+            drop_last=True,
+        )
         return dataloader
 
     manager = Manager(
@@ -142,7 +149,7 @@ def main() -> None:
         replica_id=f"train_ddp_{REPLICA_GROUP_ID}",
         timeout=timedelta(seconds=30),
         checkpoint_transport=transport,
-        dataloader_fn=dataloader_fn
+        dataloader_fn=dataloader_fn,
     )
 
     class Net(nn.Module):
@@ -190,10 +197,13 @@ def main() -> None:
     num_params = sum(p.numel() for p in m.parameters())
     print(f"Total number of parameters: {num_params}")
 
-    loss_writer = SummaryWriter(log_dir='./tmp/loss_train_ddp2')
+    loss_writer = SummaryWriter(log_dir="./tmp/loss_train_ddp2")
     for epoch in range(NUM_EPOCHS):
-        while (batches := manager.get_batch_samples(epoch=epoch,
-                batch_size=BATCH_SIZE, total_batch_size=TOTAL_BATCH_SIZE)) is not None:
+        while (
+            batches := manager.get_batch_samples(
+                epoch=epoch, batch_size=BATCH_SIZE, total_batch_size=TOTAL_BATCH_SIZE
+            )
+        ) is not None:
             optimizer.zero_grad()
             total_loss = 0.0
             for inputs, labels in batches:
@@ -214,24 +224,25 @@ def main() -> None:
             manager.allreduce(loss_tensor).wait()
             avg_loss = loss_tensor.item()
             if manager.participating_rank() == 0:
-                loss_writer.add_scalar('Training Loss', avg_loss, global_step=manager.batches_committed())
+                loss_writer.add_scalar(
+                    "Training Loss", avg_loss, global_step=manager.batches_committed()
+                )
                 if manager.current_step() % 100 == 0:
-                    print(f"Epoch {epoch + 1}, step = {manager.current_step()}, batch_committed {manager.batches_committed()}, Loss: {avg_loss:.4f}")
-            if CHECKPOINT_ENABLED and manager.current_step() % 200 == 0 and manager.participating_rank() == 0:
+                    print(
+                        f"Epoch {epoch + 1}, step = {manager.current_step()}, batch_committed {manager.batches_committed()}, Loss: {avg_loss:.4f}"
+                    )
+            if (
+                CHECKPOINT_ENABLED
+                and manager.current_step() % 200 == 0
+                and manager.participating_rank() == 0
+            ):
                 save_model(m, optimizer, manager)
-        print(f"Epoch {epoch + 1} completed, batches_committed {manager.batches_committed()}.")
+        print(
+            f"Epoch {epoch + 1} completed, batches_committed {manager.batches_committed()}."
+        )
         manager.next_epoch()
     loss_writer.close()
 
+
 if __name__ == "__main__":
     main()
-
-
-# 1 启动 torchft lighthouse
-# RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000
-
-# 2 启动任务
-## cd /work/zhengchenyu/ml-examples/
-## NCCL_HOSTID=0 RUST_LOG=INFO NCCL_SOCKET_IFNAME=eth0 CUDA_VISIBLE_DEVICES=0 TORCHFT_LIGHTHOUSE=http://localhost:29510 REPLICA_GROUP_ID=0 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 pytorch_tutorials/torchft/train_ddp2.py
-## NCCL_HOSTID=1 RUST_LOG=INFO NCCL_SOCKET_IFNAME=eth0 CUDA_VISIBLE_DEVICES=1 TORCHFT_LIGHTHOUSE=http://localhost:29510 REPLICA_GROUP_ID=1 torchrun --master_port 29502 --nnodes 1 --nproc_per_node 1 pytorch_tutorials/torchft/train_ddp2.py
-## NCCL_HOSTID=2 RUST_LOG=INFO NCCL_SOCKET_IFNAME=eth0 CUDA_VISIBLE_DEVICES=2 TORCHFT_LIGHTHOUSE=http://localhost:29510 REPLICA_GROUP_ID=2 torchrun --master_port 29503 --nnodes 1 --nproc_per_node 1 pytorch_tutorials/torchft/train_ddp2.py

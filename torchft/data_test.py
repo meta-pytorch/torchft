@@ -46,11 +46,18 @@ class TestData(TestCase):
         for drop_last in [True, False]:
             num_replicas = 7
             for rank in range(num_replicas):
-                sampler = SkipDistributedSampler(dataset=dataset, num_replicas=num_replicas,
-                                                 rank=rank, shuffle=False, drop_last=drop_last)
+                sampler = SkipDistributedSampler(
+                    dataset=dataset,
+                    num_replicas=num_replicas,
+                    rank=rank,
+                    shuffle=False,
+                    drop_last=drop_last,
+                )
                 cur = rank
                 for idx in sampler:
-                    self.assertEqual(idx, (cur % dataset_length), f"idx={idx}, cur={cur}")
+                    self.assertEqual(
+                        idx, (cur % dataset_length), f"idx={idx}, cur={cur}"
+                    )
                     cur += num_replicas
                 # If drop_last is True, read ceil((100-7)/7)*7=98 samples totally.
                 # If drop_last is False, read ceil(100/7)*7=105 samples totally.
@@ -64,13 +71,21 @@ class TestData(TestCase):
             num_replicas = 7
             skip_samples = 10
             for rank in range(num_replicas):
-                sampler = SkipDistributedSampler(dataset=dataset, num_replicas=num_replicas,
-                                                 rank=rank, shuffle=False, drop_last=drop_last,
-                                                 skip_samples=skip_samples)
+                sampler = SkipDistributedSampler(
+                    dataset=dataset,
+                    num_replicas=num_replicas,
+                    rank=rank,
+                    shuffle=False,
+                    drop_last=drop_last,
+                    skip_samples=skip_samples,
+                )
                 cur = rank
                 for idx in sampler:
-                    expected = ((cur + skip_samples) % dataset_length + skip_samples) \
-                        if (cur + skip_samples) >= dataset_length else (cur + skip_samples)
+                    expected = (
+                        ((cur + skip_samples) % dataset_length + skip_samples)
+                        if (cur + skip_samples) >= dataset_length
+                        else (cur + skip_samples)
+                    )
                     self.assertEqual(idx, expected, f"idx={idx}, expected={expected}")
                     cur += num_replicas
                 # If drop_last is True, read ceil((100-10-7)/7)*7=84 samples totally.
@@ -88,11 +103,18 @@ class TestData(TestCase):
         expected = list(range(90, 100))
         expected = (expected * 4)[:31]
         for rank in range(num_replicas):
-            sampler = SkipDistributedSampler(dataset=dataset, num_replicas=num_replicas,
-                                             rank=rank, shuffle=False, drop_last=False,
-                                             skip_samples=skip_samples)
+            sampler = SkipDistributedSampler(
+                dataset=dataset,
+                num_replicas=num_replicas,
+                rank=rank,
+                shuffle=False,
+                drop_last=False,
+                skip_samples=skip_samples,
+            )
             cnt = 0
             for idx in sampler:
-                self.assertEqual(idx, expected[rank], f"idx={idx}, rank={rank}, expected={expected}")
+                self.assertEqual(
+                    idx, expected[rank], f"idx={idx}, rank={rank}, expected={expected}"
+                )
                 cnt += 1
             self.assertTrue(cnt, 1)

@@ -835,7 +835,9 @@ class Manager:
             self.reconfigure_dataloader()
             self._dataloader_dirty = True
 
-    def get_batch_samples(self, epoch=0, num_batches=None, batch_size=None, total_batch_size=None):
+    def get_batch_samples(
+        self, epoch=0, num_batches=None, batch_size=None, total_batch_size=None
+    ):
         # In general, `start_quorum` might not have been called during the first loop,
         # and the dataloader might not have been initialized yet. In this case, we should
         # return immediately and set the dirty flag to avoid computation and commit.
@@ -849,8 +851,10 @@ class Manager:
         if total_batch_size != None and batch_size != None:
             num_batches = total_batch_size // (batch_size * self._replica_world_size)
 
-        assert num_batches is not None, ("num_batches must be specified or "
-                                         "total_batch_size and batch_size must be specified")
+        assert num_batches is not None, (
+            "num_batches must be specified or "
+            "total_batch_size and batch_size must be specified"
+        )
 
         batch_samples = []
         for _ in range(num_batches):
@@ -979,8 +983,12 @@ class Manager:
             self._commit_failures = 0  # Reset failure counter on success
             if not self._dataloader_dirty:
                 self._step += 1
-                self._batches_committed += self.num_participants() * self._accumulation_steps
-                self._current_batches_committed += self.num_participants() * self._accumulation_steps
+                self._batches_committed += (
+                    self.num_participants() * self._accumulation_steps
+                )
+                self._current_batches_committed += (
+                    self.num_participants() * self._accumulation_steps
+                )
                 return True
             else:
                 return False
@@ -1033,8 +1041,12 @@ class Manager:
         Returns:
             the state dict for this manager
         """
-        return {"step": self._step, "batches_committed": self._batches_committed,
-                "epoch": self._epoch, "current_batches_committed": self._current_batches_committed}
+        return {
+            "step": self._step,
+            "batches_committed": self._batches_committed,
+            "epoch": self._epoch,
+            "current_batches_committed": self._current_batches_committed,
+        }
 
     def current_step(self) -> int:
         """
@@ -1113,8 +1125,11 @@ class Manager:
         return True
 
     def reconfigure_dataloader(self):
-        dataloader = self._dataloader_fn(self._replica_world_size,
-            self._replica_rank, self._current_batches_committed)
+        dataloader = self._dataloader_fn(
+            self._replica_world_size,
+            self._replica_rank,
+            self._current_batches_committed,
+        )
         dataloader.sampler.set_epoch(self._epoch)
         self._dataloader_iter = iter(dataloader)
         # cleanup for old dataloader
@@ -1129,6 +1144,7 @@ class Manager:
         if self._dataloader_fn:
             self.reconfigure_dataloader()
             self._dataloader_dirty = False
+
 
 class _ManagerLogger:
     def __init__(self, manager: Manager, replica_id: str, group_rank: int) -> None:

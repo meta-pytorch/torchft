@@ -14,17 +14,18 @@ We recommend using torchdata's StatefulDataLoader to checkpoint each replica's
 dataloader frequently to avoid duplicate batches.
 """
 
-import torch
-import torch.distributed as dist
-from torch.utils.data.dataset import Dataset
-from torch.utils.data.sampler import Sampler
-from torch.utils import data
-
 import math
 from collections.abc import Iterator
 from typing import Optional, TypeVar
 
+import torch
+import torch.distributed as dist
+from torch.utils import data
+from torch.utils.data.dataset import Dataset
+from torch.utils.data.sampler import Sampler
+
 _T_co = TypeVar("_T_co", covariant=True)
+
 
 class SkipDistributedSampler(Sampler[_T_co]):
     def __init__(
@@ -62,10 +63,13 @@ class SkipDistributedSampler(Sampler[_T_co]):
             # This is to ensure each rank receives the same amount of data when
             # using this Sampler.
             self.num_samples = math.ceil(
-                (len(self.dataset) - self.skip_samples - self.num_replicas) / self.num_replicas  # type: ignore[arg-type]
+                (len(self.dataset) - self.skip_samples - self.num_replicas)
+                / self.num_replicas  # type: ignore[arg-type]
             )
         else:
-            self.num_samples = math.ceil((len(self.dataset) - self.skip_samples) / self.num_replicas)  # type: ignore[arg-type]
+            self.num_samples = math.ceil(
+                (len(self.dataset) - self.skip_samples) / self.num_replicas
+            )  # type: ignore[arg-type]
         self.total_size = self.num_samples * self.num_replicas
         self.shuffle = shuffle
         self.seed = seed
@@ -80,7 +84,7 @@ class SkipDistributedSampler(Sampler[_T_co]):
             indices = list(range(len(self.dataset)))  # type: ignore[arg-type]
 
         if not self.drop_last:
-            indices = indices[self.skip_samples: len(indices)]
+            indices = indices[self.skip_samples : len(indices)]
             # add extra samples to make it evenly divisible
             padding_size = self.total_size - len(indices)
             if padding_size <= len(indices):
@@ -122,6 +126,7 @@ class SkipDistributedSampler(Sampler[_T_co]):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
+
 
 # pyre-fixme[24]: expected generic parameter
 class DistributedSampler(data.distributed.DistributedSampler):

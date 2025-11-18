@@ -8,7 +8,7 @@ import concurrent
 import threading
 import time
 from datetime import timedelta
-from typing import Optional, Callable
+from typing import Callable, Optional
 from unittest import TestCase
 from unittest.mock import create_autospec, MagicMock, patch
 
@@ -936,8 +936,12 @@ class TestManager(TestCase):
                 drop_last=False,
                 skip_samples=batches_committed * batch_size,
             )
-            dataloader = DataLoader(dataset, batch_size=batch_size,
-                                    num_workers=replica_world_size, sampler=sampler)
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=replica_world_size,
+                sampler=sampler,
+            )
             return dataloader
 
         def exptected_samples(world_size, rank, committed_batches, expected_len=None):
@@ -983,8 +987,12 @@ class TestManager(TestCase):
         self.assertEqual(len(batches), 1)
         for inputs in batches:
             self.assertTrue(len(inputs), 4)
-            self.assertEqual(inputs.tolist(),
-                exptected_samples(quorum.replica_world_size, quorum.replica_rank, committed_batches))
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
 
         # 2.3 Call should commit to increment committed batches, then get samples
         manager.should_commit()
@@ -993,8 +1001,12 @@ class TestManager(TestCase):
         self.assertEqual(len(batches), 1)
         for inputs in batches:
             self.assertTrue(len(inputs), 4)
-            self.assertEqual(inputs.tolist(),
-                exptected_samples(quorum.replica_world_size, quorum.replica_rank, committed_batches))
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
 
         # 3 Start quorum to increment step and replica world size to 3
         quorum.quorum_id = 124
@@ -1009,8 +1021,12 @@ class TestManager(TestCase):
         self.assertEqual(len(batches), 1)
         for inputs in batches:
             self.assertTrue(len(inputs), 4)
-            self.assertEqual(inputs.tolist(),
-                exptected_samples(quorum.replica_world_size, quorum.replica_rank, committed_batches))
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
         # When the dataloader is dirty, should not commit
         self.assertFalse(manager.should_commit())
         # reset the dirty flag
@@ -1023,8 +1039,12 @@ class TestManager(TestCase):
         self.assertEqual(len(batches), 1)
         for inputs in batches:
             self.assertTrue(len(inputs), 4)
-            self.assertEqual(inputs.tolist(),
-                exptected_samples(quorum.replica_world_size, quorum.replica_rank, committed_batches))
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
 
         # 3.3 Continue to get samples until the dataloader is exhausted
         while (batches := manager.get_batch_samples()) != None:
@@ -1032,6 +1052,12 @@ class TestManager(TestCase):
             self.assertEqual(len(batches), 1)
             for inputs in batches:
                 self.assertTrue(len(inputs), 4)
-                self.assertEqual(inputs.tolist(),
-                    exptected_samples(quorum.replica_world_size, quorum.replica_rank,
-                        committed_batches, expected_len=len(inputs.tolist())))
+                self.assertEqual(
+                    inputs.tolist(),
+                    exptected_samples(
+                        quorum.replica_world_size,
+                        quorum.replica_rank,
+                        committed_batches,
+                        expected_len=len(inputs.tolist()),
+                    ),
+                )
