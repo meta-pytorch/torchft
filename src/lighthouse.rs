@@ -23,6 +23,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use gethostname::gethostname;
+use log::debug;
 use log::error;
 use log::info;
 use structopt::StructOpt;
@@ -291,9 +292,10 @@ impl Lighthouse {
 
     fn _quorum_tick(self: Arc<Self>, state: &mut State) -> Result<()> {
         let (quorum_met, reason) = quorum_compute(Instant::now(), state, &self.opt);
-        self.change_logger.log_if_changed(&reason);
 
         if quorum_met.is_some() {
+            self.change_logger.log_if_changed(&reason);
+
             let participants = quorum_met.unwrap();
 
             let commit_failure_replica_ids: Vec<String> = participants
@@ -330,7 +332,7 @@ impl Lighthouse {
                 created: Some(SystemTime::now().into()),
             };
 
-            info!("Quorum! {:?}", quorum);
+            debug!("Quorum! {:?}", quorum);
 
             state.prev_quorum = Some(quorum.clone());
             state.participants.clear();
@@ -490,7 +492,7 @@ impl LighthouseService for Arc<Lighthouse> {
             .requester
             .ok_or_else(|| return Status::invalid_argument("missing requester"))?;
 
-        info!(
+        debug!(
             "Received quorum request for replica {}",
             &requester.replica_id
         );

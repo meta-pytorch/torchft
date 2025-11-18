@@ -901,11 +901,11 @@ class Manager:
             local_should_commit,
             timeout=timeout or self._timeout,
         )
-        self._logger.info(
+        self._logger.debug(
             f"should_commit={should_commit} enough_replicas={enough_replicas}, errored={self._errored}"
         )
 
-        self.commits_logger.info(
+        self.commits_logger.debug(
             "",
             extra={
                 "job_id": os.environ.get("JOB_ID", "unknown"),
@@ -1063,6 +1063,9 @@ class _ManagerLogger:
 
     def warn(self, msg: str) -> None:
         self._logger.warn(f"{self.prefix()} {msg}")
+
+    def debug(self, msg: str) -> None:
+        self._logger.debug(f"{self.prefix()} {msg}")
 
     def exception(self, msg: str) -> None:
         self._logger.exception(f"{self.prefix()} {msg}")
