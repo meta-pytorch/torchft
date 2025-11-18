@@ -26,6 +26,7 @@ and Hybrid FSDP.
 """
 
 import concurrent.futures
+import gc
 import logging
 import os
 import socket
@@ -185,6 +186,7 @@ class Manager:
         init_sync: bool = True,
         max_retries: Optional[int] = None,
         quorum_retries: int = 0,
+        dataloader_fn: Optional[Callable[[int, int, int], None]] = None,
     ) -> None:
         """
         Args:
@@ -365,6 +367,17 @@ class Manager:
 
         self._update_fr_path()
 
+        # The number of batches committed in the current epoch.Compare to _batches_committed,
+        # _current_batches_committed will reset to 0 when next epoch starts.
+        self._current_batches_committed = 0
+        self._epoch = 0
+        self._loaded_epoch = 0
+        self._loaded_current_batches_committed = 0
+        self._dataloader_fn = dataloader_fn
+        self._dataloader_dirty = False
+        self._dataloader_iter = None
+        self._accumulation_steps = 1
+
     def allow_state_dict_read(self) -> None:
         if self._is_state_dict_read_allowed:
             return
@@ -438,6 +451,12 @@ class Manager:
             return _DummyWork(tensor)
 
         self.wait_quorum()
+
+        # If dirty, the result will not be committed, so return empty tensor.
+        if self._dataloader_dirty:
+            work = _DummyWork(torch.zeros_like(tensor))
+            return _ManagedWork(self, work, tensor)
+
         num_participants: int = self.num_participants()
 
         if not self.is_participating():
@@ -678,6 +697,8 @@ class Manager:
             if self._use_async_quorum or not allow_heal
             else (replica_rank, replica_world_size)
         )
+        self._replica_rank = replica_rank
+        self._replica_world_size = replica_world_size
 
         # For fixed with spares we need to ensure that we don't have more
         # participating replicas than the min replica size.
@@ -691,6 +712,7 @@ class Manager:
             ):
                 self._participating_replica_rank = None
 
+        quorum_changed = False
         if quorum_id != self._quorum_id:
             self.quorum_logger.info(
                 "",
@@ -737,6 +759,7 @@ class Manager:
                 self._logger.exception(f"got exception in pg configure: {e}")
                 self.report_error(e)
                 return
+            quorum_changed = True
 
         if allow_heal:
             # run recovery on the recovery stream if available
@@ -806,6 +829,42 @@ class Manager:
                     if recovery_stream is not None
                     else None
                 )
+
+        # reconfigure dataloader after healing so that we can get offset from other replica group
+        if quorum_changed and self._dataloader_fn:
+            self.reconfigure_dataloader()
+            self._dataloader_dirty = True
+
+    def get_batch_samples(
+        self, epoch=0, num_batches=None, batch_size=None, total_batch_size=None
+    ):
+        # In general, `start_quorum` might not have been called during the first loop,
+        # and the dataloader might not have been initialized yet. In this case, we should
+        # return immediately and set the dirty flag to avoid computation and commit.
+        if not self._dataloader_iter:
+            self._dataloader_dirty = True
+            return []
+        # If the recovery worker is behind the current epoch, we should skip computation and commit.
+        if epoch < self._loaded_epoch:
+            return None
+
+        if total_batch_size != None and batch_size != None:
+            num_batches = total_batch_size // (batch_size * self._replica_world_size)
+
+        assert num_batches is not None, (
+            "num_batches must be specified or "
+            "total_batch_size and batch_size must be specified"
+        )
+
+        batch_samples = []
+        for _ in range(num_batches):
+            try:
+                batch_samples.append(next(self._dataloader_iter))
+            except StopIteration:
+                break
+        self._dataloader_dirty = False
+        self._accumulation_steps = len(batch_samples)
+        return batch_samples if batch_samples else None
 
     def _update_fr_path(self) -> None:
         """
@@ -921,9 +980,18 @@ class Manager:
 
         # decide whether we're in a healthy state to increase the step count
         if should_commit:
-            self._step += 1
-            self._batches_committed += self.num_participants()
             self._commit_failures = 0  # Reset failure counter on success
+            if not self._dataloader_dirty:
+                self._step += 1
+                self._batches_committed += (
+                    self.num_participants() * self._accumulation_steps
+                )
+                self._current_batches_committed += (
+                    self.num_participants() * self._accumulation_steps
+                )
+                return True
+            else:
+                return False
         else:
             self._commit_failures += 1
             # Check if we've hit max retries
@@ -934,8 +1002,7 @@ class Manager:
                 msg = f"should_commit failed {self._commit_failures} times consecutively, exceeding max_retries={self._max_retries}"
                 self._logger.exception(msg)
                 raise RuntimeError(msg)
-
-        return should_commit
+        return False
 
     def load_state_dict(self, state_dict: Dict[str, int]) -> None:
         """
@@ -948,6 +1015,11 @@ class Manager:
         """
         self._step = state_dict["step"]
         self._batches_committed = state_dict["batches_committed"]
+        self._loaded_epoch = state_dict["epoch"]
+        self._loaded_current_batches_committed = state_dict["current_batches_committed"]
+        if self._loaded_epoch == 0:
+            self._epoch = 0
+            self._current_batches_committed = self._loaded_current_batches_committed
 
     def _manager_state_dict(self) -> Dict[str, object]:
         with self._state_dict_lock.r_lock():
@@ -969,7 +1041,12 @@ class Manager:
         Returns:
             the state dict for this manager
         """
-        return {"step": self._step, "batches_committed": self._batches_committed}
+        return {
+            "step": self._step,
+            "batches_committed": self._batches_committed,
+            "epoch": self._epoch,
+            "current_batches_committed": self._current_batches_committed,
+        }
 
     def current_step(self) -> int:
         """
@@ -1046,6 +1123,27 @@ class Manager:
             assert self._use_async_quorum
             return False
         return True
+
+    def reconfigure_dataloader(self):
+        dataloader = self._dataloader_fn(
+            self._replica_world_size,
+            self._replica_rank,
+            self._current_batches_committed,
+        )
+        dataloader.sampler.set_epoch(self._epoch)
+        self._dataloader_iter = iter(dataloader)
+        # cleanup for old dataloader
+        gc.collect()
+
+    def next_epoch(self):
+        self._epoch += 1
+        if self._loaded_epoch == self._epoch:
+            self._current_batches_committed = self._loaded_current_batches_committed
+        else:
+            self._current_batches_committed = 0
+        if self._dataloader_fn:
+            self.reconfigure_dataloader()
+            self._dataloader_dirty = False
 
 
 class _ManagerLogger:
