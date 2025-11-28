@@ -71,7 +71,7 @@ def load_model(m, optimizer, manager):
         with open(f"{CHECKPOINT_PATH}_latest", "r") as f:
             latest_checkpoint_path = f.read().strip()
         print(f"Loading checkpoint from {latest_checkpoint_path}")
-        loaded_state_dict = torch.load(latest_checkpoint_path)
+        loaded_state_dict = torch.load(latest_checkpoint_path, weights_only=True)
         m.load_state_dict(loaded_state_dict["model"])
         optimizer.load_state_dict(loaded_state_dict["optim"])
         manager.load_state_dict(loaded_state_dict["torchft"])
@@ -89,10 +89,12 @@ def main() -> None:
     )
 
     def load_state_dict(state_dict):
+        print("Received checkpoint!")
         m.load_state_dict(state_dict["model"])
         optimizer.load_state_dict(state_dict["optim"])
 
     def state_dict():
+        print("Setup checkpoint to send!")
         return {
             "model": m.state_dict(),
             "optim": optimizer.state_dict(),
@@ -206,21 +208,29 @@ def main() -> None:
         ) is not None:
             optimizer.zero_grad()
             total_loss = 0.0
-            for inputs, labels in batches:
+            accumulation_steps = len(batches)
+            for i in range(accumulation_steps):
+                inputs, labels = batches[i]
                 inputs = inputs.to(device)
                 labels = labels.to(device)
                 out = m(inputs)
                 loss = criterion(out, labels)
-                loss.backward()
+                if i == accumulation_steps - 1:
+                    loss.backward()
+                else:
+                    with manager.no_sync():
+                        loss.backward()
                 total_loss += loss.item()
+
             # If errored, the optimizer step will be a no-op, and the parameter will not be updated.
             # Although it is possible to use new pg to compute old batches, it is still safe.
             if not optimizer.step():
                 continue
 
             # all reduce the loss across all replicas
-            total_loss /= len(batches)
+            total_loss = total_loss / BATCH_SIZE
             loss_tensor = torch.tensor(total_loss, device=device)
+            # manager all reduce will divide by replica world size * accumulation steps
             manager.allreduce(loss_tensor).wait()
             avg_loss = loss_tensor.item()
             if manager.participating_rank() == 0:

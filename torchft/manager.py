@@ -34,7 +34,7 @@ import traceback
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager
 from datetime import timedelta
 from enum import Enum
 from typing import (
@@ -454,8 +454,11 @@ class Manager:
 
         # If dirty, the result will not be committed, so return empty tensor.
         if self._dataloader_dirty:
-            work = _DummyWork(torch.zeros_like(tensor))
-            return _ManagedWork(self, work, tensor)
+            tensor.zero_()
+            return _ManagedWork(self, _DummyWork(tensor), tensor)
+
+        if not self.require_backward_grad_sync:
+            return _ManagedWork(self, _DummyWork(tensor), tensor)
 
         num_participants: int = self.num_participants()
 
@@ -496,7 +499,7 @@ class Manager:
             ) -> torch.Tensor:
                 nonlocal tensor
                 if reduce_op == ReduceOp.AVG:
-                    tensor /= num_participants
+                    tensor /= num_participants * self._accumulation_steps
                 return tensor
 
             managed_work = _ManagedWork(self, work, tensor)
@@ -512,6 +515,15 @@ class Manager:
             self.report_error(e)
 
             return _DummyWork(tensor)
+
+    @contextmanager
+    def no_sync(self):
+        old_require_backward_grad_sync = self.require_backward_grad_sync
+        self.require_backward_grad_sync = False
+        try:
+            yield
+        finally:
+            self.require_backward_grad_sync = old_require_backward_grad_sync
 
     def report_error(self, e: Exception) -> None:
         """
@@ -931,6 +943,9 @@ class Manager:
         Raises:
             RuntimeError: if should_commit fails max_retries times in a row and max_retries is set
         """
+        # Sometime allreduce is not called before should_commit, we need to wait quorum
+        self.wait_quorum()
+
         # make sure recovery is complete before committing
         with torch.profiler.record_function(
             "torchft::manager::should_commmit::recovery_stream::synchronize"
