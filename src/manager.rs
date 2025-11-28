@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 #[cfg(not(test))]
+use log::debug;
+#[cfg(not(test))]
 use log::info;
 #[cfg(not(test))]
 use log::warn;
@@ -61,6 +63,19 @@ macro_rules! info_with_replica {
         } else {
             // Otherwise, just use the UUID
             info!("[Replica {}] {}", $replica_id, format!($($arg)*))
+        };
+    }};
+}
+
+macro_rules! debug_with_replica {
+    ($replica_id:expr, $($arg:tt)*) => {{
+        let parts: Vec<&str> = $replica_id.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            // If there are two parts, use the replica name
+            debug!("[Replica {}] {}", parts[0], format!($($arg)*))
+        } else {
+            // Otherwise, just use the UUID
+            debug!("[Replica {}] {}", $replica_id, format!($($arg)*))
         };
     }};
 }
@@ -220,7 +235,7 @@ impl Manager {
         requester: QuorumMember,
         timeout: Duration,
     ) -> Result<(), Status> {
-        info_with_replica!(self.replica_id, "All workers joined - starting quorum");
+        debug_with_replica!(self.replica_id, "All workers joined - starting quorum");
 
         let lighthouse_request = LighthouseQuorumRequest {
             requester: Some(requester),
@@ -232,7 +247,7 @@ impl Manager {
 
         let resp = response.into_inner();
 
-        info_with_replica!(self.replica_id, "got lighthouse quorum {:?}", resp);
+        debug_with_replica!(self.replica_id, "got lighthouse quorum {:?}", resp);
 
         let state = self.state.lock().await;
         // TODO: We don't broadcast in cases when this method returns an error, resulting in a hang
@@ -336,7 +351,7 @@ impl ManagerService for Arc<Manager> {
         let req = request.get_ref();
         let group_rank = req.group_rank;
 
-        info_with_replica!(
+        debug_with_replica!(
             self.replica_id,
             "Start quorum for group_rank {}",
             group_rank
@@ -390,7 +405,7 @@ impl ManagerService for Arc<Manager> {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info_with_replica!(
+        debug_with_replica!(
             self.replica_id,
             "Finished quorum for group_rank {}",
             group_rank
@@ -427,7 +442,7 @@ impl ManagerService for Arc<Manager> {
         let req = request.into_inner();
         let group_rank = req.group_rank;
 
-        info_with_replica!(
+        debug_with_replica!(
             self.replica_id,
             "should_commit request from {} should_commit={}",
             group_rank,
@@ -448,7 +463,7 @@ impl ManagerService for Arc<Manager> {
 
             if state.should_commit_count.len() == self.world_size as usize {
                 let decision = state.should_commit_failures.len() == 0;
-                info_with_replica!(
+                debug_with_replica!(
                     self.replica_id,
                     "should_commit completed should_commit={}",
                     decision
