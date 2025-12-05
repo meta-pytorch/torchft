@@ -179,7 +179,7 @@ class Manager:
         lighthouse_addr: Optional[str] = None,
         replica_id: Optional[str] = None,
         port: Optional[int] = None,
-        hostname: str = socket.gethostname(),
+        hostname: str = socket.getfqdn(),
         heartbeat_interval: timedelta = timedelta(milliseconds=100),
         checkpoint_transport: Optional[CheckpointTransport[Dict[str, T]]] = None,
         init_sync: bool = True,

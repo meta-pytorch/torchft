@@ -171,7 +171,7 @@ class HTTPTransport(CheckpointTransport[T]):
             an HTTP address
         """
         port = self._server.socket.getsockname()[1]
-        return f"http://{socket.gethostname()}:{port}/checkpoint/"
+        return f"http://{socket.getfqdn()}:{port}/checkpoint/"
 
     def _serve(self) -> None:
         try:
