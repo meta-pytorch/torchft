@@ -17,7 +17,7 @@ pub async fn connect_once(addr: String, connect_timeout: Duration) -> Result<Cha
     let conn = Endpoint::new(addr)?
         .connect_timeout(connect_timeout)
         // Enable HTTP2 keep alives
-        .http2_keep_alive_interval(Duration::from_secs(60))
+        .http2_keep_alive_interval(Duration::from_mins(1))
         // Time taken for server to respond. 20s is default for GRPC.
         .keep_alive_timeout(Duration::from_secs(20))
         // Enable alive for idle connections.
