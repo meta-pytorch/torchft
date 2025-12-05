@@ -80,7 +80,7 @@ mod tests {
             map
         }
 
-        assert!(try_parse_grpc_timeout(&map("3H")).unwrap() == Some(Duration::from_secs(3 * 3600)));
+        assert!(try_parse_grpc_timeout(&map("3H")).unwrap() == Some(Duration::from_hours(3)));
         assert!(try_parse_grpc_timeout(&map("3M")).unwrap() == Some(Duration::from_secs(3 * 60)));
         assert!(try_parse_grpc_timeout(&map("3S")).unwrap() == Some(Duration::from_secs(3)));
         assert!(try_parse_grpc_timeout(&map("3m")).unwrap() == Some(Duration::from_millis(3)));
