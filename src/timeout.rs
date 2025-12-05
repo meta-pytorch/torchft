@@ -81,7 +81,7 @@ mod tests {
         }
 
         assert!(try_parse_grpc_timeout(&map("3H")).unwrap() == Some(Duration::from_secs(3 * 3600)));
-        assert!(try_parse_grpc_timeout(&map("3M")).unwrap() == Some(Duration::from_secs(3 * 60)));
+        assert!(try_parse_grpc_timeout(&map("3M")).unwrap() == Some(Duration::from_mins(3)));
         assert!(try_parse_grpc_timeout(&map("3S")).unwrap() == Some(Duration::from_secs(3)));
         assert!(try_parse_grpc_timeout(&map("3m")).unwrap() == Some(Duration::from_millis(3)));
         assert!(try_parse_grpc_timeout(&map("3u")).unwrap() == Some(Duration::from_micros(3)));
