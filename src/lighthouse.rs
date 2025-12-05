@@ -695,8 +695,7 @@ mod tests {
         assert!(reason.contains("join timeout"), "{}", reason);
 
         // increase elapsed time to pass join timeout
-        state.participants.get_mut("a").unwrap().joined =
-            now.sub(Duration::from_secs(10 * 60 * 60));
+        state.participants.get_mut("a").unwrap().joined = now.sub(Duration::from_hours(10));
         let (quorum_met, reason) = quorum_compute(now, &state, &opt);
         assert!(quorum_met.is_some(), "{}", reason);
 
