@@ -70,7 +70,7 @@ class ParameterServer(ABC):
                     session_id = str(uuid.uuid4())
 
                     store_addr = (
-                        f"{socket.gethostname()}:{ps.store.port}/session/{session_id}"
+                        f"{socket.getfqdn()}:{ps.store.port}/session/{session_id}"
                     )
 
                     logger.info(f"creating new session {session_id}")
@@ -123,7 +123,7 @@ class ParameterServer(ABC):
             an HTTP address
         """
         port = self._server.socket.getsockname()[1]
-        return f"http://{socket.gethostname()}:{port}/new_session"
+        return f"http://{socket.getfqdn()}:{port}/new_session"
 
     def _serve(self) -> None:
         try:
