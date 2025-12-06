@@ -8,16 +8,19 @@ import concurrent
 import threading
 import time
 from datetime import timedelta
-from typing import Optional
+from typing import Callable, Optional
 from unittest import TestCase
 from unittest.mock import create_autospec, MagicMock, patch
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
+from torch.utils.data import DataLoader
 
 from torchft._torchft import QuorumResult
 from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing.transport import CheckpointTransport
+from torchft.data import SkipDistributedSampler
+from torchft.data_test import DummyDataset
 from torchft.manager import Manager, MANAGER_ADDR_KEY, REPLICA_ID_KEY, WorldSizeMode
 from torchft.process_group import ProcessGroup
 from torchft.work import _DummyWork
@@ -47,6 +50,7 @@ class TestManager(TestCase):
         timeout: timedelta = timedelta(seconds=10),
         init_sync: bool = True,
         max_retries: Optional[int] = None,
+        dataloader_fn: Optional[Callable[[int, int, int], None]] = None,
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         pg.errored.return_value = None
@@ -76,6 +80,7 @@ class TestManager(TestCase):
                 timeout=timeout,
                 init_sync=init_sync,
                 max_retries=max_retries,
+                dataloader_fn=dataloader_fn,
             )
             self.manager = manager
         return manager
@@ -909,3 +914,150 @@ class TestManager(TestCase):
 
         # Restore the original lock
         manager._state_dict_lock = original_lock
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_dataloader_after_quorum(self, client_mock: MagicMock) -> None:
+        # 1 Initial
+        dataset_len = 1000
+        batch_size = 4
+        dataset = DummyDataset(dataset_len)
+        committed_batches = 0
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+
+        def dataloader_fn(replica_world_size, replica_rank, batches_committed):
+            sampler = SkipDistributedSampler(
+                dataset=dataset,
+                num_replicas=replica_world_size,
+                rank=replica_rank,
+                shuffle=False,
+                seed=0,
+                drop_last=False,
+                skip_samples=batches_committed * batch_size,
+            )
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=replica_world_size,
+                sampler=sampler,
+            )
+            return dataloader
+
+        def exptected_samples(world_size, rank, committed_batches, expected_len=None):
+            expected = []
+            expected_len = expected_len if expected_len is not None else batch_size
+            for i in range(expected_len):
+                expected.append(committed_batches * batch_size + rank + i * world_size)
+            expected = [x % dataset_len for x in expected]
+            return expected
+
+        # Create manager
+        manager = self._create_manager(dataloader_fn=dataloader_fn)
+        manager.set_epoch(0)
+
+        # mock for should_commit
+        client_mock().should_commit = mock_should_commit
+
+        # mock for quorum
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{store.port}"
+        quorum.max_step = 1
+        quorum.max_replica_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+
+        # 2 The initial state has 2 replicas
+        quorum.replica_world_size = 2
+        client_mock()._quorum.return_value = quorum
+
+        # 2.1 Get sampler first time without quorum, then will got empty batches
+        batches = manager.get_batch_samples(1)
+        self.assertNotEqual(batches, None)
+        self.assertEqual(len(batches), 0)
+
+        # 2.2 Start quorum, then reinit dataloader
+        manager.start_quorum()
+        manager.wait_quorum()
+        batches = manager.get_batch_samples(1)
+        self.assertEqual(len(batches), 1)
+        for inputs in batches:
+            self.assertTrue(len(inputs), 4)
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
+
+        # 2.3 Call should commit to increment committed batches, then get samples
+        manager.should_commit()
+        committed_batches += quorum.replica_world_size
+        batches = manager.get_batch_samples(1)
+        self.assertEqual(len(batches), 1)
+        for inputs in batches:
+            self.assertTrue(len(inputs), 4)
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
+
+        # 3 Start quorum to increment step and replica world size to 3
+        quorum.quorum_id = 124
+        quorum.replica_world_size = 3
+        client_mock()._quorum.return_value = quorum
+        manager.start_quorum()
+        manager.wait_quorum()
+
+        # 3.1 Get sample after quorum with 3 replicas, and set dirty flag to mock dataloader is reinit.
+        batches = manager.get_batch_samples(1)
+        manager._dataloader_dirty = True
+        self.assertEqual(len(batches), 1)
+        for inputs in batches:
+            self.assertTrue(len(inputs), 4)
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
+        # When the dataloader is dirty, should not commit
+        self.assertFalse(manager.should_commit())
+        # reset the dirty flag
+        manager._dataloader_dirty = False
+
+        # 3.2 Call should commit to increment committed batches
+        manager.should_commit()
+        committed_batches += quorum.replica_world_size
+        batches = manager.get_batch_samples(1)
+        self.assertEqual(len(batches), 1)
+        for inputs in batches:
+            self.assertTrue(len(inputs), 4)
+            self.assertEqual(
+                inputs.tolist(),
+                exptected_samples(
+                    quorum.replica_world_size, quorum.replica_rank, committed_batches
+                ),
+            )
+
+        # 3.3 Continue to get samples until the dataloader is exhausted
+        while (batches := manager.get_batch_samples()) != None:
+            committed_batches += quorum.replica_world_size
+            self.assertEqual(len(batches), 1)
+            for inputs in batches:
+                self.assertTrue(len(inputs), 4)
+                self.assertEqual(
+                    inputs.tolist(),
+                    exptected_samples(
+                        quorum.replica_world_size,
+                        quorum.replica_rank,
+                        committed_batches,
+                        expected_len=len(inputs.tolist()),
+                    ),
+                )

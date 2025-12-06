@@ -49,10 +49,12 @@ class OptimizerWrapper(Optimizer):
         self.manager.start_quorum()
         self.optim.zero_grad(set_to_none)
 
-    def step(self, closure: Optional[object] = None) -> None:
+    def step(self, closure: Optional[object] = None) -> bool:
         assert closure is None, "optimizers that use closures are not supported"
         if self.manager.should_commit():
             self.optim.step()
+            return True
+        return False
 
     @property
     def param_groups(self) -> List[Dict[str, Any]]:
