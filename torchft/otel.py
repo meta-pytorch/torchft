@@ -13,12 +13,12 @@ from typing import List, Sequence
 from opentelemetry._logs import set_logger_provider
 
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-from opentelemetry.sdk._logs._internal import LogData
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler, ReadableLogRecord
 from opentelemetry.sdk._logs.export import (
     BatchLogRecordProcessor,
-    ConsoleLogExporter,
-    LogExporter,
+    ConsoleLogRecordExporter,
+    LogRecordExporter,
+    LogRecordExportResult,
 )
 from opentelemetry.sdk.resources import Resource
 
@@ -27,18 +27,19 @@ _LOGGER_PROVIDER: dict[str, LoggerProvider] = {}
 TORCHFT_OTEL_RESOURCE_ATTRIBUTES_JSON = "TORCHFT_OTEL_RESOURCE_ATTRIBUTES_JSON"
 
 
-class TeeLogExporter(LogExporter):
+class TeeLogExporter(LogRecordExporter):
     """Exporter that writes to multiple exporters."""
 
     def __init__(
         self,
-        exporters: List[LogExporter],
+        exporters: List[LogRecordExporter],
     ) -> None:
         self._exporters = exporters
 
-    def export(self, batch: Sequence[LogData]) -> None:
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         for e in self._exporters:
             e.export(batch)
+        return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
         for e in self._exporters:
@@ -48,8 +49,6 @@ class TeeLogExporter(LogExporter):
 def setup_logger(name: str) -> None:
     if os.environ.get("TORCHFT_USE_OTEL", "false") == "false":
         return
-
-    global _LOGGER_PROVIDER
 
     if name in _LOGGER_PROVIDER:
         return
@@ -70,7 +69,7 @@ def setup_logger(name: str) -> None:
 
     exporter = TeeLogExporter(
         exporters=[
-            ConsoleLogExporter(),
+            ConsoleLogRecordExporter(),
             OTLPLogExporter(
                 timeout=5,
             ),
