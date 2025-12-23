@@ -738,7 +738,10 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
-        self.assertIs(_resolve_process_group(pg.group_name), pg)
+        self.assertIs(
+            _resolve_process_group(pg.group_name),  # pyre-ignore[6]: GroupName vs str
+            pg,
+        )
 
         try:
             t = torch.zeros(10)
