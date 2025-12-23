@@ -76,7 +76,7 @@ def _test_pg(
     ]
     tensor_list = [torch.empty_like(input_tensor)]
 
-    def check_tensors(arg: Any) -> None:
+    def check_tensors(arg: object) -> None:
         """Recursively check tensors for expected shape and dtype."""
         if isinstance(arg, torch.Tensor):
             assert arg.dtype == dtype, f"Output dtype mismatch: {arg.dtype} != {dtype}"
