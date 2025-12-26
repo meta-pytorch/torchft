@@ -76,7 +76,7 @@ def _test_pg(
     ]
     tensor_list = [torch.empty_like(input_tensor)]
 
-    def check_tensors(arg: Any) -> None:  # pyre-ignore[2]
+    def check_tensors(arg: object) -> None:
         """Recursively check tensors for expected shape and dtype."""
         if isinstance(arg, torch.Tensor):
             assert arg.dtype == dtype, f"Output dtype mismatch: {arg.dtype} != {dtype}"
@@ -738,7 +738,10 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
-        self.assertIs(_resolve_process_group(pg.group_name), pg)
+        self.assertIs(
+            _resolve_process_group(pg.group_name),  # pyre-ignore[6]: GroupName vs str
+            pg,
+        )
 
         try:
             t = torch.zeros(10)

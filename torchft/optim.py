@@ -59,5 +59,5 @@ class OptimizerWrapper(Optimizer):
         return self.optim.param_groups
 
     @property
-    def state(self) -> Mapping[torch.Tensor, Any]:  # pyre-fixme[3]
+    def state(self) -> Mapping[torch.Tensor, object]:
         return self.optim.state

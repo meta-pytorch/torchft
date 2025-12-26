@@ -8,37 +8,53 @@ import json
 import logging
 import os
 import time
-from typing import List, Sequence
+from typing import Any, List, Sequence, TYPE_CHECKING
 
 from opentelemetry._logs import set_logger_provider
 
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-from opentelemetry.sdk._logs._internal import LogData
-from opentelemetry.sdk._logs.export import (
-    BatchLogRecordProcessor,
-    ConsoleLogExporter,
-    LogExporter,
-)
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
+
+# These types are available in opentelemetry-sdk but Pyre's type stubs
+# don't include them. We import them at runtime and provide type aliases for
+# static type checking.
+if TYPE_CHECKING:
+    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
+    ReadableLogRecord = Any
+    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
+    LogRecordExporter = Any
+    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
+    LogRecordExportResult = Any
+    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
+    ConsoleLogRecordExporter = Any
+else:
+    from opentelemetry.sdk._logs import ReadableLogRecord
+    from opentelemetry.sdk._logs.export import (
+        ConsoleLogRecordExporter,
+        LogRecordExporter,
+        LogRecordExportResult,
+    )
 
 _LOGGER_PROVIDER: dict[str, LoggerProvider] = {}
 # Path to the file containing OTEL resource attributes
 TORCHFT_OTEL_RESOURCE_ATTRIBUTES_JSON = "TORCHFT_OTEL_RESOURCE_ATTRIBUTES_JSON"
 
 
-class TeeLogExporter(LogExporter):
+class TeeLogExporter(LogRecordExporter):
     """Exporter that writes to multiple exporters."""
 
     def __init__(
         self,
-        exporters: List[LogExporter],
+        exporters: List[LogRecordExporter],
     ) -> None:
         self._exporters = exporters
 
-    def export(self, batch: Sequence[LogData]) -> None:
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         for e in self._exporters:
             e.export(batch)
+        return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
         for e in self._exporters:
@@ -48,8 +64,6 @@ class TeeLogExporter(LogExporter):
 def setup_logger(name: str) -> None:
     if os.environ.get("TORCHFT_USE_OTEL", "false") == "false":
         return
-
-    global _LOGGER_PROVIDER
 
     if name in _LOGGER_PROVIDER:
         return
@@ -70,7 +84,7 @@ def setup_logger(name: str) -> None:
 
     exporter = TeeLogExporter(
         exporters=[
-            ConsoleLogExporter(),
+            ConsoleLogRecordExporter(),
             OTLPLogExporter(
                 timeout=5,
             ),
