@@ -58,6 +58,7 @@ from torch.distributed.distributed_c10d import (
     AllToAllOptions,
     BarrierOptions,
     BroadcastOptions,
+    GroupName,
     ReduceOp,
     ReduceScatterOptions,
     Work,
@@ -133,7 +134,7 @@ class ProcessGroup(BaseProcessGroup):
         # pyre-fixme[6]: got object
         super().__init__(*args, **kwargs)
 
-        self._group_name: Optional[str] = None
+        self._group_name: Optional[GroupName] = None
 
     # pyre-fixme[14]: inconsistent override
     def allgather(
@@ -313,7 +314,7 @@ class ProcessGroup(BaseProcessGroup):
     def getBackendName(self) -> str:
         raise NotImplementedError("not implemented")
 
-    def _register(self, name: str) -> str:
+    def _register(self, name: str) -> GroupName:
         group_name = f"{self.getBackendName()}:{name}"
 
         # This is needed for DeviceMesh and functional collectives to work.
@@ -332,7 +333,7 @@ class ProcessGroup(BaseProcessGroup):
             devices.append("xpu")
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
 
-        return group_name
+        return GroupName(group_name)
 
     def register(self, name: str) -> "ProcessGroup":
         """
@@ -355,12 +356,12 @@ class ProcessGroup(BaseProcessGroup):
         )
 
     @property
-    def group_name(self) -> str:
+    def group_name(self) -> GroupName:
         if self._group_name is None:
             raise ValueError("ProcessGroup name not set")
         return self._group_name
 
-    def _set_group_name(self, name: str) -> None:
+    def _set_group_name(self, name: GroupName) -> None:
         self._group_name = name
 
     def unregister(self) -> None:
