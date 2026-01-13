@@ -643,6 +643,7 @@ impl LighthouseServer {
                     join_timeout_ms,
                     quorum_tick_ms,
                     heartbeat_timeout_ms,
+                    expected_replicas: None,
                 }))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
