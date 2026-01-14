@@ -13,6 +13,9 @@
     },
     {
       "site-package": "parameterized"
+    },
+    {
+      "site-package": "torchcomms"
     }
   ]
 }

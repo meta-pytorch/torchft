@@ -15,6 +15,7 @@ os.environ["NCCL_HOSTID"] = str(REPLICA_GROUP_ID)
 
 USE_STREAMING = os.getenv("USE_STREAMING", "False") == "True"
 USE_NCCL = os.getenv("USE_NCCL", "False") == "True"
+USE_PG = os.getenv("USE_PG", "False") == "True"
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,8 @@ from torchft import (
     ProcessGroupBabyNCCL,
     ProcessGroupGloo,
     ProcessGroupNCCL,
+    TorchCommGloo,
+    TorchCommNCCL,
 )
 from torchft.checkpointing.http_transport import HTTPTransport
 from torchft.local_sgd import DiLoCo
@@ -59,13 +62,21 @@ def main() -> None:
         }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pg = (
-        ProcessGroupNCCL(
-            timeout=timedelta(seconds=10),
+
+    if USE_PG:
+        pg = (
+            ProcessGroupNCCL(
+                timeout=timedelta(seconds=10),
+            )
+            if torch.cuda.is_available() and USE_NCCL
+            else ProcessGroupGloo(timeout=timedelta(seconds=10))
         )
-        if torch.cuda.is_available() and USE_NCCL
-        else ProcessGroupGloo(timeout=timedelta(seconds=10))
-    )
+    else:
+        pg = (
+            TorchCommNCCL(timeout=timedelta(seconds=10))
+            if USE_NCCL
+            else TorchCommGloo(timeout=timedelta(seconds=10))
+        )
 
     transport = HTTPTransport(
         timeout=timedelta(seconds=10),
@@ -230,7 +241,7 @@ def main() -> None:
                 if manager.current_step() % 100 == 0:
                     print(f"[{manager.current_step()}] loss = {loss.item()}")
 
-                if manager.current_step() >= 15:
+                if manager.current_step() >= 150:
                     # complete training
                     prof.stop()
                     writer.flush()
