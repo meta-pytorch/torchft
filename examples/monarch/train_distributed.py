@@ -16,7 +16,7 @@ from typing import Dict
 import torch
 from monarch.actor import Actor, current_rank, endpoint, HostMesh, ProcMesh, this_host
 from monarch.job import SlurmJob
-from monarch.utils import setup_env_for_distributed
+from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
@@ -157,7 +157,7 @@ class ReplicaActor(Actor):
 
         async with trainers_proc_mesh:
             await trainers_proc_mesh.logging_option(stream_to_client=True)
-            await setup_env_for_distributed(trainers_proc_mesh)
+            await setup_torch_elastic_env_async(trainers_proc_mesh)
 
             training_actors = trainers_proc_mesh.spawn(
                 "training_actors",
