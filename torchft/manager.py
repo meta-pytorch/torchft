@@ -621,9 +621,9 @@ class Manager:
 
         ProcessGroup will be in a healthy state after this returns.
         """
-        assert self._quorum_future is not None, (
-            "must call start_quorum before wait_quorum"
-        )
+        assert (
+            self._quorum_future is not None
+        ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
     @torch.profiler.record_function("torchft::manager::_async_quorum")
@@ -771,9 +771,9 @@ class Manager:
                             self._group_rank, timeout=self._timeout
                         )
                         recover_src_replica_rank = quorum.recover_src_replica_rank
-                        assert recover_src_replica_rank is not None, (
-                            "must have a recover rank when healing"
-                        )
+                        assert (
+                            recover_src_replica_rank is not None
+                        ), "must have a recover rank when healing"
 
                         self._logger.info(
                             f"fetching checkpoint from {recover_src_replica_rank=} with {checkpoint_metadata=}"
@@ -832,9 +832,9 @@ class Manager:
         else:
             self._logger.info("applying pending state dict")
 
-            assert len(self._load_state_dict_fns) > 0, (
-                "user load_state_dict is not initialized."
-            )
+            assert (
+                len(self._load_state_dict_fns) > 0
+            ), "user load_state_dict is not initialized."
 
             pending_user_state_dict = cast(
                 Dict[str, object], pending_state_dict["user"]
@@ -951,9 +951,9 @@ class Manager:
 
     def _manager_state_dict(self) -> Dict[str, object]:
         with self._state_dict_lock.r_lock():
-            assert len(self._user_state_dicts) > 0, (
-                "user state_dict is not initialized."
-            )
+            assert (
+                len(self._user_state_dicts) > 0
+            ), "user state_dict is not initialized."
             return {
                 "user": {key: value() for key, value in self._user_state_dicts.items()},
                 "torchft": self.state_dict(),

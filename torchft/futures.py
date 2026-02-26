@@ -262,9 +262,7 @@ class _TimeoutManager:
                 assert (
                     # 1 from item, 1 from getrefcount
                     refcount == 2
-                ), (
-                    f"items in del_queue reference should not have other references, found {refcount=}"
-                )
+                ), f"items in del_queue reference should not have other references, found {refcount=}"
                 del item
 
                 count += 1

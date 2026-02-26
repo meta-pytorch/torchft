@@ -115,12 +115,12 @@ def allocate_reduce_scatter_output(
     device = tensors[0].device
     dtype = tensors[0].dtype
     for i in range(1, len(tensors)):
-        assert tensors[i].device == tensors[i - 1].device, (
-            "All inputs must be on the same device"
-        )
-        assert tensors[i].dtype == tensors[i - 1].dtype, (
-            "All inputs must be on the same dtype"
-        )
+        assert (
+            tensors[i].device == tensors[i - 1].device
+        ), "All inputs must be on the same device"
+        assert (
+            tensors[i].dtype == tensors[i - 1].dtype
+        ), "All inputs must be on the same dtype"
 
     padded_sizes = get_padded_sizes(tensors, world_size)
 
