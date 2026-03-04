@@ -464,12 +464,12 @@ def _prepare_quantize_fp8(
     device = inputs[0].device
     dtype = inputs[0].dtype
     for i in range(1, i_num):
-        assert inputs[i].device == inputs[i - 1].device, (
-            "All inputs must be on the same device"
-        )
-        assert inputs[i].dtype == inputs[i - 1].dtype, (
-            "All inputs must be on the same dtype"
-        )
+        assert (
+            inputs[i].device == inputs[i - 1].device
+        ), "All inputs must be on the same device"
+        assert (
+            inputs[i].dtype == inputs[i - 1].dtype
+        ), "All inputs must be on the same dtype"
 
     assert dtype in [
         torch.float32,

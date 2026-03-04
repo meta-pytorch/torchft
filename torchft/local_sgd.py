@@ -615,9 +615,9 @@ class DiLoCo:
         """
 
         if isinstance(outer_optimizer, list):
-            assert len(outer_optimizer) == len(model_fragments), (
-                "The number of outer optimizers must match the number of model fragments"
-            )
+            assert len(outer_optimizer) == len(
+                model_fragments
+            ), "The number of outer optimizers must match the number of model fragments"
 
         if manager._use_async_quorum:
             raise ValueError(
@@ -790,6 +790,6 @@ class DiLoCo:
             self._local_step = 0
             return
 
-        assert False, (
-            f"{self._local_step=} should never be greater than {self._sync_every=}"
-        )
+        assert (
+            False
+        ), f"{self._local_step=} should never be greater than {self._sync_every=}"
