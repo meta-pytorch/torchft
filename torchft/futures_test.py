@@ -78,9 +78,9 @@ class FuturesTest(TestCase):
             pass
 
     # pyre-fixme[56]: Pyre was not able to infer the type of decorator
-    @skipUnless(torch.cuda.is_available(), "CUDA is required for this test")
+    @skipUnless(torch.accelerator.is_available(), "accelerator is required for this test")
     def test_stream_timeout(self) -> None:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         def callback() -> None:
             self.fail()
@@ -88,7 +88,7 @@ class FuturesTest(TestCase):
         stream_timeout(callback, timeout=timedelta(seconds=0.01))
 
         # make sure event completes
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # make sure that event is deleted on the deletion queue
         item = _TIMEOUT_MANAGER._del_queue.get(timeout=10.0)

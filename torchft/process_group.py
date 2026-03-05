@@ -21,12 +21,11 @@ import os
 import threading
 import time
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing.connection import Connection
 from typing import (
-    Any,
     Callable,
     cast,
     Dict,
@@ -83,6 +82,11 @@ _FUTURE_EXCEPTION = "fut_exception"
 
 
 T = TypeVar("T")
+
+# Default timeout constants
+_DEFAULT_TIMEOUT_SECONDS = 60
+_DEFAULT_NCCL_TIMEOUT_SECONDS = 60.0
+_DEFAULT_XCCL_TIMEOUT_SECONDS = 60.0
 
 TORCH_NCCL_DEBUG_INFO_PIPE_FILE_ENV_VAR = "TORCH_NCCL_DEBUG_INFO_PIPE_FILE"
 # Used to trigger flight recorder if we trigger abort on the process group
@@ -326,10 +330,8 @@ class ProcessGroup(BaseProcessGroup):
             return self
 
         devices = ["cpu"]
-        if torch.cuda.is_available():
-            devices.append("cuda")
-        elif torch.xpu.is_available():
-            devices.append("xpu")
+        if torch.accelerator.is_available():
+            devices.append(torch.accelerator.current_accelerator())
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
 
         return group_name
@@ -410,10 +412,12 @@ class ProcessGroupWrapper(ProcessGroup):
 
     def __init__(
         self,
-        timeout: timedelta = timedelta(seconds=60),
+        timeout: Optional[timedelta] = None,
         pg: Optional[ProcessGroup] = None,
     ) -> None:
         super().__init__(0, 1)
+        if timeout is None:
+            timeout = timedelta(seconds=_DEFAULT_TIMEOUT_SECONDS)
         self._pg: Optional[BaseProcessGroup] = pg
         self._timeout = timeout
         self._replica_id: str | None = None
@@ -489,10 +493,10 @@ class ProcessGroupWrapper(ProcessGroup):
             else:
                 backend = None
                 try:
-                    if torch.cuda.is_available():
-                        backend = pg._get_backend(torch.device("cuda"))
-                    elif torch.xpu.is_available():
-                        backend = pg._get_backend(torch.device("xpu"))
+                    if torch.accelerator.is_available():
+                        backend = pg._get_backend(
+                            torch.device(torch.accelerator.current_accelerator())
+                        )
                 except RuntimeError:
                     backend = None
                 if backend is not None and hasattr(backend, "abort"):
@@ -660,9 +664,11 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
         )
-        if torch.cuda.is_available():
+        if torch.accelerator.is_available():
             pg._register_backend(
-                torch.device("cuda"), ProcessGroup.BackendType.GLOO, backend_class
+                torch.device(torch.accelerator.current_accelerator()),
+                ProcessGroup.BackendType.GLOO,
+                backend_class,
             )
         return pg
 
@@ -724,14 +730,13 @@ class _WorkAcceleratorTimeout(Work):
             # In newer versions of PyTorch work may not exist if the call was
             # not async. In these cases we can just schedule the stream timeout
             # and return.
-            if self._work is not None:
-                if not self._work.wait():
-                    return False
+            if self._work is not None and not self._work.wait():
+                return False
 
-            # Always use cuda stream for timeout to avoid ProcessGroupNCCL
+            # Always synchronize accelerator stream for timeout to avoid ProcessGroupNCCL
             # watchdog firing and crashing the process.
-            if timeout is not None:
-                torch.cuda.synchronize()
+            if timeout is not None and torch.accelerator.is_available():
+                torch.accelerator.synchronize()
 
             return True
 
@@ -796,9 +801,15 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         timeout: the timeout to use for NCCL operations.
     """
 
-    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
+    def __init__(self, timeout: Optional[timedelta] = None) -> None:
+        if timeout is None:
+            timeout = timedelta(seconds=_DEFAULT_NCCL_TIMEOUT_SECONDS)
         super().__init__(timeout)
-        self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
+        # Check if NCCL abort is supported (requires NCCL 2.25+)
+        try:
+            self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
+        except (AttributeError, RuntimeError):
+            self._use_abort: bool = False
 
         self._errored: Optional[Exception] = None
 
@@ -807,7 +818,8 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
             warnings.warn(
                 f"{NONBLOCKING_TIMEOUT_ENV} is not set, defaulting to {timeout}. "
                 "If any nonblocking NCCL operations have already run this may "
-                "result in the default timeout of 30 minutes and hangs on error."
+                "result in the default timeout of 30 minutes and hangs on error.",
+                stacklevel=2,
             )
             os.environ[NONBLOCKING_TIMEOUT_ENV] = str(timeout.total_seconds())
 
@@ -867,8 +879,9 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         backend_class.eager_connect_single_device(
             torch.device(torch.accelerator.current_device_index())
         )
+        device = torch.device(torch.accelerator.current_accelerator())
         pg._register_backend(
-            torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
+            device, ProcessGroup.BackendType.NCCL, backend_class
         )
         return pg
 
@@ -911,7 +924,9 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
         timeout: the timeout to use for XCCL operations.
     """
 
-    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
+    def __init__(self, timeout: Optional[timedelta] = None) -> None:
+        if timeout is None:
+            timeout = timedelta(seconds=_DEFAULT_XCCL_TIMEOUT_SECONDS)
         super().__init__(timeout)
         # Check if XPU is available and XCCL is supported
         self._use_abort: bool = torch.xpu.is_available()
@@ -923,7 +938,8 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
             warnings.warn(
                 f"{NONBLOCKING_TIMEOUT_ENV} is not set, defaulting to {timeout}. "
                 "If any nonblocking XCCL operations have already run this may "
-                "result in the default timeout of 30 minutes and hangs on error."
+                "result in the default timeout of 30 minutes and hangs on error.",
+                stacklevel=2,
             )
             os.environ[NONBLOCKING_TIMEOUT_ENV] = str(timeout.total_seconds())
 
@@ -1344,7 +1360,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
         if isinstance(opts, AllreduceOptions):
             return self._manager.allreduce(tensors[0], reduce_op=opts.reduceOp)
 
-        assert False, "unreachable"
+        raise AssertionError("unreachable")
 
     def size(self) -> int:
         return self._manager.num_participants()
@@ -1398,6 +1414,17 @@ def _is_any_xpu(obj: object) -> bool:
     Supports lists, tuples, dicts, and tensors.
     """
     return tree_any(lambda obj: isinstance(obj, torch.Tensor) and obj.is_xpu, obj)
+
+
+def _is_any_accelerator(obj: object) -> bool:
+    """
+    Returns true if any of the tensors in the object are on an accelerator device.
+
+    Supports lists, tuples, dicts, and tensors.
+    """
+    return tree_any(
+        lambda obj: isinstance(obj, torch.Tensor) and obj.device.type != "cpu", obj
+    )
 
 
 @dataclass
@@ -1665,7 +1692,11 @@ class ProcessGroupBaby(ProcessGroup):
                     op_id: int = cast(int, op[1])
                     metadata: _OpMetadata = work[op_id]
 
-                    def callback(fut: Future[object], metadata: _OpMetadata) -> None:
+                    def callback(
+                        fut: Future[object],
+                        metadata: _OpMetadata,
+                        op_id: int = op_id,
+                    ) -> None:
                         try:
                             # create an event after the collective has been issued
                             # to wait on this before we call "future"
@@ -1682,7 +1713,7 @@ class ProcessGroupBaby(ProcessGroup):
                             future_pipe.send((op_id, _FUTURE_EXCEPTION, e, None))
 
                     metadata.work.get_future().add_done_callback(
-                        lambda fut: callback(fut, metadata)
+                        lambda fut, m=metadata, oid=op_id: callback(fut, m, oid)
                     )
                 elif cmd == "num_active_work":
                     req_pipe.send(len(work))
@@ -1766,7 +1797,7 @@ class ProcessGroupBaby(ProcessGroup):
         pipe = self._pipe
         assert pipe is not None
 
-        is_accelerator = _is_any_cuda(args) or _is_any_xpu(args)
+        is_accelerator = _is_any_accelerator(args)
 
         stream_device = (
             torch.accelerator.current_stream().device if is_accelerator else None
@@ -2069,8 +2100,9 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
         backend_class = BaseProcessGroupNCCL(store, rank, world_size)
         backend_class._set_sequence_number_for_group()
+        device = torch.device(torch.accelerator.current_accelerator())
         pg._register_backend(
-            torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
+            device, ProcessGroup.BackendType.NCCL, backend_class
         )
         return pg
 
@@ -2116,3 +2148,75 @@ class ProcessGroupBabyXCCL(ProcessGroupBaby):
 
     def getBackendName(self) -> str:
         return "torchft-baby-xccl"
+
+
+class ProcessGroupAccelerator(ProcessGroupWrapper):
+    """
+    Device-agnostic process group that automatically detects the accelerator type
+    and delegates to the appropriate backend (NCCL for CUDA, XCCL for XPU).
+
+    This allows writing device-agnostic code without explicitly choosing between
+    ProcessGroupNCCL and ProcessGroupXCCL.
+
+    Args:
+        timeout: the timeout to use for operations.
+    """
+
+    def __init__(self, timeout: Optional[timedelta] = None) -> None:
+        if timeout is None:
+            timeout = timedelta(seconds=60.0)
+        # Detect device type and create appropriate backend
+        device = torch.device(torch.accelerator.current_accelerator())
+        backend = dist.get_default_backend_for_device(device)
+
+        if backend == "nccl":
+            pg = ProcessGroupNCCL(timeout=timeout)
+        elif backend == "xccl":
+            pg = ProcessGroupXCCL(timeout=timeout)
+        else:
+            raise RuntimeError(
+                f"ProcessGroupAccelerator does not support backend '{backend}' for device '{device}'"
+            )
+        super().__init__(timeout=timeout, pg=pg)
+
+    def getBackendName(self) -> str:
+        if self._pg is not None:
+            return self._pg.getBackendName()
+        return "torchft-accelerator"
+
+
+class ProcessGroupBabyAccelerator(ProcessGroupBaby):
+    """
+    Device-agnostic baby process group that automatically detects the accelerator type
+    and delegates to the appropriate backend (BabyNCCL for CUDA, BabyXCCL for XPU).
+
+    This runs the underlying process group in a subprocess and allows writing
+    device-agnostic code without explicitly choosing between ProcessGroupBabyNCCL
+    and ProcessGroupBabyXCCL.
+
+    Args:
+        timeout: the timeout to use for operations.
+    """
+
+    @classmethod
+    def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        """Create the appropriate backend based on available accelerator."""
+        device = torch.device(torch.accelerator.current_accelerator())
+        backend = dist.get_default_backend_for_device(device)
+
+        if backend == "nccl":
+            return ProcessGroupBabyNCCL._create_pg(store, rank, world_size)
+        elif backend == "xccl":
+            return ProcessGroupBabyXCCL._create_pg(store, rank, world_size)
+        else:
+            raise RuntimeError(
+                f"ProcessGroupBabyAccelerator does not support backend '{backend}' for device '{device}'"
+            )
+
+    def getBackendName(self) -> str:
+        try:
+            device = torch.device(torch.accelerator.current_accelerator())
+            backend = dist.get_default_backend_for_device(device)
+            return f"torchft-baby-{backend}"
+        except Exception:
+            return "torchft-baby-accelerator"

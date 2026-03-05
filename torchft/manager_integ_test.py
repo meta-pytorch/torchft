@@ -41,7 +41,7 @@ from torchft.manager import Manager
 from torchft.optim import OptimizerWrapper
 from torchft.process_group import (
     FakeProcessGroupWrapper,
-    ProcessGroupBabyNCCL,
+    ProcessGroupBabyAccelerator,
     ProcessGroupGloo,
 )
 
@@ -189,7 +189,7 @@ class Runner:
     event_injector: EventInjector
     train_loop: TrainLoop[object]
 
-    use_cuda: bool = False
+    use_accelerator: bool = False
     world_size: int = 1
     attempts: int = 3
     manager_args: Dict[str, object] = field(default_factory=dict)
@@ -208,13 +208,15 @@ class Runner:
         ) as executor:
             futures = []
             for rank in range(self.world_size):
-                if self.use_cuda:
-                    num_cuda_devices = torch.cuda.device_count()
-                    assert num_cuda_devices >= self.num_replicas
+                if self.use_accelerator:
+                    num_accelerators = torch.accelerator.device_count()
+                    assert num_accelerators >= self.num_replicas
                     device_index = (
-                        num_cuda_devices // self.num_replicas
+                        num_accelerators // self.num_replicas
                     ) * self.replica_id + rank
-                    device = torch.device(f"cuda:{device_index}")
+                    device = torch.device(
+                        f"{torch.accelerator.current_accelerator.type}:{device_index}"
+                    )
                 else:
                     device = torch.device("cpu")
 
@@ -557,14 +559,14 @@ class ManagerIntegTest(TestCase):
 
     @parameterized.expand(
         [
-            (True,),  # Test with CUDA
-            (False,),  # Test without CUDA (CPU)
+            (True,),  # Test with accelerator
+            (False,),  # Test without accelerator (CPU)
         ]
     )
-    def test_manager_allreduce(self, use_cuda: bool) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+    def test_manager_allreduce(self, use_accelerator: bool) -> None:
+        # Skip the test if use_accelerator is True and there are not enough accelerators
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough accelerators for accelerator test")
 
         # manager supports allreduce but we found an issue where the future callback is getting called
         # before the allreduce is complete. This test is to ensure that the callback has stream synchronization
@@ -584,7 +586,7 @@ class ManagerIntegTest(TestCase):
                     lighthouse_address=lighthouse.address(),
                     event_injector=event_injector,
                     train_loop=all_reduce_callback,
-                    use_cuda=use_cuda,
+                    use_accelerator=use_accelerator,
                 )
                 futures.append(executor.submit(runner.run_replica))
 
@@ -614,8 +616,8 @@ def all_reduce_callback(
     with ExitStack() as stack:
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
-        if device.type == "cuda":
-            pg = ProcessGroupBabyNCCL()
+        if device.type == torch.accelerator.current_accelerator.type:
+            pg = ProcessGroupBabyAccelerator()
         else:
             pg = ProcessGroupGloo()
         manager = Manager(

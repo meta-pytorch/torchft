@@ -35,12 +35,14 @@ from torchft.manager_integ_test import (
 )
 from torchft.process_group import (
     FakeProcessGroupWrapper,
-    ProcessGroupBabyNCCL,
+    ProcessGroupBabyAccelerator,
     ProcessGroupGloo,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+device = torch.accelerator.current_accelerator()
 
 
 def local_sgd_train_loop(
@@ -64,8 +66,8 @@ def local_sgd_train_loop(
 
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
-        if device.type == "cuda":
-            pg = ProcessGroupBabyNCCL()
+        if device.type == device:
+            pg = ProcessGroupBabyAccelerator()
         else:
             pg = ProcessGroupGloo()
         manager = Manager(
@@ -180,10 +182,10 @@ class LocalSGDIntegTest(TestCase):
             (False,),
         ]
     )
-    def test_local_sgd_recovery(self, use_cuda: bool) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+    def test_local_sgd_recovery(self, use_accelerator: bool) -> None:
+        # Skip the test if use_accelerator is True and there are not enough GPUs
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough GPUs for accelerator test")
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -207,7 +209,7 @@ class LocalSGDIntegTest(TestCase):
                     lighthouse_address=lighthouse.address(),
                     event_injector=event_injector,
                     train_loop=local_sgd_train_loop,
-                    use_cuda=use_cuda,
+                    use_accelerator=use_accelerator,
                     manager_args={
                         "use_async_quorum": False,
                     },
@@ -240,10 +242,10 @@ class LocalSGDIntegTest(TestCase):
             (False,),
         ]
     )
-    def test_diloco_healthy(self, use_cuda: bool) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+    def test_diloco_healthy(self, use_accelerator: bool) -> None:
+        # Skip the test if use_accelerator is True and there are not enough GPUs
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough GPUs for accelerator test")
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -264,7 +266,7 @@ class LocalSGDIntegTest(TestCase):
                     lighthouse_address=lighthouse.address(),
                     event_injector=event_injector,
                     train_loop=diloco_train_loop,
-                    use_cuda=use_cuda,
+                    use_accelerator=use_accelerator,
                     train_loop_args={
                         "model_state_dict": m.state_dict(),
                     },
@@ -293,10 +295,10 @@ class LocalSGDIntegTest(TestCase):
             (False,),
         ]
     )
-    def test_diloco_recovery(self, use_cuda: bool) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+    def test_diloco_recovery(self, use_accelerator: bool) -> None:
+        # Skip the test if use_accelerator is True and there are not enough GPUs
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough GPUs for accelerator test")
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -373,10 +375,10 @@ class LocalSGDIntegTest(TestCase):
             (False,),
         ]
     )
-    def test_streaming_diloco_recovery(self, use_cuda: bool) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+    def test_streaming_diloco_recovery(self, use_accelerator: bool) -> None:
+        # Skip the test if use_accelerator is True and there are not enough GPUs
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough GPUs for accelerator test")
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -436,8 +438,8 @@ class LocalSGDIntegTest(TestCase):
         self.assertEqual(event_injectors[1].count[EventInjectorEvent.Failure], 1)
 
     CONFIG: list[tuple[bool, int, int, float]] = [
-        (use_cuda, n_fragments, fragment_sync_delay, alpha)
-        for use_cuda in [False]
+        (use_accelerator, n_fragments, fragment_sync_delay, alpha)
+        for use_accelerator in [False]
         for n_fragments in [1, 2]
         for fragment_sync_delay in [0, 1]
         for alpha in [0.0, 0.5, 1.0]
@@ -447,11 +449,15 @@ class LocalSGDIntegTest(TestCase):
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(CONFIG)
     def test_streaming_diloco_upscale(
-        self, use_cuda: bool, n_fragments: int, fragment_sync_delay: int, alpha: float
+        self,
+        use_accelerator: bool,
+        n_fragments: int,
+        fragment_sync_delay: int,
+        alpha: float,
     ) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+        # Skip the test if use_accelerator is True and there are not enough GPUs
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough GPUs for accelerator test")
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -523,11 +529,15 @@ class LocalSGDIntegTest(TestCase):
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(CONFIG)
     def test_streaming_diloco_commit_failure(
-        self, use_cuda: bool, n_fragments: int, fragment_sync_delay: int, alpha: float
+        self,
+        use_accelerator: bool,
+        n_fragments: int,
+        fragment_sync_delay: int,
+        alpha: float,
     ) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+        # Skip the test if use_accelerator is True and there are not enough GPUs
+        if use_accelerator and torch.accelerator.device_count() < 2:
+            self.skipTest("Not enough GPUs for accelerator test")
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
