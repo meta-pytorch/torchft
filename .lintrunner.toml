@@ -50,9 +50,9 @@ init_command = [
     'pip_init',
     '--dry-run={{DRYRUN}}',
     'black==24.4.2',
-    'ufmt==2.6.0',
-    'usort==1.0.5',
-    'ruff-api==0.1.0',
+    'ufmt==2.9.1',
+    'usort==1.1.0',
+    'ruff-api==0.2.1',
 ]
 
 [[linter]]
