@@ -730,7 +730,14 @@ class Manager:
                         f"resetting fr recording for quorum id {self._quorum_id}"
                     )
                     self._update_fr_path()
-                    torch._C._distributed_c10d._reset_fr_recording_nccl()  # pyre-ignore
+                    # Only reset FR recording if available (requires NCCL Flight Recorder support)
+                    if hasattr(torch._C._distributed_c10d, "_reset_fr_recording_nccl"):
+                        torch._C._distributed_c10d._reset_fr_recording_nccl()  # pyre-ignore
+                    else:
+                        self._logger.warn(
+                            "Unable to reset NCCL flight recorder recording so traces will be "
+                            "incorrect."
+                        )
             except Exception as e:
                 self._logger.exception(f"got exception in pg configure: {e}")
                 self.report_error(e)
