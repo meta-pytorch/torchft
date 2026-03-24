@@ -6,9 +6,11 @@
 
 import copy
 import logging
+import os
 import threading
 import time
 import traceback
+import unittest
 from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from contextlib import contextmanager, ExitStack
@@ -44,6 +46,15 @@ from torchft.process_group import (
     ProcessGroupBabyNCCL,
     ProcessGroupGloo,
 )
+
+try:
+    # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
+    import torchcomms._comms_mccl
+    from torchft.torchcomms import ProcessGroupTorchComms
+
+    TORCHCOMMS_AVAILABLE = True
+except ImportError:
+    TORCHCOMMS_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
@@ -602,6 +613,161 @@ class ManagerIntegTest(TestCase):
         print(results)
         r0, r1 = results
         torch.testing.assert_close(r0, r1, check_device=False)
+
+    @unittest.skipUnless(TORCHCOMMS_AVAILABLE, "torchcomms not installed")
+    def test_ddp_healthy_torchcomms(self) -> None:
+        os.environ["TORCHCOMM_RANK"] = "0"
+        os.environ["TORCHCOMM_SIZE"] = "1"
+
+        lighthouse = LighthouseServer(
+            bind="[::]:0",
+            min_replicas=2,
+        )
+        num_replicas = 2
+        futures = []
+
+        with ThreadPoolExecutor(max_workers=num_replicas) as executor:
+            for replica_id in range(num_replicas):
+                event_injector = EventInjector()
+                runner = Runner(
+                    use_cuda=True,
+                    replica_id=replica_id,
+                    num_replicas=num_replicas,
+                    lighthouse_address=lighthouse.address(),
+                    event_injector=event_injector,
+                    train_loop=ddp_train_loop_torchcomms,
+                )
+                futures.append(executor.submit(runner.run_replica))
+
+        state_dicts = []
+
+        for fut in as_completed(futures):
+            state_dicts.append(fut.result())
+
+        lighthouse.shutdown()
+
+        for state_dict in state_dicts:
+            torch.testing.assert_close(state_dict, state_dicts[0])
+
+    @unittest.skipUnless(TORCHCOMMS_AVAILABLE, "torchcomms not installed")
+    def test_ddp_recovery_torchcomms(self) -> None:
+        os.environ["TORCHCOMM_RANK"] = "0"
+        os.environ["TORCHCOMM_SIZE"] = "1"
+
+        lighthouse = LighthouseServer(
+            bind="[::]:0",
+            min_replicas=2,
+        )
+        num_replicas = 2
+        futures = []
+
+        event_injectors = [
+            EventInjector(),
+            EventInjector().fail_at(0, 2),
+        ]
+
+        with ThreadPoolExecutor(max_workers=num_replicas) as executor:
+            for replica_id, event_injector in zip(range(num_replicas), event_injectors):
+                runner = Runner(
+                    use_cuda=True,
+                    replica_id=replica_id,
+                    num_replicas=num_replicas,
+                    lighthouse_address=lighthouse.address(),
+                    event_injector=event_injector,
+                    train_loop=ddp_train_loop_torchcomms,
+                )
+                futures.append(executor.submit(runner.run_replica))
+
+            state_dicts = []
+
+            for fut in as_completed(futures):
+                try:
+                    state_dicts.append(fut.result())
+                except Exception as e:
+                    print(e)
+                    raise
+
+        lighthouse.shutdown()
+
+        for state_dict in state_dicts:
+            torch.testing.assert_close(state_dict, state_dicts[0])
+
+        self.assertEqual(event_injectors[1].count[EventInjectorEvent.Failure], 1)
+
+
+def ddp_train_loop_torchcomms(
+    rank: int,
+    store_port: int,
+    device: torch.device,
+    runner: Runner,
+    train_loop_args: dict[str, Any] = {},
+) -> Dict[str, Dict[str, object]]:
+    with ExitStack() as stack:
+
+        def load_state_dict(state_dict: Dict[str, Dict[str, object]]) -> None:
+            m.load_state_dict(state_dict["model"])
+            optimizer.load_state_dict(state_dict["optim"])
+
+        def state_dict() -> Dict[str, Dict[str, object]]:
+            return {
+                "model": m.state_dict(),
+                "optim": optimizer.state_dict(),
+            }
+
+        print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
+
+        # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
+        import torchcomms
+
+        comm = torchcomms.new_comm(
+            backend="mccl", device=device, name=f"mccl{rank}", enable_reconfigure=True
+        )
+        pg = ProcessGroupTorchComms(comm=comm)
+        manager = Manager(
+            pg=pg,
+            min_replica_size=2,
+            load_state_dict=load_state_dict,
+            state_dict=state_dict,
+            replica_id=str(runner.replica_id),
+            store_addr="localhost",
+            store_port=store_port,
+            rank=rank,
+            world_size=runner.world_size,
+            lighthouse_addr=runner.lighthouse_address,
+            port=19530 + runner.replica_id,
+            # pyre-fixme[6]: Incompatible parameter type
+            **runner.manager_args,
+        )
+        stack.callback(lambda: manager.shutdown(wait=False))
+
+        with INIT_LOCK:
+            torch.manual_seed(42)
+            m: nn.Module = MyModel()
+
+        m: nn.Module = DistributedDataParallel(manager, m)
+        optimizer: optim.Optimizer = OptimizerWrapper(
+            manager, optim.Adam(m.parameters())
+        )
+        criterion = nn.CrossEntropyLoss()
+
+        while True:
+            inputs = torch.rand(2, 3)
+            labels = torch.randint(4, (2,))
+
+            optimizer.zero_grad()
+            out = m(inputs)
+            loss = criterion(out, labels)
+
+            loss.backward()
+
+            optimizer.step()
+
+            if manager.current_step() >= 4:
+                break
+
+            runner.event_injector.check(rank, manager.current_step())
+
+        return state_dict()
 
 
 def all_reduce_callback(
