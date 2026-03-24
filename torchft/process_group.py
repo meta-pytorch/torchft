@@ -864,9 +864,13 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
         backend_class = BaseProcessGroupNCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
-        backend_class.eager_connect_single_device(
-            torch.device(torch.accelerator.current_device_index())
-        )
+        # NOTE: We intentionally do NOT call eager_connect_single_device here.
+        # In non-blocking mode (blocking=False), eager_connect starts an async
+        # communicator init that cannot be waited on through Python APIs. The
+        # first collective would then fail with "NCCL Error 7: operation in
+        # progress". Instead, we let the communicator be lazily initialized by
+        # the first collective, which properly handles the async init inside
+        # its ncclGroupStart/ncclGroupEnd context.
         pg._register_backend(
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
         )
