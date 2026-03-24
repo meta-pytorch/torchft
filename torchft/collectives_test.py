@@ -95,13 +95,9 @@ else:
 
                 work = allreduce_quantized(tensors, reduce_op, pg)
                 work.wait()
-                # Synchronize to ensure non-blocking NCCL operations are
-                # fully complete before the next iteration.
-                cuda.synchronize()
 
                 work = pg.allreduce([expected], reduce_op)
                 work.get_future().wait()
-                cuda.synchronize()
 
                 _check_result_tolerance(actual, expected, tolerance)
 
@@ -146,7 +142,6 @@ else:
 
                 work = reduce_scatter_quantized(actual_output, tensors, opts, pg)
                 work.get_future().wait()
-                cuda.synchronize()
 
                 padded_sizes = get_padded_sizes(tensors, world_size)
                 padded_numel = sum(s.numel() for s in padded_sizes)
@@ -162,7 +157,6 @@ else:
 
                 work = pg.reduce_scatter([expected_output], [[padded_input]], opts)
                 work.get_future().wait()
-                cuda.synchronize()
 
                 _check_result_tolerance(actual_output, expected_output, tolerance)
 
