@@ -879,7 +879,7 @@ class Manager:
         """
         # make sure recovery is complete before committing
         with torch.profiler.record_function(
-            "torchft::manager::should_commmit::recovery_stream::synchronize"
+            "torchft::manager::should_commit::recovery_stream::synchronize"
         ):
             if self._recovery_event is not None:
                 self._recovery_event.synchronize()
