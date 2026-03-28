@@ -433,7 +433,7 @@ class Manager:
             a Future that will be completed with the allreduced tensor
         """
         if self.errored():
-            return _DummyWork(tensor)
+            return _ManagedWork(self, _DummyWork(tensor), tensor)
 
         self.wait_quorum()
         num_participants: int = self.num_participants()
@@ -490,7 +490,7 @@ class Manager:
             )
             self.report_error(e)
 
-            return _DummyWork(tensor)
+            return _ManagedWork(self, _DummyWork(tensor), tensor)
 
     def report_error(self, e: Exception) -> None:
         """
