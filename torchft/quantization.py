@@ -6,7 +6,6 @@
 
 # pyre-unsafe
 import torch
-import torch.cuda as cuda
 
 # pyre-ignore[21]: Could not find a module corresponding to import `triton`
 import triton
@@ -28,14 +27,14 @@ BLOCK_SIZE_T: int = 2048
 
 # pyre-ignore[11]: Annotation `tl.constexpr` is not defined
 def _get_fp8_max() -> tl.constexpr:
-    if cuda.get_device_capability() >= (9, 0):
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0):
         return tl.constexpr(448.0)
     else:
         return tl.constexpr(127)
 
 
 def _get_fp8_type() -> tl.constexpr:
-    if cuda.get_device_capability() >= (9, 0):
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0):
         return tl.constexpr(tl.float8e4nv)
     else:
         return tl.constexpr(tl.int8)

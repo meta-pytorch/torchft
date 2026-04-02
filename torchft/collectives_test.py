@@ -43,11 +43,11 @@ else:
             raise AssertionError(f"Results not within tolerance {tolerance}")
 
     @skipUnless(
-        torch.cuda.is_available() and torch.cuda.device_count() >= 2,
-        "2 CUDA devices are required for this test",
+        torch.accelerator.is_available() and torch.accelerator.device_count() >= 2,
+        "2 accelerator devices are required for this test",
     )
     class QuantizedAllReduceTest(MultiPgBaseTest):
-        BACKEND = "nccl"
+        BACKEND = "accelerator"
         WORLD_SIZE = 2
 
         def _run_parallel_collectives(
@@ -56,7 +56,7 @@ else:
             futures = []
             for rank in range(self.WORLD_SIZE):
                 pg = self.pg_pool[rank]
-                device = f"cuda:{rank}"
+                device = f"{torch.accelerator.current_accelerator().type}:{rank}"
                 fut = self.executor.submit(collective, pg, rank, device)
                 futures.append(fut)
 
@@ -73,7 +73,7 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            cuda.set_device(device)
+            torch.accelerator.set_device_index(device)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
@@ -112,7 +112,8 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            cuda.set_device(device)
+            # here
+            torch.accelerator.set_device_index(device)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,

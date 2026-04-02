@@ -10,6 +10,8 @@ from torchft.manager import Manager
 from torchft.optim import OptimizerWrapper as Optimizer
 from torchft.otel import setup_logger
 from torchft.process_group import (
+    ProcessGroupAccelerator,
+    ProcessGroupBabyAccelerator,
     ProcessGroupBabyNCCL,
     ProcessGroupBabyXCCL,
     ProcessGroupGloo,
@@ -26,6 +28,8 @@ __all__ = (
     "DistributedSampler",
     "Manager",
     "Optimizer",
+    "ProcessGroupAccelerator",
+    "ProcessGroupBabyAccelerator",
     "ProcessGroupNCCL",
     "ProcessGroupXCCL",
     "ProcessGroupBabyNCCL",
