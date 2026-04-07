@@ -21,6 +21,7 @@ from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing._serialization import _streaming_load, _streaming_save
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.http import _IPv6HTTPServer
+from torchft.utils import get_stream_context
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -55,8 +56,10 @@ class HTTPTransport(CheckpointTransport[T]):
         self._timeout = timeout
         self._state_dict: Optional[T] = None
         self._num_chunks = num_chunks
-        self._stream: Optional[torch.cuda.Stream] = (
-            torch.cuda.Stream() if torch.cuda.is_available() else None
+        self._stream: Optional[torch.Stream] = (
+            torch.Stream(torch.accelerator.current_accelerator())
+            if torch.accelerator.is_available()
+            else None
         )
 
         # staged checkpoint information
@@ -222,7 +225,7 @@ class HTTPTransport(CheckpointTransport[T]):
         values, spec = tree_flatten(state_dict)
 
         with (
-            torch.cuda.stream(self._stream)
+            get_stream_context(self._stream)
             if self._stream is not None
             else nullcontext()
         ):

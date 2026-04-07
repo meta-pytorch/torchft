@@ -12,7 +12,7 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from torchft.checkpointing.pg_transport import _timeit, PGTransport
-from torchft.process_group import ProcessGroupBabyNCCL
+from torchft.process_group import ProcessGroupBabyAccelerator
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -46,12 +46,17 @@ def main(argv: list[str]) -> None:
     store_addr: str = f"localhost:{store.port}"
 
     def run(rank: int) -> None:
-        torch.cuda.set_device(rank)
+        if torch.accelerator.is_available():
+            torch.accelerator.set_device_index(rank)
 
-        device = torch.device(DEVICE)
+        device = torch.device(
+            DEVICE
+            if DEVICE != "accelerator"
+            else torch.accelerator.current_accelerator().type
+        )
 
         with _timeit("init_pg"):
-            pg = ProcessGroupBabyNCCL(timeout=timeout)
+            pg = ProcessGroupBabyAccelerator(timeout=timeout)
             pg.configure(store_addr=store_addr, replica_id="0", rank=rank, world_size=2)
 
             t = torch.zeros(10, device=device, dtype=torch.float32)

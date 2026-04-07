@@ -13,7 +13,7 @@ from torchft import _test_utils
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
-DEVICE = "cuda"
+DEVICE = torch.accelerator.current_accelerator().type
 
 try:
     # pyre-fixme[21]: Could not find a module corresponding to import `triton`
@@ -28,8 +28,8 @@ else:
     )
 
     @skipUnless(
-        torch.cuda.is_available(),
-        "CUDA is required for this test",
+        torch.accelerator.is_available(),
+        "Accelerator is required for this test",
     )
     class QuantizationTest(TestCase):
         def run_test(
@@ -46,7 +46,7 @@ else:
                 torch.rand(
                     tensors_num * tensor_size,
                     dtype=type,
-                    device="cuda",
+                    device=DEVICE,
                 )
                 * multiplier
             )

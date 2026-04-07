@@ -28,9 +28,8 @@ from torchft import (
     DistributedSampler,
     Manager,
     Optimizer,
+    ProcessGroupAccelerator,
     ProcessGroupGloo,
-    ProcessGroupNCCL,
-    ProcessGroupXCCL,
 )
 from torchft.checkpointing.pg_transport import PGTransport
 
@@ -78,12 +77,9 @@ def main() -> None:
             "optim": optimizer.state_dict(),
         }
 
-    if torch.cuda.is_available():
-        device = "cuda"
-        pg = ProcessGroupNCCL(timeout=timedelta(seconds=30))
-    elif torch.xpu.is_available():
-        device = "xpu"
-        pg = ProcessGroupXCCL(timeout=timedelta(seconds=30))
+    if torch.accelerator.is_available():
+        device = torch.accelerator.current_accelerator().type
+        pg = ProcessGroupAccelerator(timeout=timedelta(seconds=30))
     else:
         device = "cpu"
         pg = ProcessGroupGloo(timeout=timedelta(seconds=5))
@@ -91,13 +87,7 @@ def main() -> None:
     transport = PGTransport(
         pg,
         timeout=timedelta(seconds=10),
-        device=(
-            "cuda"
-            if torch.cuda.is_available()
-            else "xpu"
-            if torch.xpu.is_available()
-            else "cpu"
-        ),
+        device=device,
     )
 
     manager = Manager(

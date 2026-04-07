@@ -19,6 +19,8 @@ from torch.futures import Future
 from torchft.manager import _ManagedWork, Manager
 
 
+DEVICE = torch.accelerator.current_accelerator()
+
 class SimpleWork(Work):
     """A simple implementation of torch.distributed.Work for testing."""
 
@@ -41,16 +43,16 @@ class TestManagedWork(unittest.TestCase):
     @parameterized.parameterized.expand(
         [
             ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            (DEVICE.type, DEVICE),
         ]
     )
     def test_callbacks_execute_after_wait(
         self, name: str, device: torch.device
     ) -> None:
         """Test that callbacks are only executed after wait() is called."""
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        # Skip if accelerator is requested but not available
+        if device.type == DEVICE.type and not torch.accelerator.is_available():
+            self.skipTest("accelerator not available")
 
         # Create a tensor to work with
         tensor: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)
@@ -98,16 +100,16 @@ class TestManagedWork(unittest.TestCase):
     @parameterized.parameterized.expand(
         [
             ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            (DEVICE.type, DEVICE),
         ]
     )
     def test_multiple_callbacks_execute_in_order(
         self, name: str, device: torch.device
     ) -> None:
         """Test that multiple callbacks are executed in the order they were added."""
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        # Skip if accelerator is requested but not available
+        if device.type == DEVICE.type and not torch.accelerator.is_available():
+            self.skipTest("accelerator not available")
 
         # Create a tensor to work with
         tensor: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)
@@ -168,14 +170,14 @@ class TestManagedWork(unittest.TestCase):
     @parameterized.parameterized.expand(
         [
             ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            (DEVICE.type, DEVICE),
         ]
     )
     def test_future_then_api(self, name: str, device: torch.device) -> None:
         """Test that the future's then API works correctly with ManagedWork."""
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        # Skip if accelerator is requested but not available
+        if device.type == DEVICE.type and not torch.accelerator.is_available():
+            self.skipTest("accelerator not available")
 
         # Create a tensor to work with
         tensor: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)
@@ -223,7 +225,7 @@ class TestManagedWork(unittest.TestCase):
     @parameterized.parameterized.expand(
         [
             ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            (DEVICE.type, DEVICE),
         ]
     )
     def test_callbacks_changing_return_types(
@@ -236,9 +238,9 @@ class TestManagedWork(unittest.TestCase):
         2. Using Future.value() instead of nonlocal
         3. Verifying tensors are modified in-place for both approaches
         """
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        # Skip if accelerator is requested but not available
+        if device.type == DEVICE.type and not torch.accelerator.is_available():
+            self.skipTest("accelerator not available")
 
         # Create tensors to work with
         tensor1: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)

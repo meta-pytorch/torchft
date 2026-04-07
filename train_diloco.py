@@ -27,9 +27,8 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchft import (
     DistributedSampler,
     Manager,
-    ProcessGroupBabyNCCL,
+    ProcessGroupAccelerator,
     ProcessGroupGloo,
-    ProcessGroupNCCL,
 )
 from torchft.checkpointing.http_transport import HTTPTransport
 from torchft.local_sgd import DiLoCo
@@ -58,12 +57,14 @@ def main() -> None:
             "outer_optim": outer_optimizer.state_dict(),
         }
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = (
+        torch.accelerator.current_accelerator()
+        if torch.accelerator.is_available()
+        else torch.device("cpu")
+    )
     pg = (
-        ProcessGroupNCCL(
-            timeout=timedelta(seconds=10),
-        )
-        if torch.cuda.is_available() and USE_NCCL
+        ProcessGroupAccelerator(timeout=timedelta(seconds=10))
+        if torch.accelerator.is_available()
         else ProcessGroupGloo(timeout=timedelta(seconds=10))
     )
 

@@ -20,6 +20,7 @@ from torchft.checkpointing.transport_test import (
     run_multi_recovery_test,
 )
 
+DEVICE = torch.accelerator.current_accelerator()
 
 class TestHTTPTransport(TestCase):
     @parameterized.expand(
@@ -32,8 +33,8 @@ class TestHTTPTransport(TestCase):
         expected: Dict[str, object] = {
             "state": "dict",
             "tensor": torch.rand(5, 2),
-            "cuda": torch.rand(
-                2, 3, device="cuda" if torch.cuda.is_available() else "cpu"
+            "accelerator": torch.rand(
+                2, 3, device=DEVICE.type if torch.accelerator.is_available() else "cpu"
             ),
         }
         state_dict_fn = MagicMock()
@@ -122,9 +123,8 @@ class TestHTTPTransport(TestCase):
         run_multi_recovery_test(self, init, device=device)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
-    @skipUnless(torch.cuda.is_available(), "CUDA is not available")
-    def test_multi_http_transport_cuda(self) -> None:
-        device = torch.device("cuda")
+    @skipUnless(torch.accelerator.is_available(), "accelerator is not available")
+    def test_multi_http_transport_accelerator(self) -> None:
 
         def init(rank: int, world_size: int) -> CheckpointTransport[Dict[str, object]]:
             return HTTPTransport(
@@ -132,7 +132,7 @@ class TestHTTPTransport(TestCase):
                 num_chunks=0,
             )
 
-        run_multi_recovery_test(self, init, device=device)
+        run_multi_recovery_test(self, init, device=DEVICE)
 
     def test_benchmark(self) -> None:
         bench_main(

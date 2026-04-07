@@ -5,13 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 # pyre-ignore[21]: Could not find a module corresponding to import `triton`
 import triton
-from torch import cuda
 from torch.distributed import ReduceOp
 from torch.distributed.distributed_c10d import (
     AllgatherOptions,
@@ -30,6 +29,8 @@ from torchft.quantization import (
     fused_quantize_into_fp8,
     fused_reduce_fp8,
 )
+from torchft.utils import get_stream_context
+
 
 
 def _to_alltoall_options(
@@ -139,7 +140,7 @@ def allocate_reduce_scatter_output(
 class _QuantizedOpFuture(Future[list[torch.Tensor]]):
     def __init__(
         self,
-        sync_stream: cuda.Stream,
+        sync_stream: torch.Stream,
         keep_alive_tensors: list[torch.Tensor],
         return_tensors: list[torch.Tensor],
     ) -> None:
@@ -150,7 +151,7 @@ class _QuantizedOpFuture(Future[list[torch.Tensor]]):
 
     def wait(self) -> list[torch.Tensor]:
         # Wait for the synchronization to complete.
-        cuda.current_stream().wait_stream(self._sync_stream)
+        torch.accelerator.current_stream().wait_stream(self._sync_stream)
         # Clean up intermediate buffers.
         del self._keep_alive_tensors
         return self._return_tensors
@@ -161,7 +162,7 @@ def reduce_scatter_quantized(
     inputs: list[torch.Tensor],
     opts: ReduceScatterOptions | ReduceOp,
     process_group: "ProcessGroup",
-    sync_stream: cuda.Stream | None = None,
+    sync_stream: Optional[torch.Stream] = None,
 ) -> Work:
     """
     Performs a quantized reduce-scatter operation on a list of tensors.
@@ -228,13 +229,21 @@ def reduce_scatter_quantized(
     ]
 
     if sync_stream is None:
-        sync_stream = cuda.Stream()
+        # Create stream on the same device as the input tensors
+        device = inputs[0].device
+        if device.type == "cuda":
+            sync_stream = torch.cuda.Stream(device=device)
+        elif device.type == "xpu":
+            sync_stream = torch.xpu.Stream(device=device)
+        else:
+            # Fallback for other accelerators
+            sync_stream = torch.accelerator.Stream(device=device)
 
     assert sync_stream is not None
     # Ensure that all operations are completed on the current stream
     # before proceeding with all-reduce
-    sync_stream.wait_stream(cuda.current_stream())
-    with cuda.stream(sync_stream):
+    sync_stream.wait_stream(torch.accelerator.current_stream())
+    with get_stream_context(sync_stream):
         # Quantize tensoers and compute their scales, all inlined in the
         # output tensor.
         quantized_inputs = fused_quantize_into_fp8(inputs, world_size)
@@ -263,7 +272,7 @@ def reduce_scatter_quantized(
                 reduce_outputs, \
                 reducescatter_opts
 
-            with torch.cuda.stream(sync_stream):
+            with get_stream_context(sync_stream):
                 # Setup stream dependency
                 fut.wait()
                 # Reduce chunks locally in higher precision after dequantization.
@@ -298,7 +307,7 @@ def allreduce_quantized(
     tensors: list[torch.Tensor],
     opts: AllreduceOptions | ReduceOp,
     process_group: "ProcessGroup",
-    sync_stream: cuda.Stream | None = None,
+    sync_stream: Optional[torch.Stream] = None,
 ) -> Work:
     """
     Performs a quantized all-reduce operation on a list of tensors.
@@ -352,13 +361,21 @@ def allreduce_quantized(
     world_size: int = process_group.size()
 
     if sync_stream is None:
-        sync_stream = cuda.Stream()
+        # Create stream on the same device as the input tensors
+        device = tensors[0].device
+        if device.type == "cuda":
+            sync_stream = torch.cuda.Stream(device=device)
+        elif device.type == "xpu":
+            sync_stream = torch.xpu.Stream(device=device)
+        else:
+            # Fallback for other accelerators
+            sync_stream = torch.accelerator.Stream(device=device)
 
     assert sync_stream is not None
     # Ensure that all operations are completed on the current stream
     # before proceeding with all-reduce
-    sync_stream.wait_stream(cuda.current_stream())
-    with cuda.stream(sync_stream):
+    sync_stream.wait_stream(torch.accelerator.current_stream())
+    with get_stream_context(sync_stream):
         # Quantize tensoers and compute their scales, all inlined in the
         # output tensor.
         quantized_tensors: torch.Tensor = fused_quantize_into_fp8(tensors, world_size)
@@ -405,7 +422,7 @@ def allreduce_quantized(
             # Dequantize and copy to output buffer.
             nonlocal tensors, quantized_tensors, world_size, sync_stream
 
-            with torch.cuda.stream(sync_stream):
+            with get_stream_context(sync_stream):
                 # Setup stream dependency
                 fut.wait()
                 # Dequantize the result back to the original precision
