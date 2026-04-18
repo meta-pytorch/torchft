@@ -28,11 +28,18 @@ class _TimerHandle:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._timer_handle: Optional[asyncio.TimerHandle] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._cancelled = False
 
-    def set_timer_handle(self, timer_handle: asyncio.TimerHandle) -> None:
+    def set_timer_handle(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        timer_handle: asyncio.TimerHandle,
+    ) -> None:
         with self._lock:
+            self._loop = loop
             if self._cancelled:
+                # Called from within the event loop thread, so direct cancel is safe.
                 timer_handle.cancel()
                 self._timer_handle = None
             else:
@@ -43,8 +50,16 @@ class _TimerHandle:
             assert not self._cancelled, "timer can only be cancelled once"
             self._cancelled = True
             if self._timer_handle is not None:
-                self._timer_handle.cancel()
+                timer_handle = self._timer_handle
+                loop = self._loop
                 self._timer_handle = None
+                if loop is not None:
+                    # Schedule cancellation on the event loop thread to avoid
+                    # SIGSEGV when using uvloop, where uv_timer_stop is not
+                    # thread-safe and must be called from the event loop thread.
+                    loop.call_soon_threadsafe(timer_handle.cancel)
+                else:
+                    timer_handle.cancel()
 
 
 class _TimeoutManager:
@@ -228,7 +243,7 @@ class _TimeoutManager:
             timeout.total_seconds(),
             callback,
         )
-        handle.set_timer_handle(timer_handle)
+        handle.set_timer_handle(loop, timer_handle)
 
     @contextmanager
     def context_timeout(

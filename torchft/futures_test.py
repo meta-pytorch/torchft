@@ -13,6 +13,7 @@ import torch
 from torch.futures import Future
 from torchft.futures import (
     _TIMEOUT_MANAGER,
+    _TimerHandle,
     context_timeout,
     future_timeout,
     future_wait,
@@ -96,6 +97,23 @@ class FuturesTest(TestCase):
         del item
 
         self.assertEqual(_TIMEOUT_MANAGER._clear_del_queue(), 1)
+
+    def test_timer_handle_cancel_uses_call_soon_threadsafe(self) -> None:
+        """Cancelling from outside the event loop must go via call_soon_threadsafe.
+
+        With uvloop the underlying uv_timer_stop is NOT thread-safe; calling it
+        directly from a non-event-loop thread causes a SIGSEGV (issue #316).
+        """
+        mock_loop = Mock()
+        mock_timer_handle = Mock()
+
+        handle = _TimerHandle()
+        handle.set_timer_handle(mock_loop, mock_timer_handle)
+        handle.cancel()
+
+        # cancel() must delegate to call_soon_threadsafe, not call directly
+        mock_loop.call_soon_threadsafe.assert_called_once_with(mock_timer_handle.cancel)
+        mock_timer_handle.cancel.assert_not_called()
 
     # Test that when a timeout handle gets stuck, `sys.exit(1)` is called
     @patch("sys.exit")
