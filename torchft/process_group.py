@@ -653,9 +653,15 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         backend_class._set_sequence_number_for_group()
 
         if self._global_ranks:
-            backend_class.options.global_ranks_in_group = self._global_ranks
+            try:
+                backend_class.options.global_ranks_in_group = self._global_ranks
+            except AttributeError:
+                pass
         if self._group_rank and self._group_world_size:
-            backend_class.options.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
+            try:
+                backend_class.options.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
+            except AttributeError:
+                pass
 
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
