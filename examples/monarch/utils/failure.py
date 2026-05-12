@@ -18,7 +18,7 @@ from monarch.actor import Actor, current_rank, endpoint
 logger = logging.getLogger()
 
 if TYPE_CHECKING:
-    from ..train_distributed import MonarchSlurm, Replica
+    from ..train_distributed_k8s import MonarchKubernetes, Replica
 
 
 class Failure(Enum):
@@ -29,7 +29,7 @@ class Failure(Enum):
     SEGFAULT = 0
     KILL_PROC = 1
     COMMS = 2
-    KILL_SLURM = 3
+    KILL_JOB = 3
     DEADLOCK = 4
 
 
@@ -79,23 +79,23 @@ class FailureActor(Actor):
 
 class FailureController:
     @staticmethod
-    def kill_slurm(scheduler: "MonarchSlurm") -> None:
+    def kill_job(scheduler: "MonarchKubernetes") -> None:
         """
-        Kills a random replica SLURM job
+        Kills a random replica K8s job
         """
         candidates = [
             mesh_name
             for mesh_name in scheduler.job_handles.keys()
-            if "replica_" in mesh_name
+            if "replica" in mesh_name
         ]
         selected = random.choice(candidates)
-        logger.info(f"[FailureController] Killing SLURM job for {selected}")
+        logger.info(f"[FailureController] Killing K8s job for {selected}")
         scheduler.kill_job(selected)
 
     @staticmethod
     async def execute_failures(
         replicas: Dict[int, "Replica"],
-        scheduler: "MonarchSlurm",
+        scheduler: "MonarchKubernetes",
         startup_wait: int = 120,
         rest_time: int = 120,
     ):
@@ -115,12 +115,17 @@ class FailureController:
                     ]
 
                 last_replica = random.choice(running_replicas)
-                last_failure = random.choice(list(Failure))
+                # Exclude KILL_JOB on K8s: deleting the CRD doesn't kill
+                # already-connected actors, so it's a no-op.
+                process_failures = [f for f in Failure if f != Failure.KILL_JOB]
+                last_failure = random.choice(process_failures)
                 try:
-                    if last_failure == Failure.KILL_SLURM:
-                        FailureController.kill_slurm(scheduler)
-                    else:
-                        last_replica.actor.inject_failure.broadcast(last_failure)
+                    if last_failure == Failure.KILL_JOB:
+                        FailureController.kill_job(scheduler)
+                    elif hasattr(last_replica, 'actor') and last_replica.actor:
+                        await last_replica.actor.inject_failure.call_one(last_failure)
+                    elif hasattr(last_replica, 'failure_actors') and last_replica.failure_actors:
+                        await last_replica.failure_actors.fail.choose(last_failure)
                     logger.info(
                         f"[FailureController] Failure injection ({last_failure}) sent to replica {last_replica.rid}"
                     )
