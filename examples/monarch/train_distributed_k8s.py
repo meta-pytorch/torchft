@@ -230,31 +230,30 @@ class ReplicaActor(Actor):
             {"gpus": self.spec.gpus_per_host}
         )
 
-        # No async with — avoids the proc_mesh.stop() hang when surviving
-        # processes are stuck in NCCL (broken broadcast tree can't reach them).
-        # Instead, the proc_mesh is owned by this ReplicaActor. When the actor
-        # is torn down by the outer retry loop, Monarch's orphan detection
-        # cleans up the surviving processes in the background (~60s).
-        await self._trainers_proc_mesh.logging_option(stream_to_client=True)
+        try:
+            async with self._trainers_proc_mesh:
+                await self._trainers_proc_mesh.logging_option(stream_to_client=True)
 
-        await setup_torch_elastic_env_async(self._trainers_proc_mesh)
+                await setup_torch_elastic_env_async(self._trainers_proc_mesh)
 
-        training_actors = self._trainers_proc_mesh.spawn(
-            "training_actors",
-            TrainingActor,
-            self.spec.trainer_config,
-            self.replica_id,
-        )
+                training_actors = self._trainers_proc_mesh.spawn(
+                    "training_actors",
+                    TrainingActor,
+                    self.spec.trainer_config,
+                    self.replica_id,
+                )
 
-        if FailureActor is not None and self.spec.with_failures:
-            self.failure_actors = self._trainers_proc_mesh.spawn(
-                "failure_actors", FailureActor
-            )
+                if FailureActor is not None and self.spec.with_failures:
+                    self.failure_actors = self._trainers_proc_mesh.spawn(
+                        "failure_actors", FailureActor
+                    )
 
-        logger.info(f"{self.uid} Starting trainers")
-        await training_actors.start_training.call(
-            self.spec.lighthouse_address
-        )
+                logger.info(f"{self.uid} Starting trainers")
+                await training_actors.start_training.call(
+                    self.spec.lighthouse_address
+                )
+        finally:
+            self._trainers_proc_mesh = None
 
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
