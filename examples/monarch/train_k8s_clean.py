@@ -202,6 +202,9 @@ class ReplicaActor(Actor):
         self.failure_actors = None
         self.uid = f"[replica_{replica_id}]"
 
+    async def __supervise__(self, failure) -> bool:
+        return True
+
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
         init_logger()
@@ -263,7 +266,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 5
+PROC_ATTEMPT_DELAY = 35
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
@@ -398,7 +401,7 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         ),
         checkpoint=CheckpointManager.Config(),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
-        comm=CommConfig(train_timeout_seconds=300),
+        comm=CommConfig(train_timeout_seconds=30),
         fault_tolerance=FaultTolerance(
             enable=True,
             group_size=args.gpus_per_host,
