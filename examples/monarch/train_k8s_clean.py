@@ -290,7 +290,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 35
+PROC_ATTEMPT_DELAY = 75
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
@@ -425,7 +425,7 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         ),
         checkpoint=CheckpointManager.Config(),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
-        comm=CommConfig(train_timeout_seconds=30),
+        comm=CommConfig(train_timeout_seconds=300),
         fault_tolerance=FaultTolerance(
             enable=True,
             group_size=args.gpus_per_host,
