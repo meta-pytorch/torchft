@@ -202,9 +202,6 @@ class ReplicaActor(Actor):
         self.failure_actors = None
         self.uid = f"[replica_{replica_id}]"
 
-    async def __supervise__(self, failure) -> bool:
-        return True
-
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
         init_logger()
@@ -215,23 +212,24 @@ class ReplicaActor(Actor):
             num_procs=self.spec.gpus_per_host,
         )
 
-        await trainers_proc_mesh.logging_option(stream_to_client=True)
-        await setup_torch_elastic_env_async(trainers_proc_mesh)
+        async with trainers_proc_mesh:
+            await trainers_proc_mesh.logging_option(stream_to_client=True)
+            await setup_torch_elastic_env_async(trainers_proc_mesh)
 
-        training_actors = trainers_proc_mesh.spawn(
-            "training_actors",
-            TrainingActor,
-            self.spec.trainer_config,
-            self.replica_id,
-        )
-
-        if FailureActor is not None and self.spec.with_failures:
-            self.failure_actors = trainers_proc_mesh.spawn(
-                "failure_actors", FailureActor
+            training_actors = trainers_proc_mesh.spawn(
+                "training_actors",
+                TrainingActor,
+                self.spec.trainer_config,
+                self.replica_id,
             )
 
-        logger.info(f"{self.uid} Starting trainers")
-        await training_actors.start_training.call(self.spec.lighthouse_address)
+            if FailureActor is not None and self.spec.with_failures:
+                self.failure_actors = trainers_proc_mesh.spawn(
+                    "failure_actors", FailureActor
+                )
+
+            logger.info(f"{self.uid} Starting trainers")
+            await training_actors.start_training.call(self.spec.lighthouse_address)
 
     @endpoint(instrument=False)
     async def inject_failure(self, failure_type: "Failure"):
@@ -265,7 +263,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 70
+PROC_ATTEMPT_DELAY = 5
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
