@@ -214,24 +214,23 @@ class ReplicaActor(Actor):
             num_procs=self.spec.gpus_per_host,
         )
 
-        async with trainers_proc_mesh:
-            await trainers_proc_mesh.logging_option(stream_to_client=True)
-            await setup_torch_elastic_env_async(trainers_proc_mesh)
+        await trainers_proc_mesh.logging_option(stream_to_client=True)
+        await setup_torch_elastic_env_async(trainers_proc_mesh)
 
-            training_actors = trainers_proc_mesh.spawn(
-                "training_actors",
-                TrainingActor,
-                self.spec.trainer_config,
-                self.replica_id,
+        training_actors = trainers_proc_mesh.spawn(
+            "training_actors",
+            TrainingActor,
+            self.spec.trainer_config,
+            self.replica_id,
+        )
+
+        if FailureActor is not None and self.spec.with_failures:
+            self.failure_actors = trainers_proc_mesh.spawn(
+                "failure_actors", FailureActor
             )
 
-            if FailureActor is not None and self.spec.with_failures:
-                self.failure_actors = trainers_proc_mesh.spawn(
-                    "failure_actors", FailureActor
-                )
-
-            logger.info(f"{self.uid} Starting trainers")
-            await training_actors.start_training.call(self.spec.lighthouse_address)
+        logger.info(f"{self.uid} Starting trainers")
+        await training_actors.start_training.call(self.spec.lighthouse_address)
 
     @endpoint(instrument=False)
     async def inject_failure(self, failure_type: "Failure"):
