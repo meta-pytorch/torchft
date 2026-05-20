@@ -71,24 +71,24 @@ async def main():
     hm0 = getattr(job0.state(cached_path=None), "replica0")
     hm1 = getattr(job1.state(cached_path=None), "replica1")
 
-    print("Spawning procs on replica0...")
+    print(f"Spawning procs on replica0 with gpus={args.gpus}...")
     pm0 = hm0.spawn_procs({"gpus": args.gpus})
-    print("Spawning procs on replica1...")
+    print(f"Spawning procs on replica1 with gpus={args.gpus}...")
     pm1 = hm1.spawn_procs({"gpus": args.gpus})
 
-    print("Spawning ping actors...")
+    print(f"Spawning {args.gpus} ping actors on each replica...")
     actors0 = pm0.spawn("ping0", PingActor)
     actors1 = pm1.spawn("ping1", PingActor)
 
-    print("Pinging replica0...")
-    r0 = await actors0.ping.call_one()
+    print("Pinging replica0 (all ranks)...")
+    r0 = await actors0.ping.call()
     print(f"  replica0: {r0}")
 
-    print("Pinging replica1...")
-    r1 = await actors1.ping.call_one()
+    print("Pinging replica1 (all ranks)...")
+    r1 = await actors1.ping.call()
     print(f"  replica1: {r1}")
 
-    print("\nBOTH REPLICAS WORKING!")
+    print(f"\nBOTH REPLICAS WORKING WITH {args.gpus} GPUs!")
 
     print("Cleaning up...")
     await pm0.stop()
