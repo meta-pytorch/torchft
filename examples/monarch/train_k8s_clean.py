@@ -292,7 +292,7 @@ class OrchestrationManager:
         failure_future = None
         if self.spec.with_failures:
             failure_future = asyncio.create_task(
-                FailureController.execute_failures(self.replicas, self.scheduler, startup_wait=90, rest_time=300)
+                FailureController.execute_failures(self.replicas, self.scheduler, startup_wait=120, rest_time=600)
             )
 
         await asyncio.gather(*mesh_futures.values(), return_exceptions=True)
