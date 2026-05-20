@@ -29,6 +29,7 @@ configure(
     enable_log_forwarding=True,
     message_delivery_timeout="2m",
     host_spawn_ready_timeout="2m",
+    mesh_proc_spawn_max_idle="90s",
 )
 
 from kubernetes.client import (
@@ -264,7 +265,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 5
+PROC_ATTEMPT_DELAY = 70
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
