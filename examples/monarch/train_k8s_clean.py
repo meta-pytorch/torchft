@@ -361,10 +361,6 @@ class OrchestrationManager:
             replica = self.replicas.pop(replica_id, None)
             if replica is None:
                 return
-            try:
-                await asyncio.wait_for(replica.proc_mesh.stop(), timeout=10)
-            except BaseException as e:
-                logger.warning(f"[Controller] Failed to stop replica {replica_id}, it may already be stopped: {e}")
             del replica.proc_mesh
         except BaseException as e:
             logger.warning(f"[Controller] Failed to teardown replica {replica_id}: {e}")
