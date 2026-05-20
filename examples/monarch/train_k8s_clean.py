@@ -167,12 +167,36 @@ class TrainingActor(Actor):
         rank = current_rank().rank
         self.uid = f"[replica_{replica_id}_trainer_{rank}]"
 
+    @staticmethod
+    def _patch_checkpoint_async_wait(trainer) -> None:
+        """Make _async_wait resilient to failures from stale save futures.
+
+        _ft_save() always uses AsyncMode.ASYNC. After an NCCL PG reconfiguration
+        (e.g. replica failure), the pending async save is bound to the old, dead PG.
+        save_future.result() then raises (FileNotFoundError, DistBackendError, etc.).
+        Without this patch the exception propagates unhandled and kills the trainer.
+        """
+        ckpt = getattr(trainer, "checkpointer", None)
+        if ckpt is None:
+            return
+        original = ckpt._async_wait
+
+        def _safe_async_wait() -> None:
+            try:
+                original()
+            except Exception as e:
+                logger.warning(f"Async checkpoint wait failed (expected during recovery): {e}")
+                ckpt.save_future = None
+
+        ckpt._async_wait = _safe_async_wait
+
     @endpoint(instrument=False)
     async def start_training(self, lighthouse_address: str) -> None:
         init_logger()
 
         os.environ["TORCHFT_LIGHTHOUSE"] = lighthouse_address
         trainer = self.trainer_config.build()
+        self._patch_checkpoint_async_wait(trainer)
         logger.info(f"{self.uid} initialized successfully on {os.getpid()}")
 
         try:
