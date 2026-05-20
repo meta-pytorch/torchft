@@ -201,6 +201,9 @@ class ReplicaActor(Actor):
         self.failure_actors = None
         self.uid = f"[replica_{replica_id}]"
 
+    async def __supervise__(self, failure) -> bool:
+        return True
+
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
         init_logger()
