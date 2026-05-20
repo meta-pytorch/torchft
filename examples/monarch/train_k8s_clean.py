@@ -338,12 +338,6 @@ class OrchestrationManager:
             logger.info(f"[Controller] Replica {replica_id} has failed {attempt_number} times. Getting new allocation.")
             self.scheduler.kill_job(f"replica{replica_id}")
             await self.scheduler.get_or_create_job(f"replica{replica_id}")
-        else:
-            job = self.scheduler.job_handles.get(f"replica{replica_id}")
-            if job is not None and not job.active:
-                logger.info(f"[Controller] K8s job for replica{replica_id} is no longer active, recreating.")
-                self.scheduler.kill_job(f"replica{replica_id}")
-                await self.scheduler.get_or_create_job(f"replica{replica_id}")
 
         delay = 0 if not attempt_number else PROC_ATTEMPT_DELAY
         logger.info(f"[Controller] Spinning up replica with ID {replica_id} in {delay} seconds")
