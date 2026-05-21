@@ -5,9 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Minimal K8s fault-tolerant training — exact mirror of train_distributed.py (SLURM).
-No __supervise__, no configure(), no monkey-patches.
-Only difference from SLURM: KubernetesJob + instrument=False.
+K8s fault-tolerant training using the Monarch-recommended orphan pattern.
+
+When a trainer process dies:
+1. __supervise__ catches it, sets a flag, returns True (don't propagate to root)
+2. call() raises SupervisionError → endpoint converts to TrainerFailure
+3. Controller catches it, stops the ReplicaActor (orphaning the trainers)
+4. Orphaned processes die on their own (NCCL timeout / orphan timeout)
+5. Controller spawns a new ReplicaActor on the same HostMesh
 """
 
 import argparse
@@ -56,7 +61,11 @@ except ModuleNotFoundError:
     Failure = None
 
 
-# ==== K8s allocation (replaces MonarchSlurm) ====
+class TrainerFailure(Exception):
+    pass
+
+
+# ==== K8s allocation ====
 
 _WORKER_BOOTSTRAP_SCRIPT: str = textwrap.dedent("""\
     import os
@@ -141,7 +150,7 @@ class MonarchKubernetes:
         return mesh.spawn_procs({"gpus": num_procs})
 
 
-# ==== Actors (mirrors SLURM script exactly) ====
+# ==== Actors ====
 
 
 class TrainingActor(Actor):
@@ -173,15 +182,22 @@ class TrainingActor(Actor):
 
 
 class ReplicaActor(Actor):
-    """Mirrors SLURM ReplicaActor exactly. No __supervise__."""
+    """Owner pattern: spawns trainers, catches failures via __supervise__,
+    raises TrainerFailure so controller can orphan and retry."""
 
     def __init__(self, spec: "JobSpec", replica_id: int, scheduler: "MonarchKubernetes") -> None:
         self.spec = deepcopy(spec)
         self.replica_id = replica_id
         self.spec.trainer_config.fault_tolerance.replica_id = replica_id
         self.scheduler = scheduler
+        self.failure_occurred = False
         self.failure_actors = None
         self.uid = f"[replica_{replica_id}]"
+
+    async def __supervise__(self, failure) -> bool:
+        logger.info(f"{self.uid} __supervise__ caught failure: {failure}")
+        self.failure_occurred = True
+        return True
 
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
@@ -193,24 +209,30 @@ class ReplicaActor(Actor):
             num_procs=self.spec.gpus_per_host,
         )
 
-        async with trainers_proc_mesh:
-            await trainers_proc_mesh.logging_option(stream_to_client=True)
-            await setup_torch_elastic_env_async(trainers_proc_mesh)
+        # NO async with — don't try to clean up the proc_mesh.
+        # On failure, we let the controller orphan everything by stopping us.
+        await trainers_proc_mesh.logging_option(stream_to_client=True)
+        await setup_torch_elastic_env_async(trainers_proc_mesh)
 
-            training_actors = trainers_proc_mesh.spawn(
-                "training_actors",
-                TrainingActor,
-                self.spec.trainer_config,
-                self.replica_id,
+        training_actors = trainers_proc_mesh.spawn(
+            "training_actors",
+            TrainingActor,
+            self.spec.trainer_config,
+            self.replica_id,
+        )
+
+        if FailureActor is not None and self.spec.with_failures:
+            self.failure_actors = trainers_proc_mesh.spawn(
+                "failure_actors", FailureActor
             )
 
-            if FailureActor is not None and self.spec.with_failures:
-                self.failure_actors = trainers_proc_mesh.spawn(
-                    "failure_actors", FailureActor
-                )
-
-            logger.info(f"{self.uid} Starting trainers")
+        logger.info(f"{self.uid} Starting trainers")
+        try:
             await training_actors.start_training.call(self.spec.lighthouse_address)
+        except Exception as e:
+            if self.failure_occurred:
+                raise TrainerFailure(f"{self.uid} trainer process died") from e
+            raise
 
     @endpoint(instrument=False)
     async def inject_failure(self, failure_type: "Failure"):
@@ -224,7 +246,7 @@ class ReplicaActor(Actor):
             logger.error(f"{self.uid} No failure actors available")
 
 
-# ==== Orchestration (mirrors SLURM script exactly) ====
+# ==== Orchestration ====
 
 
 @dataclass
@@ -247,7 +269,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 0
+PROC_ATTEMPT_DELAY = 90
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
@@ -314,8 +336,8 @@ class OrchestrationManager:
             logger.info(f"[Controller] replica {replica_id} done")
             await self._teardown(replica_id)
         except Exception as e:
-            await self._teardown(replica_id)
             logger.exception(f"[Controller] replica {replica_id} failed: {e}")
+            await self._teardown(replica_id)
             await self._run_replica(replica_id, attempt_number + 1)
 
     async def _spin_up_replica(self, replica_id: int, attempt_number: int = 0) -> None:
@@ -337,9 +359,13 @@ class OrchestrationManager:
 
         replica = Replica(replica_id, replica_proc_mesh, replica_actor, attempt_number)
         self.replicas[replica_id] = replica
+
+        logger.info(f"[Controller] Replica {replica_id} starting training")
         await replica.actor.start_replica.call_one()
 
     async def _teardown(self, replica_id: int) -> None:
+        """Stop the ReplicaActor's proc_mesh. This orphans the trainers —
+        they'll die on their own via NCCL timeout / orphan timeout."""
         try:
             replica = self.replicas.pop(replica_id, None)
             if replica is None:
@@ -347,16 +373,16 @@ class OrchestrationManager:
             try:
                 await replica.proc_mesh.stop()
             except Exception as e:
-                logger.exception(f"[Controller] Failed to stop replica {replica_id}, it may already be stopped. {e}")
+                logger.warning(f"[Controller] Failed to stop replica {replica_id} proc_mesh: {e}")
             del replica.proc_mesh
         except Exception as e:
-            logger.exception(f"[Controller] Failed to teardown replica {replica_id}: {e}")
+            logger.warning(f"[Controller] Failed to teardown replica {replica_id}: {e}")
 
 
 # === CLI / CONFIG === #
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Minimal K8s FT Training (SLURM mirror)")
+    parser = argparse.ArgumentParser(description="K8s FT Training — orphan pattern")
     parser.add_argument("--replica-count", type=int, default=2)
     parser.add_argument("--gpus-per-host", type=int, default=8)
     parser.add_argument("--training-steps", type=int, default=10000)
