@@ -90,12 +90,10 @@ async def main():
 
     print(f"\nBOTH REPLICAS WORKING WITH {args.gpus} GPUs!")
 
-    print("Cleaning up...")
+    print("Stopping proc meshes (pods stay alive)...")
     await pm0.stop()
     await pm1.stop()
-    job0.kill()
-    job1.kill()
-    print("Done.")
+    print("Done. Pods still running — ready for next script.")
 
 
 if __name__ == "__main__":
