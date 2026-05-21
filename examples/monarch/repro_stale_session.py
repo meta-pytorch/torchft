@@ -107,6 +107,39 @@ async def main():
 
     pod_spec = build_pod_spec(args.image, args.gpus)
 
+    # === Step 0: Clean up any leftover CRDs from previous runs ===
+    print("\n=== STEP 0: Cleaning up leftover MonarchMesh CRDs ===")
+    cleanup0 = KubernetesJob(namespace=args.namespace)
+    cleanup0.add_mesh("replica0", num_replicas=1, pod_spec=pod_spec)
+    cleanup1 = KubernetesJob(namespace=args.namespace)
+    cleanup1.add_mesh("replica1", num_replicas=1, pod_spec=pod_spec)
+    try:
+        cleanup0.kill()
+    except Exception:
+        pass
+    try:
+        cleanup1.kill()
+    except Exception:
+        pass
+
+    from kubernetes import client as k8s_client, config as k8s_config
+    k8s_config.load_incluster_config()
+    api = k8s_client.CustomObjectsApi()
+    for name in ["replica0", "replica1"]:
+        for _ in range(60):
+            try:
+                api.get_namespaced_custom_object(
+                    group="monarch.pytorch.org", version="v1",
+                    namespace=args.namespace, plural="monarchmeshes", name=name,
+                )
+                print(f"  Waiting for '{name}' to be deleted...")
+                await asyncio.sleep(2)
+            except k8s_client.ApiException as e:
+                if e.status == 404:
+                    print(f"  '{name}' deleted.")
+                    break
+    print("  Clean slate.")
+
     # === Step 1: Create 2 jobs ===
     print(f"\n=== STEP 1: Creating 2 K8s jobs ({args.gpus} GPUs each) ===")
     job0 = KubernetesJob(namespace=args.namespace)
@@ -133,10 +166,21 @@ async def main():
 
     # Get a PID from replica1 rank 0 so we can kill it externally
     pids = await actors1.get_pid.call()
-    # pids is a ValueMesh, get the first one
-    pid_list = list(pids.values())
-    target_pid = pid_list[0][1]  # (coord, value) tuple
-    print(f"  replica1 rank 0 pid: {target_pid}")
+    print(f"  replica1 pids: {pids}")
+    # Extract first PID from the result
+    target_pid = None
+    for item in pids:
+        if isinstance(item, tuple):
+            target_pid = item[1]
+        else:
+            target_pid = item
+        break
+    if target_pid is None:
+        print("  ERROR: Could not extract PID from result")
+        job0.kill()
+        job1.kill()
+        return
+    print(f"  replica1 target pid: {target_pid}")
 
     # === Step 3: Kill one process on replica1 via kubectl ===
     print("\n=== STEP 3: Killing replica1 rank 0 process via kubectl exec ===")
