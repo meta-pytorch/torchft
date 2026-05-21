@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Clean K8s fault-tolerant training — matches the SLURM pattern.
-No __supervise__, no inner retry loop. Every failure goes through
-the outer loop: teardown ReplicaActor → create new one on same pod.
+Clean K8s FT training — no __supervise__, no inner retry.
+Matches the SLURM pattern: failure kills everything, outer loop restarts.
 
-This is the optimization that gave 60% faster recovery vs full
-SLURM reschedule: reuse the HostMesh (pod), skip K8s scheduling.
+Two modes to measure recovery time:
+  --reuse-pods:  Keep K8s pods alive, respawn procs on same HostMesh
+  --fresh-pods:  Delete K8s jobs, let K8s reschedule from scratch
 """
 
 import argparse
@@ -18,20 +18,12 @@ import asyncio
 import atexit
 import os
 import textwrap
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict
 
 import torch
-from monarch.config import configure
-
-configure(
-    enable_log_forwarding=True,
-    message_delivery_timeout="2m",
-    host_spawn_ready_timeout="2m",
-    mesh_proc_spawn_max_idle="90s",
-)
-
 from kubernetes.client import (
     V1Container,
     V1EmptyDirVolumeSource,
@@ -59,6 +51,7 @@ from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import ProfilingConfig
+
 try:
     from utils.failure import Failure, FailureActor, FailureController
 except ModuleNotFoundError:
@@ -67,7 +60,7 @@ except ModuleNotFoundError:
     Failure = None
 
 
-# ==== Allocation boilerplate ====
+# ==== K8s allocation ====
 
 _WORKER_BOOTSTRAP_SCRIPT: str = textwrap.dedent("""\
     import os
@@ -90,12 +83,9 @@ def build_gpu_pod_spec(image: str, gpus_per_host: int) -> V1PodSpec:
                 command=["python", "-u", "-c", _WORKER_BOOTSTRAP_SCRIPT],
                 env=[V1EnvVar(name="MONARCH_PORT", value="26600")],
                 resources=V1ResourceRequirements(
-                    limits=gpu_resources,
-                    requests=gpu_resources,
+                    limits=gpu_resources, requests=gpu_resources,
                 ),
-                volume_mounts=[
-                    V1VolumeMount(name="dshm", mount_path="/dev/shm"),
-                ],
+                volume_mounts=[V1VolumeMount(name="dshm", mount_path="/dev/shm")],
             )
         ],
         volumes=[
@@ -149,16 +139,13 @@ class MonarchKubernetes:
         except Exception as e:
             logger.exception(f"Failed to destroy job for {mesh_name}: {e}")
 
-    def host_mesh(self, mesh_name: str) -> HostMesh:
-        job = self.job_handles[mesh_name]
-        return getattr(job.state(cached_path=None), mesh_name)
-
     def proc_mesh(self, mesh_name: str, num_procs: int) -> ProcMesh:
-        host_mesh = self.host_mesh(mesh_name)
-        return host_mesh.spawn_procs({"gpus": num_procs})
+        job = self.job_handles[mesh_name]
+        mesh: HostMesh = getattr(job.state(cached_path=None), mesh_name)
+        return mesh.spawn_procs({"gpus": num_procs})
 
 
-# ==== allocation boilerplate ====
+# ==== Actors (matches SLURM script — no __supervise__) ====
 
 
 class TrainingActor(Actor):
@@ -167,36 +154,12 @@ class TrainingActor(Actor):
         rank = current_rank().rank
         self.uid = f"[replica_{replica_id}_trainer_{rank}]"
 
-    @staticmethod
-    def _patch_checkpoint_async_wait(trainer) -> None:
-        """Make _async_wait resilient to failures from stale save futures.
-
-        _ft_save() always uses AsyncMode.ASYNC. After an NCCL PG reconfiguration
-        (e.g. replica failure), the pending async save is bound to the old, dead PG.
-        save_future.result() then raises (FileNotFoundError, DistBackendError, etc.).
-        Without this patch the exception propagates unhandled and kills the trainer.
-        """
-        ckpt = getattr(trainer, "checkpointer", None)
-        if ckpt is None:
-            return
-        original = ckpt._async_wait
-
-        def _safe_async_wait() -> None:
-            try:
-                original()
-            except Exception as e:
-                logger.warning(f"Async checkpoint wait failed (expected during recovery): {e}")
-                ckpt.save_future = None
-
-        ckpt._async_wait = _safe_async_wait
-
     @endpoint(instrument=False)
     async def start_training(self, lighthouse_address: str) -> None:
         init_logger()
 
         os.environ["TORCHFT_LIGHTHOUSE"] = lighthouse_address
         trainer = self.trainer_config.build()
-        self._patch_checkpoint_async_wait(trainer)
         logger.info(f"{self.uid} initialized successfully on {os.getpid()}")
 
         try:
@@ -214,9 +177,7 @@ class TrainingActor(Actor):
 
 
 class ReplicaActor(Actor):
-    """Manages a replica's training actors. No __supervise__ — failures
-    propagate to the root actor and are caught by _run_replica's outer loop.
-    Matches the SLURM script pattern."""
+    """No __supervise__. Failures propagate to root, outer loop restarts."""
 
     def __init__(self, spec: "JobSpec", replica_id: int, scheduler: "MonarchKubernetes") -> None:
         self.spec = deepcopy(spec)
@@ -225,9 +186,6 @@ class ReplicaActor(Actor):
         self.scheduler = scheduler
         self.failure_actors = None
         self.uid = f"[replica_{replica_id}]"
-
-    async def __supervise__(self, failure) -> bool:
-        return True
 
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
@@ -270,12 +228,16 @@ class ReplicaActor(Actor):
             logger.error(f"{self.uid} No failure actors available")
 
 
+# ==== Orchestration ====
+
+
 @dataclass
 class JobSpec:
     trainer_config: FaultTolerantTrainer.Config
     replica_count: int
     gpus_per_host: int
     with_failures: bool
+    reuse_pods: bool
     namespace: str = ""
     image: str | None = None
     timeout: int | None = None
@@ -287,12 +249,6 @@ class Replica:
     rid: int
     proc_mesh: ProcMesh
     actor: "ReplicaActor"
-    attempt_number: int = 0
-
-
-PROC_ATTEMPT_DELAY = 75
-PROC_ATTEMPTS = 4
-MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
 
 class OrchestrationManager:
@@ -315,7 +271,7 @@ class OrchestrationManager:
 
         mesh_futures = {}
         for i in range(self.spec.replica_count):
-            mesh_futures[i] = asyncio.create_task(self._run_replica(i, 0))
+            mesh_futures[i] = asyncio.create_task(self._run_replica(i))
 
         failure_future = None
         if self.spec.with_failures:
@@ -343,33 +299,13 @@ class OrchestrationManager:
         try:
             if self.lighthouse:
                 self.lighthouse.shutdown()
+                self.lighthouse = None
             logger.info("[Controller] Lighthouse stopped")
         except Exception as e:
             logger.exception(f"[Controller] Failed to stop lighthouse: {e}")
 
-    async def _run_replica(self, replica_id: int, attempt_number: int) -> None:
-        if attempt_number >= MAX_ATTEMPT:
-            logger.info(f"[Controller] Replica {replica_id} has failed too many times.")
-            return
-
-        try:
-            await self._spin_up_replica(replica_id, attempt_number)
-            logger.info(f"[Controller] replica {replica_id} done")
-            await self._teardown(replica_id)
-        except BaseException as e:
-            await self._teardown(replica_id)
-            logger.exception(f"[Controller] replica {replica_id} failed: {e}")
-            await self._run_replica(replica_id, attempt_number + 1)
-
-    async def _spin_up_replica(self, replica_id: int, attempt_number: int = 0) -> None:
-        if attempt_number != 0 and attempt_number % PROC_ATTEMPTS == 0:
-            logger.info(f"[Controller] Replica {replica_id} has failed {attempt_number} times. Getting new allocation.")
-            self.scheduler.kill_job(f"replica{replica_id}")
-            await self.scheduler.get_or_create_job(f"replica{replica_id}")
-
-        delay = 0 if not attempt_number else PROC_ATTEMPT_DELAY
-        logger.info(f"[Controller] Spinning up replica with ID {replica_id} in {delay} seconds")
-        await asyncio.sleep(delay)
+    async def _run_replica(self, replica_id: int) -> None:
+        logger.info(f"[Controller] Spinning up replica {replica_id}")
 
         replica_proc_mesh = this_host().spawn_procs({"gpus": 1})
         await replica_proc_mesh.logging_option(aggregate_window_sec=None)
@@ -378,26 +314,26 @@ class OrchestrationManager:
             "replica_actor", ReplicaActor, self.spec, replica_id, self.scheduler
         )
 
-        replica = Replica(replica_id, replica_proc_mesh, replica_actor, attempt_number)
-        self.replicas[replica_id] = replica
+        self.replicas[replica_id] = Replica(replica_id, replica_proc_mesh, replica_actor)
 
         logger.info(f"[Controller] Replica {replica_id} starting training")
-        await replica.actor.start_replica.call_one()
+        await replica_actor.start_replica.call_one()
 
-    async def _teardown(self, replica_id: int) -> None:
-        try:
-            replica = self.replicas.pop(replica_id, None)
-            if replica is None:
-                return
-            del replica.proc_mesh
-        except BaseException as e:
-            logger.warning(f"[Controller] Failed to teardown replica {replica_id}: {e}")
+    def prepare_restart(self) -> None:
+        """Prepare for restart after a crash. Called between runs."""
+        if self.spec.reuse_pods:
+            logger.info("[Controller] REUSE_PODS: keeping existing K8s jobs")
+        else:
+            logger.info("[Controller] FRESH_PODS: killing K8s jobs for fresh reschedule")
+            self.scheduler.kill_jobs()
+
+        self.replicas.clear()
 
 
 # === CLI / CONFIG === #
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Clean K8s Fault-Tolerant Training (no __supervise__)")
+    parser = argparse.ArgumentParser(description="K8s FT Training — recovery time measurement")
     parser.add_argument("--replica-count", type=int, default=2)
     parser.add_argument("--gpus-per-host", type=int, default=8)
     parser.add_argument("--training-steps", type=int, default=10000)
@@ -407,6 +343,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", type=str, required=True)
     parser.add_argument("--image", type=str, default=None)
     parser.add_argument("--timeout", type=int, default=None)
+    parser.add_argument("--reuse-pods", action="store_true",
+                        help="Keep pods alive on failure, respawn procs on same HostMesh")
+    parser.add_argument("--max-restarts", type=int, default=3,
+                        help="Max number of full restarts after failures")
     return parser.parse_args()
 
 
@@ -439,24 +379,57 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         replica_count=args.replica_count,
         gpus_per_host=args.gpus_per_host,
         with_failures=args.with_failures,
+        reuse_pods=args.reuse_pods,
         namespace=args.namespace,
         image=args.image,
         timeout=args.timeout,
     )
 
 
-async def main() -> None:
-    init_logger()
-    args = parse_args()
-    job_spec = make_job_spec(args)
-
-    orchestrator = OrchestrationManager(job_spec)
+async def run_training(orchestrator: OrchestrationManager) -> None:
+    orchestrator.start_lighthouse()
     try:
-        orchestrator.start_lighthouse()
         await orchestrator.start_training()
     finally:
         orchestrator.stop_lighthouse()
 
 
+def main() -> None:
+    init_logger()
+    args = parse_args()
+    job_spec = make_job_spec(args)
+    mode = "REUSE_PODS" if args.reuse_pods else "FRESH_PODS"
+
+    orchestrator = OrchestrationManager(job_spec)
+
+    for attempt in range(args.max_restarts + 1):
+        if attempt > 0:
+            logger.info(f"===== RESTART {attempt}/{args.max_restarts} (mode={mode}) =====")
+            restart_start = time.time()
+            orchestrator.prepare_restart()
+
+        try:
+            asyncio.run(run_training(orchestrator))
+            logger.info("[Controller] Training completed successfully")
+            break
+        except (KeyboardInterrupt, Exception) as e:
+            crash_time = time.time()
+            logger.error(f"[Controller] Training crashed (attempt {attempt}): {type(e).__name__}: {e}")
+
+            if attempt >= args.max_restarts:
+                logger.error(f"[Controller] Max restarts ({args.max_restarts}) reached. Giving up.")
+                break
+
+            if attempt > 0:
+                recovery_time = crash_time - restart_start
+                logger.info(f"[Controller] Time from restart to crash: {recovery_time:.1f}s")
+
+            logger.info(f"[Controller] Will restart in mode={mode}")
+    else:
+        logger.info("[Controller] All restart attempts exhausted")
+
+    orchestrator.scheduler.kill_jobs()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
