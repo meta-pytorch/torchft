@@ -148,17 +148,33 @@ async def main():
         print(f"   {r}s...")
         await asyncio.sleep(min(10, r))
 
-    # Step 5: Reuse SAME HostMesh — spawn new procs on same pod
-    print("\n5. Spawning NEW ProcMesh on SAME hm1 (same job, same pod)")
+    # Step 5a: Reuse via held hm1 reference (direct)
+    print("\n5a. Spawning via HELD hm1 reference (direct)")
     t = time.time()
     try:
-        pm1_new = hm1.spawn_procs({"gpus": args.gpus})
-        a1_new = pm1_new.spawn("p1_new", PingActor)
-        await a1_new.ping.call()
-        print(f"   RESULT: HostMesh reuse WORKS ({time.time()-t:.1f}s)")
+        pm1_a = hm1.spawn_procs({"gpus": args.gpus})
+        a1_a = pm1_a.spawn("p1_direct", PingActor)
+        await a1_a.ping.call()
+        print(f"   DIRECT reuse WORKS ({time.time()-t:.1f}s)")
+        await pm1_a.stop()
     except Exception as e:
-        print(f"   RESULT: HostMesh reuse BLOCKED ({time.time()-t:.1f}s)")
-        print(f"   Error: {e}")
+        print(f"   DIRECT reuse BLOCKED ({time.time()-t:.1f}s): {e}")
+
+    # Wait again for cleanup from 5a
+    print("   Waiting 30s for cleanup...")
+    await asyncio.sleep(30)
+
+    # Step 5b: Reuse via job.state() (matches training script path)
+    print("\n5b. Spawning via job.state() path (matches training script)")
+    t = time.time()
+    try:
+        hm1_fresh = getattr(job1.state(cached_path=None), "replica1")
+        pm1_b = hm1_fresh.spawn_procs({"gpus": args.gpus})
+        a1_b = pm1_b.spawn("p1_jobstate", PingActor)
+        await a1_b.ping.call()
+        print(f"   JOB.STATE reuse WORKS ({time.time()-t:.1f}s)")
+    except Exception as e:
+        print(f"   JOB.STATE reuse BLOCKED ({time.time()-t:.1f}s): {e}")
 
     print("\nCleaning up...")
     job0.kill()
