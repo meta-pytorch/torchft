@@ -56,6 +56,7 @@ class KillOwner(Actor):
     @endpoint(instrument=False)
     async def ping_then_kill(self, host_mesh: HostMesh) -> str:
         pm = host_mesh.spawn_procs({"gpus": self.gpus})
+        await pm.logging_option(stream_to_client=True)
         actors = pm.spawn("victims", PingActor)
         await actors.ping.call()
         print("  [KillOwner] Ping OK, now killing one process")
