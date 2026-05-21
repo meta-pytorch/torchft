@@ -1,49 +1,31 @@
 """
-Repro: Monarch worker rejects new ProcMesh after process death on same HostMesh.
+Repro: After a process dies on a K8s pod, Monarch's worker rejects
+new connections with "out-of-sequence" errors, blocking HostMesh reuse.
 
-Setup: 2 K8s pods × 8 GPUs (matches training setup).
-
-Steps:
-  0. Clean up any leftover CRDs from previous runs
-  1. Create 2 KubernetesJobs (replica0, replica1), spawn 8-GPU ProcMesh on each
-  2. Spawn actors, ping all 16 — verify both replicas work
-  3. Kill one process on replica1 via a supervised CrashActor
-  4. Wait for orphan cleanup
-  5. Spawn a NEW ProcMesh on replica1's same HostMesh
-  6. Try to spawn actors and ping — expect "out-of-sequence" failure
-
-Expected: Step 6 fails with "out-of-sequence message, expected seq 0, got N"
-  because the worker loop keeps stale TCP session state from the killed connection.
-
-This blocks the HostMesh reuse recovery path for fault-tolerant training on K8s.
+Single command. Uses the same __supervise__ + ownership pattern that
+works in train_k8s_minimal.py — the actor that owns the proc_mesh
+catches the failure, script survives, then tries to reconnect.
 """
 
 import argparse
 import asyncio
-import ctypes
 import os
 import textwrap
 import time
 
+from copy import deepcopy
 from monarch.actor import Actor, current_rank, endpoint, this_host
 from monarch.job.kubernetes import KubernetesJob
-
 from kubernetes.client import (
-    V1Container,
-    V1EmptyDirVolumeSource,
-    V1EnvVar,
-    V1PodSpec,
-    V1ResourceRequirements,
-    V1Volume,
-    V1VolumeMount,
+    V1Container, V1EmptyDirVolumeSource, V1EnvVar, V1PodSpec,
+    V1ResourceRequirements, V1Volume, V1VolumeMount,
 )
 
-_WORKER_BOOTSTRAP_SCRIPT = textwrap.dedent("""\
+_WORKER_SCRIPT = textwrap.dedent("""\
     import os, socket
     from monarch.actor import run_worker_loop_forever
     port = os.environ.get("MONARCH_PORT", "26600")
-    hostname = socket.getfqdn()
-    address = f"tcp://{hostname}:{port}"
+    address = f"tcp://{socket.getfqdn()}:{port}"
     run_worker_loop_forever(address=address, ca="trust_all_connections")
 """)
 
@@ -51,86 +33,95 @@ _WORKER_BOOTSTRAP_SCRIPT = textwrap.dedent("""\
 class PingActor(Actor):
     @endpoint(instrument=False)
     async def ping(self) -> str:
-        rank = current_rank().rank
-        pid = os.getpid()
         import socket
-        hostname = socket.gethostname()
-        return f"pong from rank={rank} pid={pid} host={hostname}"
+        return f"rank={current_rank().rank} pid={os.getpid()} host={socket.gethostname()}"
 
-
-class CrashActor(Actor):
     @endpoint(instrument=False)
-    async def crash(self) -> None:
-        rank = current_rank().rank
-        print(f"[CrashActor] rank={rank} pid={os.getpid()} — calling os._exit(1)")
+    async def die(self) -> None:
         os._exit(1)
 
 
-class CrashOwner(Actor):
-    """Owns the crash operation. __supervise__ prevents root actor death."""
+class ReplicaOwner(Actor):
+    """Owns the proc_mesh. __supervise__ catches all child failures including logger."""
 
-    def __init__(self) -> None:
-        self.failed = False
+    def __init__(self, namespace, image, gpus, mesh_name):
+        self.namespace = namespace
+        self.image = image
+        self.gpus = gpus
+        self.mesh_name = mesh_name
+        self.failure_occurred = False
 
     async def __supervise__(self, failure) -> bool:
-        self.failed = True
+        print(f"  [ReplicaOwner] __supervise__ caught: {type(failure).__name__}")
+        self.failure_occurred = True
         return True
 
     @endpoint(instrument=False)
-    async def kill_one_process(self, proc_mesh) -> str:
-        crash_actors = proc_mesh.spawn("crash_actors", CrashActor)
-        try:
-            await crash_actors.crash.choose()
-        except Exception as e:
-            return f"Process killed: {type(e).__name__}"
-        return "No error (unexpected)"
-
-
-def build_pod_spec(image: str, gpus: int) -> V1PodSpec:
-    gpu_resources = {"nvidia.com/gpu": str(gpus)}
-    return V1PodSpec(
-        containers=[
-            V1Container(
-                name="worker",
-                image=image,
-                command=["python", "-u", "-c", _WORKER_BOOTSTRAP_SCRIPT],
+    async def ping_and_kill(self) -> str:
+        gpu_res = {"nvidia.com/gpu": str(self.gpus)}
+        spec = V1PodSpec(
+            containers=[V1Container(
+                name="worker", image=self.image,
+                command=["python", "-u", "-c", _WORKER_SCRIPT],
                 env=[V1EnvVar(name="MONARCH_PORT", value="26600")],
-                resources=V1ResourceRequirements(
-                    limits=gpu_resources, requests=gpu_resources,
-                ),
+                resources=V1ResourceRequirements(limits=gpu_res, requests=gpu_res),
                 volume_mounts=[V1VolumeMount(name="dshm", mount_path="/dev/shm")],
-            )
-        ],
-        volumes=[
-            V1Volume(
-                name="dshm",
-                empty_dir=V1EmptyDirVolumeSource(medium="Memory", size_limit="16Gi"),
-            )
-        ],
+            )],
+            volumes=[V1Volume(name="dshm",
+                              empty_dir=V1EmptyDirVolumeSource(medium="Memory", size_limit="16Gi"))],
+        )
+        job = KubernetesJob(namespace=self.namespace)
+        job.add_mesh(self.mesh_name, num_replicas=1, pod_spec=spec)
+        hm = getattr(job.state(cached_path=None), self.mesh_name)
+        pm = hm.spawn_procs({"gpus": self.gpus})
+
+        actors = pm.spawn("ping", PingActor)
+        r = await actors.ping.call()
+        print(f"  [ReplicaOwner] Ping OK: {self.mesh_name}")
+
+        print(f"  [ReplicaOwner] Killing one process on {self.mesh_name}")
+        try:
+            await actors.die.choose()
+        except Exception as e:
+            if self.failure_occurred:
+                return "KILLED"
+            raise
+        return "KILLED"
+
+
+def make_job(namespace, image, gpus, name):
+    gpu_res = {"nvidia.com/gpu": str(gpus)}
+    spec = V1PodSpec(
+        containers=[V1Container(
+            name="worker", image=image,
+            command=["python", "-u", "-c", _WORKER_SCRIPT],
+            env=[V1EnvVar(name="MONARCH_PORT", value="26600")],
+            resources=V1ResourceRequirements(limits=gpu_res, requests=gpu_res),
+            volume_mounts=[V1VolumeMount(name="dshm", mount_path="/dev/shm")],
+        )],
+        volumes=[V1Volume(name="dshm",
+                          empty_dir=V1EmptyDirVolumeSource(medium="Memory", size_limit="16Gi"))],
     )
+    job = KubernetesJob(namespace=namespace)
+    job.add_mesh(name, num_replicas=1, pod_spec=spec)
+    return job
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Repro: stale TCP session on HostMesh reuse")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--gpus", type=int, default=8)
-    parser.add_argument("--wait", type=int, default=90,
-                        help="Seconds to wait for orphan cleanup before respawn (default: 90)")
+    parser.add_argument("--wait", type=int, default=90)
     args = parser.parse_args()
 
-    pod_spec = build_pod_spec(args.image, args.gpus)
-
-    # === Step 0: Clean up any leftover CRDs ===
-    print("\n=== STEP 0: Cleaning up leftover MonarchMesh CRDs ===")
+    # Clean slate
+    print("Cleaning up old CRDs...")
     for name in ["replica0", "replica1"]:
         try:
-            c = KubernetesJob(namespace=args.namespace)
-            c.add_mesh(name, num_replicas=1, pod_spec=pod_spec)
-            c.kill()
+            make_job(args.namespace, args.image, args.gpus, name).kill()
         except Exception:
             pass
-
     from kubernetes import client as k8s_client, config as k8s_config
     k8s_config.load_incluster_config()
     api = k8s_client.CustomObjectsApi()
@@ -139,96 +130,69 @@ async def main():
             try:
                 api.get_namespaced_custom_object(
                     group="monarch.pytorch.org", version="v1",
-                    namespace=args.namespace, plural="monarchmeshes", name=name,
-                )
-                print(f"  Waiting for '{name}' to be deleted...")
-                await asyncio.sleep(2)
+                    namespace=args.namespace, plural="monarchmeshes", name=name)
+                time.sleep(2)
             except k8s_client.ApiException as e:
                 if e.status == 404:
-                    print(f"  '{name}' gone.")
                     break
-    print("  Clean slate.")
+    print("Clean.")
 
-    # === Step 1: Create 2 jobs ===
-    print(f"\n=== STEP 1: Creating 2 FRESH K8s jobs ({args.gpus} GPUs each) ===")
-    job0 = KubernetesJob(namespace=args.namespace)
-    job0.add_mesh("replica0", num_replicas=1, pod_spec=pod_spec)
-    job1 = KubernetesJob(namespace=args.namespace)
-    job1.add_mesh("replica1", num_replicas=1, pod_spec=pod_spec)
-
+    # Step 1: Verify replica0 works (direct, no ownership tricks)
+    print(f"\n1. Creating replica0, pinging {args.gpus} GPUs")
+    job0 = make_job(args.namespace, args.image, args.gpus, "replica0")
     hm0 = getattr(job0.state(cached_path=None), "replica0")
-    hm1 = getattr(job1.state(cached_path=None), "replica1")
-
-    print(f"Spawning {args.gpus}-GPU ProcMesh on each replica...")
     pm0 = hm0.spawn_procs({"gpus": args.gpus})
-    pm1 = hm1.spawn_procs({"gpus": args.gpus})
+    a0 = pm0.spawn("p0", PingActor)
+    await a0.ping.call()
+    print("   replica0 OK")
 
-    # === Step 2: Ping all actors ===
-    print("\n=== STEP 2: Spawning actors and pinging all ranks ===")
-    actors0 = pm0.spawn("ping0", PingActor)
-    actors1 = pm1.spawn("ping1", PingActor)
-
-    r0 = await actors0.ping.call()
-    print(f"  replica0: OK ({args.gpus} ranks responded)")
-    r1 = await actors1.ping.call()
-    print(f"  replica1: OK ({args.gpus} ranks responded)")
-    print("  Both replicas healthy.")
-
-    # === Step 3: Kill one process on replica1 via supervised CrashOwner ===
-    print("\n=== STEP 3: Killing one process on replica1 ===")
+    # Step 2: Use ReplicaOwner to ping replica1 then kill a process
+    print(f"\n2. Spawning ReplicaOwner to manage replica1")
     owner_pm = this_host().spawn_procs({"gpus": 1})
-    owner = owner_pm.spawn("crash_owner", CrashOwner)
+    owner = owner_pm.spawn("owner", ReplicaOwner,
+                           args.namespace, args.image, args.gpus, "replica1")
     try:
-        result = await owner.kill_one_process.call_one(pm1)
-        print(f"  {result}")
+        result = await owner.ping_and_kill.call_one()
+        print(f"   Result: {result}")
     except Exception as e:
-        print(f"  Kill triggered: {type(e).__name__}: {e}")
+        print(f"   Exception (expected): {type(e).__name__}: {e}")
 
-    # Stop the owner (orphans the crash actors, which are already dead)
+    # Stop owner — orphans replica1's procs
     try:
         await owner_pm.stop()
     except Exception:
         pass
 
-    # === Step 4: Wait for orphan cleanup ===
-    print(f"\n=== STEP 4: Waiting {args.wait}s for orphan cleanup ===")
-    for remaining in range(args.wait, 0, -10):
-        print(f"  {remaining}s remaining...")
-        await asyncio.sleep(min(10, remaining))
-    print("  Done waiting.")
+    # Step 3: Wait for orphans
+    print(f"\n3. Waiting {args.wait}s for orphan cleanup")
+    for r in range(args.wait, 0, -10):
+        print(f"   {r}s...")
+        await asyncio.sleep(min(10, r))
 
-    # === Step 5: Spawn NEW ProcMesh on same HostMesh ===
-    print(f"\n=== STEP 5: Spawning NEW ProcMesh on replica1's HostMesh ===")
-    t_start = time.time()
+    # Step 4: Try to reuse replica1's HostMesh
+    print("\n4. Reconnecting to replica1's HostMesh")
+    t = time.time()
     try:
+        job1_new = make_job(args.namespace, args.image, args.gpus, "replica1")
+        hm1 = getattr(job1_new.state(cached_path=None), "replica1")
         pm1_new = hm1.spawn_procs({"gpus": args.gpus})
-        elapsed = time.time() - t_start
-        print(f"  spawn_procs succeeded in {elapsed:.1f}s")
+        a1_new = pm1_new.spawn("p1_new", PingActor)
+        await a1_new.ping.call()
+        print(f"   RESULT: HostMesh reuse WORKS ({time.time()-t:.1f}s)")
     except Exception as e:
-        elapsed = time.time() - t_start
-        print(f"  FAILED to spawn_procs after {elapsed:.1f}s: {type(e).__name__}: {e}")
-        print("\n=== RESULT: HostMesh reuse BLOCKED at spawn_procs ===")
-        job0.kill()
-        job1.kill()
-        return
-
-    # === Step 6: Try to use new ProcMesh ===
-    print(f"\n=== STEP 6: Spawning actors on new ProcMesh and pinging ===")
-    try:
-        actors1_new = pm1_new.spawn("ping1_new", PingActor)
-        r1_new = await actors1_new.ping.call()
-        total = time.time() - t_start
-        print(f"  replica1 (new): OK")
-        print(f"\n=== RESULT: HostMesh reuse WORKS! Recovery took {total:.1f}s ===")
-    except Exception as e:
-        total = time.time() - t_start
-        print(f"  FAILED after {total:.1f}s: {type(e).__name__}: {e}")
-        print(f"\n=== RESULT: HostMesh reuse BLOCKED — stale TCP session ===")
+        print(f"   RESULT: HostMesh reuse BLOCKED ({time.time()-t:.1f}s)")
+        print(f"   Error: {e}")
 
     # Cleanup
     print("\nCleaning up...")
-    job0.kill()
-    job1.kill()
+    try:
+        job0.kill()
+    except Exception:
+        pass
+    try:
+        job1_new.kill()
+    except Exception:
+        pass
     print("Done.")
 
 
