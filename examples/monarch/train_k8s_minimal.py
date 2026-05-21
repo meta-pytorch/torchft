@@ -211,7 +211,9 @@ class ReplicaActor(Actor):
 
         # NO async with — don't try to clean up the proc_mesh.
         # On failure, we let the controller orphan everything by stopping us.
-        await trainers_proc_mesh.logging_option(stream_to_client=True)
+        # logging_option(stream_to_client=True) removed — it creates
+        # controller-side sessions that persist across teardowns and
+        # block HostMesh reuse with "out-of-sequence" errors on reconnect.
         await setup_torch_elastic_env_async(trainers_proc_mesh)
 
         training_actors = trainers_proc_mesh.spawn(
