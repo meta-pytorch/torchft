@@ -36,7 +36,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "Monarch Broadcast Tree: Failure Recovery Gap",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -73,7 +73,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "STEP 1: Normal State (O(1) casting)",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
     {
@@ -109,7 +109,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "Controller sends ONE message to root of tree.\nEach node forwards to its children.\nstop() cascades the same way — O(1) from sender.\nAll 8 processes reachable through the tree.",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -173,7 +173,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "Controller Pod",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -237,7 +237,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "ReplicaActor (owns PM)",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -301,7 +301,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "GPU Pod (8 GPUs) — Broadcast Tree:",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -338,7 +338,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "           P0 (root)\n          /       \\\n        P1         P2\n       /  \\       /  \\\n      P3  P4    P5   P6\n                      |\n                     P7\n\n  All nodes GREEN = all reachable",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -376,7 +376,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "STEP 2: Process 6 Dies (SEGFAULT/KILL)",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
     {
@@ -412,7 +412,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "Process 6 is killed (HW failure, SEGFAULT, etc).\nP6 was the parent of P7 in the broadcast tree.\nP7 is still alive but UNREACHABLE — messages\nto P7 must route through dead P6.",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -476,7 +476,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "           P0 (root)\n          /       \\          ...",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -514,7 +514,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "STEP 3: The Hang — async with proc_mesh",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
     {
@@ -550,7 +550,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "...",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -588,7 +588,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "SOLUTION: Skip Cleanup — Orphan Pattern",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
     {
@@ -624,7 +624,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "...",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -662,7 +662,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "BLOCKER: Stale TCP Session on Reconnect",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
     {
@@ -698,7 +698,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "...",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
 
@@ -736,7 +736,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "TIMELINE: What We Proved Works vs What's Blocked",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     },
     {
@@ -772,7 +772,7 @@
       "locked": false,
       "containerId": null,
       "originalText": "...",
-      "autoResize": true,
+      "autoResize": false,
       "lineHeight": 1.25
     }
   ],
