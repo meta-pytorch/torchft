@@ -4,9 +4,10 @@ Repro: Monarch worker rejects new ProcMesh after process death on same HostMesh.
 Setup: 2 K8s pods × 8 GPUs (matches training setup).
 
 Steps:
+  0. Clean up any leftover CRDs from previous runs
   1. Create 2 KubernetesJobs (replica0, replica1), spawn 8-GPU ProcMesh on each
   2. Spawn actors, ping all 16 — verify both replicas work
-  3. Kill one process on replica1 by kubectl exec kill
+  3. Kill one process on replica1 via a supervised CrashActor
   4. Wait for orphan cleanup
   5. Spawn a NEW ProcMesh on replica1's same HostMesh
   6. Try to spawn actors and ping — expect "out-of-sequence" failure
@@ -19,12 +20,12 @@ This blocks the HostMesh reuse recovery path for fault-tolerant training on K8s.
 
 import argparse
 import asyncio
+import ctypes
 import os
-import subprocess
 import textwrap
 import time
 
-from monarch.actor import Actor, current_rank, endpoint
+from monarch.actor import Actor, current_rank, endpoint, this_host
 from monarch.job.kubernetes import KubernetesJob
 
 from kubernetes.client import (
@@ -56,9 +57,33 @@ class PingActor(Actor):
         hostname = socket.gethostname()
         return f"pong from rank={rank} pid={pid} host={hostname}"
 
+
+class CrashActor(Actor):
     @endpoint(instrument=False)
-    async def get_pid(self) -> int:
-        return os.getpid()
+    async def crash(self) -> None:
+        rank = current_rank().rank
+        print(f"[CrashActor] rank={rank} pid={os.getpid()} — calling os._exit(1)")
+        os._exit(1)
+
+
+class CrashOwner(Actor):
+    """Owns the crash operation. __supervise__ prevents root actor death."""
+
+    def __init__(self) -> None:
+        self.failed = False
+
+    async def __supervise__(self, failure) -> bool:
+        self.failed = True
+        return True
+
+    @endpoint(instrument=False)
+    async def kill_one_process(self, proc_mesh) -> str:
+        crash_actors = proc_mesh.spawn("crash_actors", CrashActor)
+        try:
+            await crash_actors.crash.choose()
+        except Exception as e:
+            return f"Process killed: {type(e).__name__}"
+        return "No error (unexpected)"
 
 
 def build_pod_spec(image: str, gpus: int) -> V1PodSpec:
@@ -85,17 +110,6 @@ def build_pod_spec(image: str, gpus: int) -> V1PodSpec:
     )
 
 
-def kill_process_on_pod(namespace: str, pod_name: str, pid: int) -> None:
-    """Kill a specific process on a K8s pod via kubectl exec."""
-    cmd = ["kubectl", "exec", "-n", namespace, pod_name, "--", "kill", "-9", str(pid)]
-    print(f"  Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode == 0:
-        print(f"  Killed pid {pid} on {pod_name}")
-    else:
-        print(f"  kill returned {result.returncode}: {result.stderr.strip()}")
-
-
 async def main():
     parser = argparse.ArgumentParser(description="Repro: stale TCP session on HostMesh reuse")
     parser.add_argument("--namespace", required=True)
@@ -107,20 +121,15 @@ async def main():
 
     pod_spec = build_pod_spec(args.image, args.gpus)
 
-    # === Step 0: Clean up any leftover CRDs from previous runs ===
+    # === Step 0: Clean up any leftover CRDs ===
     print("\n=== STEP 0: Cleaning up leftover MonarchMesh CRDs ===")
-    cleanup0 = KubernetesJob(namespace=args.namespace)
-    cleanup0.add_mesh("replica0", num_replicas=1, pod_spec=pod_spec)
-    cleanup1 = KubernetesJob(namespace=args.namespace)
-    cleanup1.add_mesh("replica1", num_replicas=1, pod_spec=pod_spec)
-    try:
-        cleanup0.kill()
-    except Exception:
-        pass
-    try:
-        cleanup1.kill()
-    except Exception:
-        pass
+    for name in ["replica0", "replica1"]:
+        try:
+            c = KubernetesJob(namespace=args.namespace)
+            c.add_mesh(name, num_replicas=1, pod_spec=pod_spec)
+            c.kill()
+        except Exception:
+            pass
 
     from kubernetes import client as k8s_client, config as k8s_config
     k8s_config.load_incluster_config()
@@ -136,12 +145,12 @@ async def main():
                 await asyncio.sleep(2)
             except k8s_client.ApiException as e:
                 if e.status == 404:
-                    print(f"  '{name}' deleted.")
+                    print(f"  '{name}' gone.")
                     break
     print("  Clean slate.")
 
     # === Step 1: Create 2 jobs ===
-    print(f"\n=== STEP 1: Creating 2 K8s jobs ({args.gpus} GPUs each) ===")
+    print(f"\n=== STEP 1: Creating 2 FRESH K8s jobs ({args.gpus} GPUs each) ===")
     job0 = KubernetesJob(namespace=args.namespace)
     job0.add_mesh("replica0", num_replicas=1, pod_spec=pod_spec)
     job1 = KubernetesJob(namespace=args.namespace)
@@ -163,28 +172,23 @@ async def main():
     print(f"  replica0: OK ({args.gpus} ranks responded)")
     r1 = await actors1.ping.call()
     print(f"  replica1: OK ({args.gpus} ranks responded)")
+    print("  Both replicas healthy.")
 
-    # Get a PID from replica1 rank 0 so we can kill it externally
-    pids = await actors1.get_pid.call()
-    print(f"  replica1 pids: {pids}")
-    # Extract first PID from the result
-    target_pid = None
-    for item in pids:
-        if isinstance(item, tuple):
-            target_pid = item[1]
-        else:
-            target_pid = item
-        break
-    if target_pid is None:
-        print("  ERROR: Could not extract PID from result")
-        job0.kill()
-        job1.kill()
-        return
-    print(f"  replica1 target pid: {target_pid}")
+    # === Step 3: Kill one process on replica1 via supervised CrashOwner ===
+    print("\n=== STEP 3: Killing one process on replica1 ===")
+    owner_pm = this_host().spawn_procs({"gpus": 1})
+    owner = owner_pm.spawn("crash_owner", CrashOwner)
+    try:
+        result = await owner.kill_one_process.call_one(pm1)
+        print(f"  {result}")
+    except Exception as e:
+        print(f"  Kill triggered: {type(e).__name__}: {e}")
 
-    # === Step 3: Kill one process on replica1 via kubectl ===
-    print("\n=== STEP 3: Killing replica1 rank 0 process via kubectl exec ===")
-    kill_process_on_pod(args.namespace, "replica1-0", target_pid)
+    # Stop the owner (orphans the crash actors, which are already dead)
+    try:
+        await owner_pm.stop()
+    except Exception:
+        pass
 
     # === Step 4: Wait for orphan cleanup ===
     print(f"\n=== STEP 4: Waiting {args.wait}s for orphan cleanup ===")
