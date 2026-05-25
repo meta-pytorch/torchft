@@ -30,6 +30,7 @@ from torchft import (
     ProcessGroupBabyNCCL,
     ProcessGroupGloo,
     ProcessGroupNCCL,
+    ProcessGroupXCCL,
 )
 from torchft.checkpointing.http_transport import HTTPTransport
 from torchft.local_sgd import DiLoCo
@@ -58,14 +59,22 @@ def main() -> None:
             "outer_optim": outer_optimizer.state_dict(),
         }
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pg = (
-        ProcessGroupNCCL(
-            timeout=timedelta(seconds=10),
+    if torch.xpu.is_available():
+        # XPU has no env-var equivalent of CUDA_VISIBLE_DEVICES that PyTorch
+        # honors, so multiple replica groups on the same host would all default
+        # to xpu:0 and collide. Pin each replica to its own device explicitly.
+        torch.xpu.set_device(REPLICA_GROUP_ID % torch.xpu.device_count())
+        device = torch.device("xpu")
+        pg = ProcessGroupXCCL(timeout=timedelta(seconds=10))
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        pg = (
+            ProcessGroupNCCL(
+                timeout=timedelta(seconds=10),
+            )
+            if torch.cuda.is_available() and USE_NCCL
+            else ProcessGroupGloo(timeout=timedelta(seconds=10))
         )
-        if torch.cuda.is_available() and USE_NCCL
-        else ProcessGroupGloo(timeout=timedelta(seconds=10))
-    )
 
     transport = HTTPTransport(
         timeout=timedelta(seconds=10),

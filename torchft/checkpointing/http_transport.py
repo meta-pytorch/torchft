@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
 from typing import cast, Generator, List, Optional, TypeVar
@@ -21,6 +21,7 @@ from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing._serialization import _streaming_load, _streaming_save
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.http import _IPv6HTTPServer
+from torchft.utils import get_stream_context
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -55,8 +56,10 @@ class HTTPTransport(CheckpointTransport[T]):
         self._timeout = timeout
         self._state_dict: Optional[T] = None
         self._num_chunks = num_chunks
-        self._stream: Optional[torch.cuda.Stream] = (
-            torch.cuda.Stream() if torch.cuda.is_available() else None
+        self._stream: Optional[torch.Stream] = (
+            torch.Stream(torch.accelerator.current_accelerator())
+            if torch.accelerator.is_available()
+            else None
         )
 
         # staged checkpoint information
@@ -221,11 +224,7 @@ class HTTPTransport(CheckpointTransport[T]):
     ) -> None:
         values, spec = tree_flatten(state_dict)
 
-        with (
-            torch.cuda.stream(self._stream)
-            if self._stream is not None
-            else nullcontext()
-        ):
+        with get_stream_context(self._stream):
             with _time("transferring state_dict to CPU"):
                 values = _to_cpu(values, pin_memory=False)
                 if self._stream is not None:
@@ -270,7 +269,7 @@ def _to_cpu(values: List[T], pin_memory: bool) -> List[T]:
     out = []
     for v in values:
         if isinstance(v, torch.Tensor):
-            if v.device.type == "cuda":
+            if v.device.type in ("cuda", "xpu"):
                 if pin_memory:
                     cpu = torch.empty(*tuple(v.size()), dtype=v.dtype, pin_memory=True)
                     cpu.copy_(v, non_blocking=True)
