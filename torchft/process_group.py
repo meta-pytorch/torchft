@@ -664,6 +664,10 @@ class ProcessGroupGloo(ProcessGroupWrapper):
             pg._register_backend(
                 torch.device("cuda"), ProcessGroup.BackendType.GLOO, backend_class
             )
+        if torch.xpu.is_available():
+            pg._register_backend(
+                torch.device("xpu"), ProcessGroup.BackendType.GLOO, backend_class
+            )
         return pg
 
     def getBackendName(self) -> str:
@@ -728,10 +732,10 @@ class _WorkAcceleratorTimeout(Work):
                 if not self._work.wait():
                     return False
 
-            # Always use cuda stream for timeout to avoid ProcessGroupNCCL
-            # watchdog firing and crashing the process.
+            # Synchronize the current accelerator stream so the timeout fires
+            # before the NCCL/XCCL watchdog can crash the process.
             if timeout is not None:
-                torch.cuda.synchronize()
+                torch.accelerator.synchronize()
 
             return True
 
@@ -990,12 +994,11 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
         # stream.
         self._errored = RuntimeError("aborted")
 
-        super().abort(errored)
+        super().abort(errored=errored)
 
     def errored(self) -> Optional[Exception]:
         # force a synchronization to ensure all work is complete
-        torch.xpu.current_stream().synchronize()
-
+        synchronize()
         return self._errored
 
     def getBackendName(self) -> str:
@@ -2104,10 +2107,13 @@ class ProcessGroupBabyXCCL(ProcessGroupBaby):
         # Check if XPU and XCCL are available
         from torch.distributed import ProcessGroupXCCL as BaseProcessGroupXCCL
 
+        # pyre-fixme[16]: no attribute ProcessGroupXCCL
+        opts = BaseProcessGroupXCCL.Options()
+
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.XCCL)
-        # pyre-fixme[16]: no attribute ProcessGroupNCCL
-        backend_class = BaseProcessGroupXCCL(store, rank, world_size)
+        # pyre-fixme[16]: no attribute ProcessGroupXCCL
+        backend_class = BaseProcessGroupXCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         pg._register_backend(
             torch.device("xpu"), ProcessGroup.BackendType.XCCL, backend_class

@@ -12,7 +12,6 @@ This module implements a fault tolerant version of LocalSGD and related methods.
 import logging
 import math
 import os
-from contextlib import nullcontext
 from types import TracebackType
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -22,6 +21,7 @@ from torch.distributed.distributed_c10d import Work
 from torch.distributed.tensor import DTensor
 from torch.utils.hooks import RemovableHandle
 from torchft.manager import Manager
+from torchft.utils import get_stream_context
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -212,12 +212,14 @@ class _StreamingDiLoCoFragment:
 
         # Stores pending all reduce
         self._allreduce_work: list[Work] = []
-        self._stream: Optional[torch.cuda.Stream] = (
-            torch.cuda.Stream() if torch.cuda.is_available() else None
+        self._stream: Optional[torch.Stream] = (
+            torch.Stream(torch.accelerator.current_accelerator())
+            if torch.accelerator.is_available()
+            else None
         )
 
         # Recorded on `_stream` to wait for allreduce to finish
-        self._stop_event: Optional[torch.cuda.Event] = None
+        self._stop_event: Optional[torch.Event] = None
 
         if bucket_cap_mb is not None:
             self.bucket_cap_mb = int(bucket_cap_mb * 1024 * 1024)
@@ -247,7 +249,7 @@ class _StreamingDiLoCoFragment:
             if (
                 self._pin_memory
                 and t.device == torch.device("cpu")
-                and torch.cuda.is_available()
+                and torch.accelerator.is_available()
             ):
                 t = t.pin_memory()
             self.original_parameters[name] = t
@@ -410,13 +412,9 @@ class _StreamingDiLoCoFragment:
 
         # Make sure tensors are available to `_stream`
         if self._stream is not None:
-            self._stream.wait_stream(torch.cuda.current_stream())
+            self._stream.wait_stream(torch.accelerator.current_stream())
 
-        with (
-            torch.cuda.stream(self._stream)
-            if self._stream is not None
-            else nullcontext()
-        ):
+        with get_stream_context(self._stream):
             self._average_grads()
 
     @torch.profiler.record_function("torchft::local_sgd::perform_sync")
@@ -428,16 +426,12 @@ class _StreamingDiLoCoFragment:
         # Waiting for an allreduce before it has been sent is currently not supported.
         assert len(self._allreduce_work) > 0
 
-        with (
-            torch.cuda.stream(self._stream)
-            if self._stream is not None
-            else nullcontext()
-        ):
+        with get_stream_context(self._stream):
             for work in self._allreduce_work:
                 work.wait()
 
             if self._stream is not None:
-                self._stop_event = torch.cuda.Event()
+                self._stop_event = torch.Event()
                 self._stop_event.record()
 
         self.wait()

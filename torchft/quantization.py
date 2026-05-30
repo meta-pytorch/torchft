@@ -6,7 +6,6 @@
 
 # pyre-unsafe
 import torch
-import torch.cuda as cuda
 
 # pyre-ignore[21]: Could not find a module corresponding to import `triton`
 import triton
@@ -26,16 +25,28 @@ SCALE_TL_DTYPE_BYTES = tl.constexpr(4)
 BLOCK_SIZE_T: int = 2048
 
 
+def _supports_native_fp8() -> bool:
+    """
+    Returns True when the current accelerator supports native FP8.
+
+    On CUDA, this corresponds to compute capability >= (9, 0). On XPU, FP8
+    hardware support is currently absent, so return False explicitly.
+    """
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_capability() >= (9, 0)
+    return False
+
+
 # pyre-ignore[11]: Annotation `tl.constexpr` is not defined
 def _get_fp8_max() -> tl.constexpr:
-    if cuda.get_device_capability() >= (9, 0):
+    if _supports_native_fp8():
         return tl.constexpr(448.0)
     else:
         return tl.constexpr(127)
 
 
 def _get_fp8_type() -> tl.constexpr:
-    if cuda.get_device_capability() >= (9, 0):
+    if _supports_native_fp8():
         return tl.constexpr(tl.float8e4nv)
     else:
         return tl.constexpr(tl.int8)

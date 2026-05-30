@@ -459,7 +459,6 @@ class Manager:
                     [tensor],
                     pg_reduce_op,
                     self._pg,
-                    # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
                     torch.accelerator.current_stream(),
                 )
             else:
