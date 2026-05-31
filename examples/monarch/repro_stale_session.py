@@ -21,7 +21,7 @@ from monarch.actor import Actor, current_rank, endpoint, HostMesh, ProcMesh, thi
 from monarch.job.kubernetes import KubernetesJob
 from kubernetes.client import (
     V1Container, V1EmptyDirVolumeSource, V1EnvVar, V1PodSpec,
-    V1ResourceRequirements, V1Volume, V1VolumeMount,
+    V1PodTemplateSpec, V1ResourceRequirements, V1Volume, V1VolumeMount,
 )
 
 _WORKER_SCRIPT = textwrap.dedent("""\
@@ -73,7 +73,7 @@ class MonarchKubernetes:
                               empty_dir=V1EmptyDirVolumeSource(medium="Memory", size_limit="16Gi"))],
         )
         job = KubernetesJob(namespace=self.namespace)
-        job.add_mesh(mesh_name, num_replicas=1, pod_spec=pod_spec)
+        job.add_mesh(mesh_name, num_replicas=1, pod_template=V1PodTemplateSpec(spec=pod_spec))
         self.job_handles[mesh_name] = job
 
     def proc_mesh(self, mesh_name, num_procs):
@@ -132,7 +132,7 @@ async def main():
         try:
             j = KubernetesJob(namespace=args.namespace)
             gpu_res = {"nvidia.com/gpu": str(args.gpus)}
-            j.add_mesh(name, num_replicas=1, pod_spec=V1PodSpec(
+            j.add_mesh(name, num_replicas=1, pod_template=V1PodTemplateSpec(spec=V1PodSpec(
                 containers=[V1Container(name="worker", image=args.image,
                     command=["python", "-u", "-c", _WORKER_SCRIPT],
                     env=[V1EnvVar(name="MONARCH_PORT", value="26600")],
@@ -140,7 +140,7 @@ async def main():
                         limits=gpu_res, requests=gpu_res),
                     volume_mounts=[V1VolumeMount(name="dshm", mount_path="/dev/shm")])],
                 volumes=[V1Volume(name="dshm",
-                    empty_dir=V1EmptyDirVolumeSource(medium="Memory", size_limit="16Gi"))]))
+                    empty_dir=V1EmptyDirVolumeSource(medium="Memory", size_limit="16Gi"))])))
             j.kill()
         except Exception:
             pass
