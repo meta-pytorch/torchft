@@ -25,6 +25,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict
 
+from monarch.config import configure
+configure(mesh_orphan_timeout="10s")
+
 import torch
 from kubernetes.client import (
     V1Container,
@@ -273,7 +276,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 65
+PROC_ATTEMPT_DELAY = 15
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
