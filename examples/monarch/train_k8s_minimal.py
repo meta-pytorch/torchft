@@ -30,6 +30,7 @@ from kubernetes.client import (
     V1EmptyDirVolumeSource,
     V1EnvVar,
     V1PodSpec,
+    V1PodTemplateSpec,
     V1ResourceRequirements,
     V1Volume,
     V1VolumeMount,
@@ -124,7 +125,7 @@ class MonarchKubernetes:
         job = KubernetesJob(namespace=self.namespace, timeout=self.timeout)
         if self.image is not None:
             pod_spec = build_gpu_pod_spec(self.image, self.gpus_per_host)
-            job.add_mesh(mesh_name, num_replicas=1, pod_spec=pod_spec)
+            job.add_mesh(mesh_name, num_replicas=1, pod_template=V1PodTemplateSpec(spec=pod_spec))
         else:
             job.add_mesh(mesh_name, num_replicas=1)
         self.job_handles[mesh_name] = job
