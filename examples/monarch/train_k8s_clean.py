@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Clean K8s FT training — no __supervise__, no inner retry.
-Matches the SLURM pattern: failure kills everything, outer loop restarts.
+K8s fault-tolerant training — POD RESTART variant.
 
-Two modes to measure recovery time:
-  --reuse-pods:  Keep K8s pods alive, respawn procs on same HostMesh
-  --fresh-pods:  Delete K8s jobs, let K8s reschedule from scratch
+Identical to train_k8s_minimal.py EXCEPT: on failure, the failed replica's
+K8s job is deleted and recreated (fresh pod) instead of reusing the HostMesh.
+
+Compare recovery time against train_k8s_minimal.py (HostMesh reuse).
 """
 
 import argparse
@@ -29,6 +29,7 @@ from kubernetes.client import (
     V1EmptyDirVolumeSource,
     V1EnvVar,
     V1PodSpec,
+    V1PodTemplateSpec,
     V1ResourceRequirements,
     V1Volume,
     V1VolumeMount,
@@ -58,6 +59,10 @@ except ModuleNotFoundError:
     FailureActor = None
     FailureController = None
     Failure = None
+
+
+class TrainerFailure(Exception):
+    pass
 
 
 # ==== K8s allocation ====
@@ -119,7 +124,7 @@ class MonarchKubernetes:
         job = KubernetesJob(namespace=self.namespace, timeout=self.timeout)
         if self.image is not None:
             pod_spec = build_gpu_pod_spec(self.image, self.gpus_per_host)
-            job.add_mesh(mesh_name, num_replicas=1, pod_spec=pod_spec)
+            job.add_mesh(mesh_name, num_replicas=1, pod_template=V1PodTemplateSpec(spec=pod_spec))
         else:
             job.add_mesh(mesh_name, num_replicas=1)
         self.job_handles[mesh_name] = job
@@ -139,13 +144,30 @@ class MonarchKubernetes:
         except Exception as e:
             logger.exception(f"Failed to destroy job for {mesh_name}: {e}")
 
+    def wait_for_deletion(self, mesh_name: str, timeout: int = 120) -> None:
+        from kubernetes import client as k8s_client, config as k8s_config
+        k8s_config.load_incluster_config()
+        api = k8s_client.CustomObjectsApi()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                api.get_namespaced_custom_object(
+                    group="monarch.pytorch.org", version="v1",
+                    namespace=self.namespace, plural="monarchmeshes", name=mesh_name)
+                time.sleep(2)
+            except k8s_client.ApiException as e:
+                if e.status == 404:
+                    logger.info(f"MonarchMesh '{mesh_name}' fully deleted")
+                    return
+        logger.warning(f"Timed out waiting for '{mesh_name}' deletion")
+
     def proc_mesh(self, mesh_name: str, num_procs: int) -> ProcMesh:
         job = self.job_handles[mesh_name]
         mesh: HostMesh = getattr(job.state(cached_path=None), mesh_name)
         return mesh.spawn_procs({"gpus": num_procs})
 
 
-# ==== Actors (matches SLURM script — no __supervise__) ====
+# ==== Actors (identical to train_k8s_minimal.py) ====
 
 
 class TrainingActor(Actor):
@@ -177,15 +199,21 @@ class TrainingActor(Actor):
 
 
 class ReplicaActor(Actor):
-    """No __supervise__. Failures propagate to root, outer loop restarts."""
+    """Identical to train_k8s_minimal.py"""
 
     def __init__(self, spec: "JobSpec", replica_id: int, scheduler: "MonarchKubernetes") -> None:
         self.spec = deepcopy(spec)
         self.replica_id = replica_id
         self.spec.trainer_config.fault_tolerance.replica_id = replica_id
         self.scheduler = scheduler
+        self.failure_occurred = False
         self.failure_actors = None
         self.uid = f"[replica_{replica_id}]"
+
+    async def __supervise__(self, failure) -> bool:
+        logger.info(f"{self.uid} __supervise__ caught failure: {failure}")
+        self.failure_occurred = True
+        return True
 
     @endpoint(instrument=False)
     async def start_replica(self) -> None:
@@ -197,24 +225,27 @@ class ReplicaActor(Actor):
             num_procs=self.spec.gpus_per_host,
         )
 
-        async with trainers_proc_mesh:
-            await trainers_proc_mesh.logging_option(stream_to_client=True)
-            await setup_torch_elastic_env_async(trainers_proc_mesh)
+        await setup_torch_elastic_env_async(trainers_proc_mesh)
 
-            training_actors = trainers_proc_mesh.spawn(
-                "training_actors",
-                TrainingActor,
-                self.spec.trainer_config,
-                self.replica_id,
+        training_actors = trainers_proc_mesh.spawn(
+            "training_actors",
+            TrainingActor,
+            self.spec.trainer_config,
+            self.replica_id,
+        )
+
+        if FailureActor is not None and self.spec.with_failures:
+            self.failure_actors = trainers_proc_mesh.spawn(
+                "failure_actors", FailureActor
             )
 
-            if FailureActor is not None and self.spec.with_failures:
-                self.failure_actors = trainers_proc_mesh.spawn(
-                    "failure_actors", FailureActor
-                )
-
-            logger.info(f"{self.uid} Starting trainers")
+        logger.info(f"{self.uid} Starting trainers")
+        try:
             await training_actors.start_training.call(self.spec.lighthouse_address)
+        except Exception as e:
+            if self.failure_occurred:
+                raise TrainerFailure(f"{self.uid} trainer process died") from e
+            raise
 
     @endpoint(instrument=False)
     async def inject_failure(self, failure_type: "Failure"):
@@ -237,7 +268,6 @@ class JobSpec:
     replica_count: int
     gpus_per_host: int
     with_failures: bool
-    reuse_pods: bool
     namespace: str = ""
     image: str | None = None
     timeout: int | None = None
@@ -249,6 +279,10 @@ class Replica:
     rid: int
     proc_mesh: ProcMesh
     actor: "ReplicaActor"
+    attempt_number: int = 0
+
+
+MAX_ATTEMPT = 16
 
 
 class OrchestrationManager:
@@ -271,7 +305,7 @@ class OrchestrationManager:
 
         mesh_futures = {}
         for i in range(self.spec.replica_count):
-            mesh_futures[i] = asyncio.create_task(self._run_replica(i))
+            mesh_futures[i] = asyncio.create_task(self._run_replica(i, 0))
 
         failure_future = None
         if self.spec.with_failures:
@@ -299,14 +333,42 @@ class OrchestrationManager:
         try:
             if self.lighthouse:
                 self.lighthouse.shutdown()
-                self.lighthouse = None
             logger.info("[Controller] Lighthouse stopped")
         except Exception as e:
             logger.exception(f"[Controller] Failed to stop lighthouse: {e}")
 
-    async def _run_replica(self, replica_id: int) -> None:
-        logger.info(f"[Controller] Spinning up replica {replica_id}")
+    async def _run_replica(self, replica_id: int, attempt_number: int) -> None:
+        if attempt_number >= MAX_ATTEMPT:
+            logger.info(f"[Controller] Replica {replica_id} has failed too many times.")
+            return
 
+        try:
+            await self._spin_up_replica(replica_id, attempt_number)
+            logger.info(f"[Controller] replica {replica_id} done")
+            await self._teardown(replica_id)
+        except Exception as e:
+            failure_time = time.time()
+            logger.exception(f"[Controller] replica {replica_id} failed (t={failure_time:.1f}): {e}")
+            await self._teardown(replica_id)
+            # === ONLY DIFFERENCE FROM MINIMAL ===
+            # Kill the K8s job and create a fresh one (new pod)
+            # instead of reusing the same HostMesh
+            logger.info(f"[Controller] Replica {replica_id} — deleting K8s job for fresh pod")
+            delete_start = time.time()
+            self.scheduler.kill_job(f"replica{replica_id}")
+            self.scheduler.wait_for_deletion(f"replica{replica_id}")
+            await self.scheduler.get_or_create_job(f"replica{replica_id}")
+            logger.info(f"[Controller] Replica {replica_id} — fresh pod ready (took {time.time()-delete_start:.1f}s)")
+            # ====================================
+            await self._run_replica(replica_id, attempt_number + 1)
+
+    async def _spin_up_replica(self, replica_id: int, attempt_number: int = 0) -> None:
+        if attempt_number != 0:
+            logger.info(f"[Controller] Replica {replica_id} attempt {attempt_number} — FRESH POD")
+
+        logger.info(f"[Controller] Spinning up replica with ID {replica_id}")
+
+        spawn_start = time.time()
         replica_proc_mesh = this_host().spawn_procs({"gpus": 1})
         await replica_proc_mesh.logging_option(aggregate_window_sec=None)
 
@@ -314,26 +376,30 @@ class OrchestrationManager:
             "replica_actor", ReplicaActor, self.spec, replica_id, self.scheduler
         )
 
-        self.replicas[replica_id] = Replica(replica_id, replica_proc_mesh, replica_actor)
+        replica = Replica(replica_id, replica_proc_mesh, replica_actor, attempt_number)
+        self.replicas[replica_id] = replica
 
-        logger.info(f"[Controller] Replica {replica_id} starting training")
-        await replica_actor.start_replica.call_one()
+        logger.info(f"[Controller] Replica {replica_id} starting training (spawn took {time.time()-spawn_start:.1f}s)")
+        await replica.actor.start_replica.call_one()
 
-    def prepare_restart(self) -> None:
-        """Prepare for restart after a crash. Called between runs."""
-        if self.spec.reuse_pods:
-            logger.info("[Controller] REUSE_PODS: keeping existing K8s jobs")
-        else:
-            logger.info("[Controller] FRESH_PODS: killing K8s jobs for fresh reschedule")
-            self.scheduler.kill_jobs()
-
-        self.replicas.clear()
+    async def _teardown(self, replica_id: int) -> None:
+        try:
+            replica = self.replicas.pop(replica_id, None)
+            if replica is None:
+                return
+            try:
+                await replica.proc_mesh.stop()
+            except Exception as e:
+                logger.warning(f"[Controller] Failed to stop replica {replica_id} proc_mesh: {e}")
+            del replica.proc_mesh
+        except Exception as e:
+            logger.warning(f"[Controller] Failed to teardown replica {replica_id}: {e}")
 
 
 # === CLI / CONFIG === #
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="K8s FT Training — recovery time measurement")
+    parser = argparse.ArgumentParser(description="K8s FT Training — POD RESTART (comparison)")
     parser.add_argument("--replica-count", type=int, default=2)
     parser.add_argument("--gpus-per-host", type=int, default=8)
     parser.add_argument("--training-steps", type=int, default=10000)
@@ -343,10 +409,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", type=str, required=True)
     parser.add_argument("--image", type=str, default=None)
     parser.add_argument("--timeout", type=int, default=None)
-    parser.add_argument("--reuse-pods", action="store_true",
-                        help="Keep pods alive on failure, respawn procs on same HostMesh")
-    parser.add_argument("--max-restarts", type=int, default=3,
-                        help="Max number of full restarts after failures")
     return parser.parse_args()
 
 
@@ -379,57 +441,24 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         replica_count=args.replica_count,
         gpus_per_host=args.gpus_per_host,
         with_failures=args.with_failures,
-        reuse_pods=args.reuse_pods,
         namespace=args.namespace,
         image=args.image,
         timeout=args.timeout,
     )
 
 
-async def run_training(orchestrator: OrchestrationManager) -> None:
-    orchestrator.start_lighthouse()
+async def main() -> None:
+    init_logger()
+    args = parse_args()
+    job_spec = make_job_spec(args)
+
+    orchestrator = OrchestrationManager(job_spec)
     try:
+        orchestrator.start_lighthouse()
         await orchestrator.start_training()
     finally:
         orchestrator.stop_lighthouse()
 
 
-def main() -> None:
-    init_logger()
-    args = parse_args()
-    job_spec = make_job_spec(args)
-    mode = "REUSE_PODS" if args.reuse_pods else "FRESH_PODS"
-
-    orchestrator = OrchestrationManager(job_spec)
-
-    for attempt in range(args.max_restarts + 1):
-        if attempt > 0:
-            logger.info(f"===== RESTART {attempt}/{args.max_restarts} (mode={mode}) =====")
-            restart_start = time.time()
-            orchestrator.prepare_restart()
-
-        try:
-            asyncio.run(run_training(orchestrator))
-            logger.info("[Controller] Training completed successfully")
-            break
-        except (KeyboardInterrupt, Exception) as e:
-            crash_time = time.time()
-            logger.error(f"[Controller] Training crashed (attempt {attempt}): {type(e).__name__}: {e}")
-
-            if attempt >= args.max_restarts:
-                logger.error(f"[Controller] Max restarts ({args.max_restarts}) reached. Giving up.")
-                break
-
-            if attempt > 0:
-                recovery_time = crash_time - restart_start
-                logger.info(f"[Controller] Time from restart to crash: {recovery_time:.1f}s")
-
-            logger.info(f"[Controller] Will restart in mode={mode}")
-    else:
-        logger.info("[Controller] All restart attempts exhausted")
-
-    orchestrator.scheduler.kill_jobs()
-
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
