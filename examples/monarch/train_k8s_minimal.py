@@ -20,6 +20,7 @@ import asyncio
 import atexit
 import os
 import textwrap
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict
@@ -272,7 +273,7 @@ class Replica:
     attempt_number: int = 0
 
 
-PROC_ATTEMPT_DELAY = 90
+PROC_ATTEMPT_DELAY = 65
 PROC_ATTEMPTS = 4
 MAX_ATTEMPT = PROC_ATTEMPTS * 4
 
@@ -339,7 +340,8 @@ class OrchestrationManager:
             logger.info(f"[Controller] replica {replica_id} done")
             await self._teardown(replica_id)
         except Exception as e:
-            logger.exception(f"[Controller] replica {replica_id} failed: {e}")
+            failure_time = time.time()
+            logger.exception(f"[Controller] replica {replica_id} failed (t={failure_time:.1f}): {e}")
             await self._teardown(replica_id)
             await self._run_replica(replica_id, attempt_number + 1)
 
@@ -351,6 +353,7 @@ class OrchestrationManager:
         logger.info(f"[Controller] Spinning up replica with ID {replica_id} in {delay} seconds")
         await asyncio.sleep(delay)
 
+        spawn_start = time.time()
         replica_proc_mesh = this_host().spawn_procs({"gpus": 1})
         await replica_proc_mesh.logging_option(aggregate_window_sec=None)
 
@@ -361,7 +364,7 @@ class OrchestrationManager:
         replica = Replica(replica_id, replica_proc_mesh, replica_actor, attempt_number)
         self.replicas[replica_id] = replica
 
-        logger.info(f"[Controller] Replica {replica_id} starting training")
+        logger.info(f"[Controller] Replica {replica_id} starting training (spawn took {time.time()-spawn_start:.1f}s)")
         await replica.actor.start_replica.call_one()
 
     async def _teardown(self, replica_id: int) -> None:
