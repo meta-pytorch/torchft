@@ -165,22 +165,65 @@ def run_controller(args):
     core_v1 = k8s_client.CoreV1Api()
 
     train_script = textwrap.dedent(f"""\
-        import os, sys
-        os.environ["TORCHFT_LIGHTHOUSE"] = "{lighthouse_address}"
-        sys.path.insert(0, "/workspace/torchft/examples/monarch")
-        from train_k8s_baseline import run_train, parse_args
-        import argparse
-        args = argparse.Namespace(
-            mode="train",
-            replica_id=int(os.environ["REPLICA_ID"]),
-            lighthouse_address="{lighthouse_address}",
-            gpus_per_host={args.gpus_per_host},
-            training_steps={args.training_steps},
-            tokenizer_path="{args.tokenizer_path}",
-            dataset_path={repr(args.dataset_path)},
-        )
-        run_train(args)
-    """)
+import os
+import torch
+import torch.distributed as dist
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
+from torchtitan.experiments.ft.config.job_config import FaultTolerance
+from torchtitan.experiments.ft.llama3 import model_registry
+from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
+from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
+from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.profiling import ProfilingConfig
+
+init_logger()
+os.environ["TORCHFT_LIGHTHOUSE"] = "{lighthouse_address}"
+replica_id = int(os.environ["REPLICA_ID"])
+rank = int(os.environ.get("RANK", 0))
+
+trainer_config = FaultTolerantTrainer.Config(
+    hf_assets_path="{args.tokenizer_path}",
+    profiling=ProfilingConfig(),
+    metrics=MetricsProcessor.Config(log_freq=1, enable_tensorboard=True),
+    model_spec=model_registry("debugmodel"),
+    optimizer=FTOptimizersContainer.Config(lr=8e-4),
+    lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2, decay_ratio=0.8, decay_type="linear", min_lr_factor=0.0),
+    training=TrainingConfig(local_batch_size=8, seq_len=2048, steps={args.training_steps}),
+    dataloader=HuggingFaceTextDataLoader.Config(
+        dataset="c4" if {repr(args.dataset_path)} is None else "c4_test",
+        dataset_path={repr(args.dataset_path)},
+    ),
+    checkpoint=CheckpointManager.Config(),
+    activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+    comm=CommConfig(train_timeout_seconds=300),
+    fault_tolerance=FaultTolerance(
+        enable=True,
+        replica_id=replica_id,
+        group_size={args.gpus_per_host},
+        process_group="nccl",
+        process_group_timeout_ms=60000,
+    ),
+)
+
+trainer = trainer_config.build()
+logger.info(f"[replica_{{replica_id}}_rank_{{rank}}] initialized on pid={{os.getpid()}}")
+try:
+    trainer.train()
+except Exception:
+    if trainer:
+        trainer.close()
+    raise
+else:
+    trainer.close()
+finally:
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    logger.info(f"[replica_{{replica_id}}_rank_{{rank}}] done")
+""")
 
     gpu_resources = {"nvidia.com/gpu": str(args.gpus_per_host)}
 
