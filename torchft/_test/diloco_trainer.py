@@ -147,6 +147,7 @@ class DiLoCoTrainer:
                     layers.parameters(), lr=0.7, momentum=0.9, nesterov=True
                 )
             )
+        # pyrefly: ignore [bad-return]
         return outer_optimizers
 
     def setup_pg(self) -> FakeProcessGroupWrapper:

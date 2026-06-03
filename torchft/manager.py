@@ -280,6 +280,7 @@ class Manager:
                 num_chunks=0,
             )
 
+        # pyrefly: ignore [invalid-type-var]
         self._checkpoint_transport: CheckpointTransport[Dict[str, T]] = (
             checkpoint_transport
         )
@@ -1092,6 +1093,7 @@ class _SimpleFuture(torch.futures.Future[T]):
         super().__init__()
         self._value = value
 
+    # pyrefly: ignore [bad-override]
     def value(self) -> object:
         return self._value
 
@@ -1102,6 +1104,7 @@ class _SimpleFuture(torch.futures.Future[T]):
             "This future is only supposed to be used in callback chain to extract the value"
         )
 
+    # pyrefly: ignore [bad-override]
     def wait(self) -> object:
         raise NotImplementedError(
             "This future is only supposed to be used in callback chain to extract the value"
@@ -1180,10 +1183,12 @@ class _ManagedFuture(torch.futures.Future[T]):
         managed_work._managed_fut_tail = self._next
         return cast(torch.futures.Future[S], self._next)
 
+    # pyrefly: ignore [bad-override]
     def wait(self) -> object:
         assert self._fut
         return self._fut.wait()
 
+    # pyrefly: ignore [bad-override]
     def value(self) -> object:
         raise NotImplementedError(
             "This future is supposed to be used to create callback chain"

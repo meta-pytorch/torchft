@@ -9,5 +9,6 @@ from http.server import ThreadingHTTPServer
 
 
 class _IPv6HTTPServer(ThreadingHTTPServer):
+    # pyrefly: ignore [bad-override-mutable-attribute]
     address_family: socket.AddressFamily = socket.AF_INET6
     request_queue_size: int = 1024

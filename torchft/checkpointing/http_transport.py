@@ -279,7 +279,9 @@ def _to_cpu(values: List[T], pin_memory: bool) -> List[T]:
             else:
                 out.append(v)
         else:
+            # pyrefly: ignore [bad-argument-type]
             out.append(v)
+    # pyrefly: ignore [bad-return]
     return out
 
 

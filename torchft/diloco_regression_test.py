@@ -177,6 +177,7 @@ class MockDiLoCoTrainer(DiLoCoTrainer):
             outer_optimizers.append(
                 MockOptimizer(self.model.layers[i].parameters(), lr=self.outer_lr)
             )
+        # pyrefly: ignore [bad-return]
         return outer_optimizers
 
     def train_loop(self) -> Dict[str, Any]:

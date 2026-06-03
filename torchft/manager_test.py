@@ -405,14 +405,17 @@ class TestManager(TestCase):
 
         bad_fut = torch.futures.Future()
         bad_fut.set_exception(RuntimeError("injected failure"))
+        # pyrefly: ignore [missing-attribute]
         manager._pg.allreduce.return_value.get_future.return_value = bad_fut
         manager.allreduce(torch.tensor([1.0])).wait()
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 2)
         self.assertTrue(manager._errored)
         self.assertFalse(manager.should_commit())
         self.assertTrue(manager._errored)
 
         # cleanup
+        # pyrefly: ignore [missing-attribute]
         manager._pg.allreduce.reset_mock(return_value=True)
 
         # recover on next step
@@ -549,6 +552,7 @@ class TestManager(TestCase):
         self.assertIsNone(manager.errored())
 
         e = RuntimeError("injected failure")
+        # pyrefly: ignore [bad-argument-type]
         fut.set_exception(e)
         error = manager.errored()
         assert error is not None
