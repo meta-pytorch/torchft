@@ -210,8 +210,9 @@ def run_controller(args):
                             k8s_client.V1Container(
                                 name="trainer",
                                 image=args.image,
-                                command=["torchrun", "--nproc_per_node", str(args.gpus_per_host),
-                                         "-c", train_script],
+                                command=["bash", "-c",
+                                         f"cat > /tmp/train.py << 'SCRIPT'\n{train_script}\nSCRIPT\n"
+                                         f"torchrun --nproc_per_node={args.gpus_per_host} /tmp/train.py"],
                                 env=[
                                     k8s_client.V1EnvVar(name="REPLICA_ID", value=str(replica_id)),
                                 ],
