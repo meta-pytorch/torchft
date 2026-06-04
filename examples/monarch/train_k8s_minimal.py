@@ -108,10 +108,11 @@ def build_gpu_pod_spec(image: str, gpus_per_host: int) -> V1PodSpec:
 
 
 class MonarchKubernetes:
-    def __init__(self, namespace: str, image: str | None = None, gpus_per_host: int = 8, timeout: int | None = None):
+    def __init__(self, namespace: str, image: str | None = None, gpus_per_host: int = 8, hosts_per_replica: int = 1, timeout: int | None = None):
         self.namespace = namespace
         self.image = image
         self.gpus_per_host = gpus_per_host
+        self.hosts_per_replica = hosts_per_replica
         self.timeout = timeout
         self.job_handles: Dict[str, KubernetesJob] = {}
         self._is_owner = True
@@ -129,9 +130,9 @@ class MonarchKubernetes:
         job = KubernetesJob(namespace=self.namespace, timeout=self.timeout)
         if self.image is not None:
             pod_spec = build_gpu_pod_spec(self.image, self.gpus_per_host)
-            job.add_mesh(mesh_name, num_replicas=1, pod_template=V1PodTemplateSpec(spec=pod_spec))
+            job.add_mesh(mesh_name, num_replicas=self.hosts_per_replica, pod_template=V1PodTemplateSpec(spec=pod_spec))
         else:
-            job.add_mesh(mesh_name, num_replicas=1)
+            job.add_mesh(mesh_name, num_replicas=self.hosts_per_replica)
         self.job_handles[mesh_name] = job
 
     def kill_jobs(self):
@@ -261,6 +262,7 @@ class JobSpec:
     trainer_config: FaultTolerantTrainer.Config
     replica_count: int
     gpus_per_host: int
+    hosts_per_replica: int
     with_failures: bool
     namespace: str = ""
     image: str | None = None
@@ -290,6 +292,7 @@ class OrchestrationManager:
             namespace=spec.namespace,
             image=spec.image,
             gpus_per_host=spec.gpus_per_host,
+            hosts_per_replica=spec.hosts_per_replica,
             timeout=spec.timeout,
         )
 
@@ -391,6 +394,7 @@ class OrchestrationManager:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="K8s FT Training — orphan pattern")
     parser.add_argument("--replica-count", type=int, default=2)
+    parser.add_argument("--hosts-per-replica", type=int, default=1)
     parser.add_argument("--gpus-per-host", type=int, default=8)
     parser.add_argument("--training-steps", type=int, default=10000)
     parser.add_argument("--tokenizer-path", type=str, default="/opt/torchtitan/tests/assets/tokenizer")
@@ -420,7 +424,7 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         comm=CommConfig(train_timeout_seconds=300),
         fault_tolerance=FaultTolerance(
             enable=True,
-            group_size=args.gpus_per_host,
+            group_size=args.gpus_per_host * args.hosts_per_replica,
             process_group="nccl",
             process_group_timeout_ms=60000,
         ),
@@ -430,6 +434,7 @@ def make_job_spec(args: argparse.Namespace) -> JobSpec:
         trainer_config=trainer_config,
         replica_count=args.replica_count,
         gpus_per_host=args.gpus_per_host,
+        hosts_per_replica=args.hosts_per_replica,
         with_failures=args.with_failures,
         namespace=args.namespace,
         image=args.image,
