@@ -5,21 +5,10 @@ This directory contains scripts for orchestrating fault-tolerant distributed tra
 TorchTitan and Monarch. Two scheduler backends are supported:
 
 - **`train_distributed.py`** — SLURM-based (bare-metal / HPC clusters)
-- **`train_distributed_k8s.py`** — Kubernetes with HostMesh reuse (recommended)
-- **`train_distributed_k8s_pod_restart.py`** — Kubernetes with pod restart (comparison baseline)
+- **`train_distributed_k8s.py`** — Kubernetes with HostMesh reuse (fault-tolerant recovery)
 
-All scripts manage multiple training replicas with automatic failure recovery and
+Both scripts manage multiple training replicas with automatic failure recovery and
 TorchFT lighthouse coordination.
-
-#### K8s Scripts Comparison
-
-| Script | Recovery Strategy | Recovery Time | GPU Allocation |
-|---|---|---|---|
-| `train_distributed_k8s.py` | HostMesh reuse (orphan pattern) | **~17s** | Retained |
-| `train_distributed_k8s_pod_restart.py` | Delete + recreate K8s job | 53–115s | Released and reacquired |
-
-Both scripts keep the healthy replica training solo during recovery. The only difference
-is how the failed replica is restarted.
 
 ##### PREREQUISITES
 
@@ -69,13 +58,6 @@ is how the failed replica is restarted.
         --image <registry>/monarch:<tag> \
         --replica-count 2 --hosts-per-replica 2 --gpus-per-host 8 \
         --training-steps 10000
-
-**Kubernetes (pod restart — comparison baseline):**
-
-    python train_distributed_k8s_pod_restart.py --namespace monarch-tests \
-        --image <registry>/monarch:<tag> \
-        --replica-count 2 --gpus-per-host 8 --training-steps 10000 \
-        --with-failures
 
 ##### ARCHITECTURE
 
