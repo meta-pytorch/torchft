@@ -10,7 +10,7 @@ import logging
 import os
 import random
 from enum import Enum
-from typing import Dict, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, Union
 
 import torch
 from monarch.actor import Actor, current_rank, endpoint
@@ -18,7 +18,14 @@ from monarch.actor import Actor, current_rank, endpoint
 logger = logging.getLogger()
 
 if TYPE_CHECKING:
-    from ..train_distributed_k8s import MonarchKubernetes, Replica
+    # This module is shared by both the SLURM and Kubernetes training scripts.
+    from ..train_distributed import MonarchSlurm
+    from ..train_distributed import Replica as SlurmReplica
+    from ..train_distributed_k8s import MonarchKubernetes
+    from ..train_distributed_k8s import Replica as K8sReplica
+
+    Scheduler = Union[MonarchSlurm, MonarchKubernetes]
+    Replica = Union[SlurmReplica, K8sReplica]
 
 
 class Failure(Enum):
@@ -79,9 +86,9 @@ class FailureActor(Actor):
 
 class FailureController:
     @staticmethod
-    def kill_job(scheduler: "MonarchKubernetes") -> None:
+    def kill_job(scheduler: "Scheduler") -> None:
         """
-        Kills a random replica K8s job
+        Kills a random replica job
         """
         candidates = [
             mesh_name
@@ -89,16 +96,22 @@ class FailureController:
             if "replica" in mesh_name
         ]
         selected = random.choice(candidates)
-        logger.info(f"[FailureController] Killing K8s job for {selected}")
+        logger.info(f"[FailureController] Killing job for {selected}")
         scheduler.kill_job(selected)
 
     @staticmethod
     async def execute_failures(
         replicas: Dict[int, "Replica"],
-        scheduler: "MonarchKubernetes",
+        scheduler: "Scheduler",
         startup_wait: int = 120,
         rest_time: int = 120,
+        failures: Optional[List[Failure]] = None,
     ):
+        # Which failures to inject. Defaults to all of them (used by SLURM).
+        # The K8s script passes a restricted set because KILL_JOB is a no-op
+        # there: deleting the CRD doesn't kill already-connected actors.
+        failures = failures or list(Failure)
+
         logger.info(
             f"[FailureController] Starting failure injection in {startup_wait} seconds"
         )
@@ -115,17 +128,12 @@ class FailureController:
                     ]
 
                 last_replica = random.choice(running_replicas)
-                # Exclude KILL_JOB on K8s: deleting the CRD doesn't kill
-                # already-connected actors, so it's a no-op.
-                process_failures = [Failure.SEGFAULT, Failure.KILL_PROC]
-                last_failure = random.choice(process_failures)
+                last_failure = random.choice(failures)
                 try:
                     if last_failure == Failure.KILL_JOB:
                         FailureController.kill_job(scheduler)
-                    elif hasattr(last_replica, 'actor') and last_replica.actor:
+                    else:
                         await last_replica.actor.inject_failure.call_one(last_failure)
-                    elif hasattr(last_replica, 'failure_actors') and last_replica.failure_actors:
-                        await last_replica.failure_actors.fail.choose(last_failure)
                     logger.info(
                         f"[FailureController] Failure injection ({last_failure}) sent to replica {last_replica.rid}"
                     )

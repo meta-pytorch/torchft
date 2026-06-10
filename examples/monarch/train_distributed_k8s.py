@@ -309,7 +309,15 @@ class OrchestrationManager:
         failure_future = None
         if self.spec.with_failures:
             failure_future = asyncio.create_task(
-                FailureController.execute_failures(self.replicas, self.scheduler, startup_wait=120, rest_time=600)
+                FailureController.execute_failures(
+                    self.replicas,
+                    self.scheduler,
+                    startup_wait=120,
+                    rest_time=600,
+                    # KILL_JOB is a no-op on K8s (deleting the CRD doesn't kill
+                    # already-connected actors), so only inject process failures.
+                    failures=[Failure.SEGFAULT, Failure.KILL_PROC],
+                )
             )
 
         await asyncio.gather(*mesh_futures.values(), return_exceptions=True)

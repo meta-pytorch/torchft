@@ -21,7 +21,6 @@ TorchFT lighthouse coordination.
 
 **SLURM (`train_distributed.py`):**
 - Access to a SLURM cluster with GPU nodes
-- Munge authentication configured across nodes
 - Training dataset (`c4_test`) and tokenizer in script directory
 
 **Kubernetes (`train_distributed_k8s.py`):**
@@ -93,10 +92,15 @@ Key settings in `train_distributed_k8s.py`:
 
 ```python
 configure(mesh_orphan_timeout="10s")   # How fast orphans are killed
-PROC_ATTEMPT_DELAY = 15               # Wait before respawn (> orphan timeout)
+PROC_ATTEMPT_DELAY = 15                 # Wait before respawn (> orphan timeout)
+PROC_ATTEMPTS = 4                       # Respawn attempts on the same HostMesh before giving up
+MAX_ATTEMPT = PROC_ATTEMPTS * 4         # Max total recovery attempts per replica
 train_timeout_seconds = 300            # NCCL PG timeout (> process_group_timeout_ms)
 process_group_timeout_ms = 60000       # TorchFT abort timer (< train_timeout_seconds)
 ```
+
+Recovery behavior: a failed replica is retried with `PROC_ATTEMPT_DELAY` between
+attempts, reusing the same HostMesh, up to `MAX_ATTEMPT` times before it is given up.
 
 ##### KEY COMPONENTS
 - **LighthouseServer**: TorchFT coordination for quorum-based fault tolerance
@@ -107,6 +111,9 @@ process_group_timeout_ms = 60000       # TorchFT abort timer (< train_timeout_se
 - **FailureController**: Optional (`--with-failures`), injects SEGFAULT/KILL_PROC into random ranks
 
 ##### OUTPUT
+- Training artifacts (checkpoints, TensorBoard metrics) are written to TorchTitan's
+  default `./outputs` directory inside each GPU pod's working directory (TensorBoard
+  logs under `./outputs/tb`). Override via TorchTitan's `job.dump_folder` config.
 - Quorum step progress visible via lighthouse logs on the controller
 - TensorBoard metrics enabled by default
 - Monarch internal logs at `/tmp/root/monarch_log.log` on the controller pod
