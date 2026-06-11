@@ -17,6 +17,7 @@ class DummyDataset(Dataset):
     def __len__(self) -> int:
         return self.length
 
+    # pyrefly: ignore [bad-override-param-name]
     def __getitem__(self, idx: int) -> int:
         return idx
 

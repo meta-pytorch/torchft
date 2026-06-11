@@ -176,6 +176,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
+    # pyrefly: ignore [bad-override]
     def allreduce_coalesced(
         self,
         tensors: List[torch.Tensor],
@@ -355,6 +356,7 @@ class ProcessGroup(BaseProcessGroup):
         )
 
     @property
+    # pyrefly: ignore [bad-override]
     def group_name(self) -> str:
         if self._group_name is None:
             raise ValueError("ProcessGroup name not set")
@@ -655,6 +657,7 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         if self._global_ranks:
             backend_class.options.global_ranks_in_group = self._global_ranks
         if self._group_rank and self._group_world_size:
+            # pyrefly: ignore [bad-assignment]
             backend_class.options.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
 
         pg._register_backend(
@@ -823,6 +826,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         # crash the whole program.
         if hasattr(opts, "timeout"):
             # apply default timeout to disable
+            # pyrefly: ignore [missing-attribute]
             opts.timeout = AllgatherOptions().timeout
         return opts
 
@@ -861,6 +865,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         if self._global_ranks:
             opts.global_ranks_in_group = self._global_ranks
         if self._group_rank and self._group_world_size:
+            # pyrefly: ignore [bad-assignment]
             opts.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
 
         pg = BaseProcessGroup(store, rank, world_size)
@@ -939,6 +944,7 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
         # crash the whole program.
         if hasattr(opts, "timeout"):
             # apply default timeout to disable
+            # pyrefly: ignore [missing-attribute]
             opts.timeout = AllgatherOptions().timeout
         return opts
 
@@ -1529,6 +1535,7 @@ class ProcessGroupBaby(ProcessGroup):
             else -1
         )
 
+        # pyrefly: ignore [bad-assignment]
         self._p = p = ctx.Process(
             target=self._worker,
             args=(
@@ -1934,8 +1941,10 @@ class _PickleSafeOptions:
     @classmethod
     def safe_args(cls, args: T) -> T:
         if isinstance(args, tuple):
+            # pyrefly: ignore [bad-return]
             return tuple(cls.safe_args(arg) for arg in args)
         elif isinstance(args, list):
+            # pyrefly: ignore [bad-return]
             return [cls.safe_args(arg) for arg in args]
         elif isinstance(
             args,
@@ -1949,6 +1958,7 @@ class _PickleSafeOptions:
                 ReduceScatterOptions,
             ),
         ):
+            # pyrefly: ignore [bad-return]
             return cls.from_torch(args)
         else:
             return args
@@ -1956,10 +1966,13 @@ class _PickleSafeOptions:
     @classmethod
     def unsafe_args(cls, args: T) -> T:
         if isinstance(args, tuple):
+            # pyrefly: ignore [bad-return]
             return tuple(cls.unsafe_args(arg) for arg in args)
         elif isinstance(args, list):
+            # pyrefly: ignore [bad-return]
             return [cls.unsafe_args(arg) for arg in args]
         elif isinstance(args, cls):
+            # pyrefly: ignore [bad-return]
             return args.to_torch()
         else:
             return args

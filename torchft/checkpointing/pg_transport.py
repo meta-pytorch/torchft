@@ -297,6 +297,7 @@ class PGTransport(CheckpointTransport[T]):
                 tensor = recv(path, v.local)
                 values.append(DTensor(tensor, v.spec, requires_grad=False))
             else:
+                # pyrefly: ignore [bad-argument-type]
                 values.append(v)
 
         for work in works:

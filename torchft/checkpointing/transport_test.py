@@ -89,7 +89,12 @@ def run_multi_recovery_test(
             )
         else:
             got = transport.recv_checkpoint(
-                src_rank=0, metadata=metadata, step=1, timeout=timedelta(seconds=10)
+                # pyrefly: ignore [unbound-name]
+                src_rank=0,
+                # pyrefly: ignore [unbound-name]
+                metadata=metadata,
+                step=1,
+                timeout=timedelta(seconds=10),
             )
             assertStateDictEqual(self, got, state_dict)
 
@@ -106,7 +111,12 @@ def run_multi_recovery_test(
             )
         elif rank == 2:
             got = transport.recv_checkpoint(
-                src_rank=0, metadata=metadata, step=2, timeout=timedelta(seconds=10)
+                # pyrefly: ignore [unbound-name]
+                src_rank=0,
+                # pyrefly: ignore [unbound-name]
+                metadata=metadata,
+                step=2,
+                timeout=timedelta(seconds=10),
             )
             assertStateDictEqual(self, got, state_dict)
 
@@ -118,6 +128,7 @@ def run_multi_recovery_test(
             with self.assertRaisesRegex(Exception, TIMEOUT_REGEX):
                 transport.recv_checkpoint(
                     src_rank=0,
+                    # pyrefly: ignore [unbound-name]
                     metadata=metadata,
                     step=3,
                     timeout=timedelta(milliseconds=10),
