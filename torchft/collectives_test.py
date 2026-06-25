@@ -18,17 +18,15 @@ from torchft.process_group import ProcessGroup
 from torchft.process_group_test import MultiPgBaseTest
 
 try:
-    # pyre-ignore[21]: Could not find a module corresponding to import `triton`
-    import triton
-except ImportError:
-    pass
-else:
     from torchft.collectives import (
         allocate_reduce_scatter_output,
         allreduce_quantized,
         get_padded_sizes,
         reduce_scatter_quantized,
     )
+except ImportError:
+    pass
+else:
 
     def _check_result_tolerance(
         actual: torch.Tensor, expected: torch.Tensor, tolerance: float
