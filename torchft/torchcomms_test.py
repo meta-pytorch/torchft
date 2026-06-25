@@ -19,7 +19,6 @@ from torch._C._distributed_c10d import (
     AllreduceOptions,
     AllToAllOptions,
     BarrierOptions,
-    BroadcastOptions,
     ReduceOp,
     ReduceScatterOptions,
 )

@@ -12,7 +12,6 @@ This module implements a DistributedDataParallel wrapper that works with the
 Manager to provide fault tolerance.
 """
 
-import os
 import sys
 from typing import cast, Optional, TYPE_CHECKING
 from unittest.mock import patch

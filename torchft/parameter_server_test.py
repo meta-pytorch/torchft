@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest import TestCase
-from unittest.mock import MagicMock
 
 import torch
 from torchft.parameter_server import ParameterServer
