@@ -114,8 +114,12 @@ def create_store_client(store_addr: str, timeout: timedelta) -> Store:
 
     Ex: localhost:1234/my/prefix
     """
-    host, _, rest = store_addr.partition(":")
-    port, _, prefix = rest.partition("/")
+    # IPv6-safe: the address is host:port/prefix (optionally [host]:port/...).
+    # Split off the prefix, then take the port as the field after the LAST colon
+    # so a bare IPv6 address (e.g. a flat-IPv6 fabric) is not mangled.
+    addr_part, _, prefix = store_addr.partition("/")
+    host, _, port = addr_part.rpartition(":")
+    host = host.strip("[]")
 
     store = TCPStore(
         host_name=host,
