@@ -69,7 +69,9 @@ class FSDPTest(unittest.TestCase):
                 ColwiseParallel(),
             )
         shard_model = fully_shard(model, mesh=fsdp_mesh)
+        # pyrefly: ignore [missing-attribute]
         shard_model.apply(apply_set_all_reduce_hook)
+        # pyrefly: ignore [not-callable]
         shard_model(batch).mean().backward()
 
     # pyre-ignore[56]: Pyre was not able to infer the type of argument

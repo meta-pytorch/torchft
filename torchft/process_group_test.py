@@ -745,6 +745,7 @@ class ProcessGroupTest(TestCase):
 
         try:
             t = torch.zeros(10)
+            # pyrefly: ignore [missing-attribute]
             _functional_collectives.all_reduce(t, "sum", pg).wait()
         finally:
             pg.unregister()

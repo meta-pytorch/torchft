@@ -49,15 +49,18 @@ class OptimizerWrapper(Optimizer):
         self.manager.start_quorum()
         self.optim.zero_grad(set_to_none)
 
+    # pyrefly: ignore [bad-override]
     def step(self, closure: Optional[object] = None) -> None:
         assert closure is None, "optimizers that use closures are not supported"
         if self.manager.should_commit():
             self.optim.step()
 
     @property
+    # pyrefly: ignore [bad-override]
     def param_groups(self) -> List[Dict[str, Any]]:
         return self.optim.param_groups
 
     @property
+    # pyrefly: ignore [bad-override]
     def state(self) -> Mapping[torch.Tensor, object]:
         return self.optim.state
