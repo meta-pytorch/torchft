@@ -72,6 +72,7 @@ def _make_app(replica_id: int, cli_args: argparse.Namespace) -> specs.AppDef:
 
     # gloo
     if os.environ.get("GLOO_SOCKET_IFNAME") is not None:
+        # pyrefly: ignore [unsupported-operation]
         env["GLOO_SOCKET_IFNAME"] = os.environ.get("GLOO_SOCKET_IFNAME")
 
     # application log levels

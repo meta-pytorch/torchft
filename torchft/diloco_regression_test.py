@@ -177,6 +177,7 @@ class MockDiLoCoTrainer(DiLoCoTrainer):
             outer_optimizers.append(
                 MockOptimizer(self.model.layers[i].parameters(), lr=self.outer_lr)
             )
+        # pyrefly: ignore [bad-return]
         return outer_optimizers
 
     def train_loop(self) -> Dict[str, Any]:
@@ -366,11 +367,13 @@ class DiLoCoMockedUpdateTest(TestCase):
         lighthouse.shutdown()
 
         # Check results against fixture or validate parameter updates
+        # pyrefly: ignore [bad-argument-type]
         compared_with_fixture = self._check_against_fixture(results)
 
         if not compared_with_fixture:
             # If no fixture comparison was done, validate parameters directly
             self._validate_parameter_updates(
+                # pyrefly: ignore [bad-argument-type]
                 results[0][0],
                 n_fragments,
                 sync_every,
@@ -454,6 +457,7 @@ class DiLoCoMockedUpdateTest(TestCase):
         lighthouse.shutdown()
 
         # Check results against fixture or validate failure recovery
+        # pyrefly: ignore [bad-argument-type]
         compared_with_fixture = self._check_against_fixture(results)
 
         if not compared_with_fixture:
@@ -466,7 +470,9 @@ class DiLoCoMockedUpdateTest(TestCase):
 
             # Verify that both replicas have the same global parameters at the end
             # Extract the global parameter history from both replicas
+            # pyrefly: ignore [bad-index]
             rep0_global = results[0][0]["global_parameter_history"]
+            # pyrefly: ignore [bad-index]
             rep1_global = results[1][0]["global_parameter_history"]
 
             # Get the last step in both histories

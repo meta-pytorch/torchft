@@ -229,7 +229,11 @@ class LocalSGDIntegTest(TestCase):
             # LocalSGD only guarantees that the model is consistent across
             # replicas but uses separate optimizer states.
             torch.testing.assert_close(
-                state_dict[0]["model"], state_dicts[0][0]["model"], check_device=False
+                # pyrefly: ignore [bad-index]
+                state_dict[0]["model"],
+                # pyrefly: ignore [bad-index]
+                state_dicts[0][0]["model"],
+                check_device=False,
             )
 
         self.assertEqual(event_injectors[1].count[EventInjectorEvent.Failure], 1)
@@ -283,6 +287,7 @@ class LocalSGDIntegTest(TestCase):
         lighthouse.shutdown()
 
         rep0, rep1 = state_dicts
+        # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(1, rep1, rep0)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
@@ -361,6 +366,7 @@ class LocalSGDIntegTest(TestCase):
         #       of step Manager Step 2
         #
         # Outer optimizer and global model should be the same
+        # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(1, rep1, rep0)
 
         self.assertEqual(event_injectors[1].count[EventInjectorEvent.Failure], 1)
@@ -431,6 +437,7 @@ class LocalSGDIntegTest(TestCase):
 
         rep0, rep1 = state_dicts
 
+        # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(2, rep1, rep0)
 
         self.assertEqual(event_injectors[1].count[EventInjectorEvent.Failure], 1)
@@ -513,7 +520,9 @@ class LocalSGDIntegTest(TestCase):
 
         rep0, rep1, rep2 = state_dicts
 
+        # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(n_fragments, rep0, rep1)
+        # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(n_fragments, rep0, rep2)
 
         for event_injector in event_injectors:
@@ -585,6 +594,7 @@ class LocalSGDIntegTest(TestCase):
 
         rep0, rep1 = state_dicts
 
+        # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(n_fragments, rep0, rep1)
 
         for event_injector in event_injectors:

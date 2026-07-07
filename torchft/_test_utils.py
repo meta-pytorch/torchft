@@ -81,6 +81,7 @@ def gen_views(inp: torch.Tensor) -> list[tuple[int, ...]]:
         if size % m == 0:
             views.append((m, size // m))
 
+    # pyrefly: ignore [bad-return]
     return views
 
 

@@ -53,6 +53,7 @@ class TeeLogExporter(LogRecordExporter):
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         for e in self._exporters:
             e.export(batch)
+        # pyrefly: ignore [missing-attribute]
         return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
@@ -83,6 +84,7 @@ def setup_logger(name: str) -> None:
 
     exporter = TeeLogExporter(
         exporters=[
+            # pyrefly: ignore [bad-instantiation]
             ConsoleLogRecordExporter(),
             OTLPLogExporter(
                 timeout=5,
