@@ -117,7 +117,8 @@ impl ManagerServer {
                     connect_timeout,
                     quorum_retries,
                 ))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                // Use the alternate format to include the full error chain.
+                .map_err(|e| PyRuntimeError::new_err(format!("{:#}", e)))?;
             let handle = runtime.spawn(manager.clone().run());
             Ok(Self {
                 handle,
@@ -168,7 +169,8 @@ impl ManagerClient {
                 .build()?;
             let client = runtime
                 .block_on(manager::manager_client_new(addr, connect_timeout))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                // Use the alternate format to include the full error chain.
+                .map_err(|e| PyRuntimeError::new_err(format!("{:#}", e)))?;
 
             Ok(Self { runtime, client })
         })
@@ -502,7 +504,8 @@ impl LighthouseClient {
                 .build()?;
             let client = runtime
                 .block_on(manager::lighthouse_client_new(addr, connect_timeout))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                // Use the alternate format to include the full error chain.
+                .map_err(|e| PyRuntimeError::new_err(format!("{:#}", e)))?;
             Ok(Self { client, runtime })
         })
     }
