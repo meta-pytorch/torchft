@@ -8,7 +8,7 @@ on:
 
 jobs:
   unittest-mac:
-    runs-on: macos-m2-15
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
