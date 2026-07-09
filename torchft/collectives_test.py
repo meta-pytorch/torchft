@@ -40,6 +40,10 @@ else:
             print(f"Diff: {diff=}\n{expected=}\n{actual=}")
             raise AssertionError(f"Results not within tolerance {tolerance}")
 
+    @unittest.skip(
+        "Fails with 'NCCL Error 7: NCCL operation in progress' on recent torch"
+        " nightlies"
+    )
     @skipUnless(
         torch.cuda.is_available() and torch.cuda.device_count() >= 2,
         "2 CUDA devices are required for this test",
