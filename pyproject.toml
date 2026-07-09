@@ -28,6 +28,7 @@ Issues = "https://github.com/pytorch/torchft/issues"
 dev = [
     "pytest==8.3.4",
     "pytest-timeout",
+    "pytest-rerunfailures",
     "parameterized",
     "expecttest",
     "numpy",
