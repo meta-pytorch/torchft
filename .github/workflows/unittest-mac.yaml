@@ -1,10 +1,11 @@
 name: Unit Tests
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  # The self-hosted macos-m2-15 runner no longer has capacity (jobs sit
+  # queued for 24h and get cancelled) and the test suite currently fails on
+  # GitHub-hosted mac runners, so only run this workflow manually until mac
+  # support is fixed.
+  workflow_dispatch:
 
 jobs:
   unittest-mac:
