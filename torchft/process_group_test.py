@@ -37,6 +37,7 @@ from torch.distributed import (
 from torchft.manager import Manager
 from torchft.process_group import (
     _ErrorSwallowingWork,
+    create_store_client,
     ErrorSwallowingProcessGroupWrapper,
     ManagedProcessGroup,
     ProcessGroup,
@@ -788,6 +789,45 @@ class ProcessGroupTest(TestCase):
         works = _test_pg(pg)
 
         self.assertEqual(manager.allreduce.call_count, 2)
+
+
+class CreateStoreClientTest(TestCase):
+    @parameterized.expand(
+        [
+            # (store_addr, expected_host, expected_port, expected_prefix)
+            ("localhost:1234/my/prefix", "localhost", 1234, "my/prefix"),
+            ("127.0.0.1:29500/torchft/0/1", "127.0.0.1", 29500, "torchft/0/1"),
+            # Bare IPv6: the host itself contains colons, so only the field
+            # after the final colon is the port.
+            (
+                "fdaa:0:1:2:3:4:5:6:29521/torchft/0/1",
+                "fdaa:0:1:2:3:4:5:6",
+                29521,
+                "torchft/0/1",
+            ),
+            ("::1:29521/torchft/0/1", "::1", 29521, "torchft/0/1"),
+            # Bracketed IPv6: brackets are stripped from the host.
+            (
+                "[fdaa:0:1:2:3:4:5:6]:29521/torchft/0/1",
+                "fdaa:0:1:2:3:4:5:6",
+                29521,
+                "torchft/0/1",
+            ),
+        ]
+    )
+    def test_parses_addr(
+        self, store_addr: str, host: str, port: int, prefix: str
+    ) -> None:
+        with (
+            patch("torchft.process_group.TCPStore") as tcp_store,
+            patch("torchft.process_group.PrefixStore") as prefix_store,
+        ):
+            create_store_client(store_addr, timeout=timedelta(seconds=1))
+
+        _, kwargs = tcp_store.call_args
+        self.assertEqual(kwargs["host_name"], host)
+        self.assertEqual(kwargs["port"], port)
+        self.assertEqual(prefix_store.call_args.args[0], prefix)
 
 
 class MultiPgBaseTest(TestCase):
