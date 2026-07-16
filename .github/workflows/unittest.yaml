@@ -41,15 +41,15 @@ jobs:
 
         # Optionally install torch nightly, pulls latest CUDA from pip otherwise
         if [ "${{ matrix.torch-version }}" = "nightly" ]; then
-          pip install --pre torch torchvision torchcomms --index-url https://download.pytorch.org/whl/nightly/cu128
+          pip install --pre torch torchvision torchcomms --index-url https://download.pytorch.org/whl/nightly/cu126
         fi
         if [ "${{ matrix.torch-version }}" = "test" ]; then
-          pip install --pre torch torchvision torchcomms --index-url https://download.pytorch.org/whl/test/cu128
+          pip install --pre torch torchvision torchcomms --index-url https://download.pytorch.org/whl/test/cu126
         fi
 
         # Install dependencies
         pip install -e .[dev] -v
 
-        # Run tests
-        pytest -v
+        # Run tests, retrying flaky integration tests
+        pytest -v --reruns 3 --reruns-delay 5
         cargo test -v

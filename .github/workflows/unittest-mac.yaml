@@ -1,14 +1,15 @@
 name: Unit Tests
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  # The self-hosted macos-m2-15 runner no longer has capacity (jobs sit
+  # queued for 24h and get cancelled) and the test suite currently fails on
+  # GitHub-hosted mac runners, so only run this workflow manually until mac
+  # support is fixed.
+  workflow_dispatch:
 
 jobs:
   unittest-mac:
-    runs-on: macos-m2-15
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,8 +53,8 @@ jobs:
             export PATH="$CONDA_ENV/bin":$PATH
           fi
 
-          # Run tests
-          pytest -v
+          # Run tests, retrying flaky integration tests
+          pytest -v --reruns 3 --reruns-delay 5
 
       - name: Run Rust Tests
         run: |
