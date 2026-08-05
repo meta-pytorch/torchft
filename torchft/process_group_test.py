@@ -9,6 +9,7 @@ import os
 import sys
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any, Callable, cast, Dict, List
 from unittest import skipIf, skipUnless, TestCase
 from unittest.mock import Mock, patch
@@ -495,6 +496,88 @@ _ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
 
 
 class ProcessGroupTest(TestCase):
+    @patch("torchft.process_group.dist.Backend.register_backend")
+    @patch("torchft.process_group.torch.accelerator.current_accelerator")
+    @patch("torchft.process_group.torch.accelerator.is_available", return_value=True)
+    def test_register_includes_current_accelerator(
+        self,
+        _is_available: Mock,
+        current_accelerator: Mock,
+        register_backend: Mock,
+    ) -> None:
+        current_accelerator.return_value = SimpleNamespace(type="test_accel")
+
+        group_name = ProcessGroupDummy(0, 1)._register("test_backend")
+
+        self.assertEqual(group_name, "torchft-dummy:test_backend")
+        self.assertEqual(
+            register_backend.call_args.kwargs["devices"], ["cpu", "test_accel"]
+        )
+
+    @patch("torchft.process_group.dist.Backend.register_backend")
+    @patch("torchft.process_group.torch.accelerator.current_accelerator")
+    @patch("torchft.process_group.torch.accelerator.is_available", return_value=True)
+    def test_register_does_not_duplicate_cpu(
+        self,
+        _is_available: Mock,
+        current_accelerator: Mock,
+        register_backend: Mock,
+    ) -> None:
+        current_accelerator.return_value = SimpleNamespace(type="cpu")
+
+        ProcessGroupDummy(0, 1)._register("test_cpu_backend")
+
+        self.assertEqual(register_backend.call_args.kwargs["devices"], ["cpu"])
+
+    @patch("torchft.process_group.dist.Backend.register_backend")
+    @patch("torchft.process_group.torch.accelerator.is_available", return_value=False)
+    def test_register_without_accelerator_uses_cpu_only(
+        self, _is_available: Mock, register_backend: Mock
+    ) -> None:
+        ProcessGroupDummy(0, 1)._register("test_no_accelerator")
+
+        self.assertEqual(register_backend.call_args.kwargs["devices"], ["cpu"])
+
+    @patch("torchft.process_group.torch.accelerator.current_accelerator")
+    @patch("torchft.process_group.torch.accelerator.is_available", return_value=True)
+    def test_wrapper_abort_uses_current_accelerator_backend(
+        self, _is_available: Mock, current_accelerator: Mock
+    ) -> None:
+        device = torch.device("privateuseone")
+        current_accelerator.return_value = device
+        backend = Mock()
+
+        class BackendOnlyProcessGroup:
+            def _get_backend(self, requested_device: torch.device) -> Mock:
+                self.requested_device = requested_device
+                return backend
+
+        pg = BackendOnlyProcessGroup()
+        wrapper = ProcessGroupWrapper(pg=cast(Any, pg))
+
+        wrapper.abort()
+
+        self.assertEqual(pg.requested_device, device)
+        backend.abort.assert_called_once_with()
+        self.assertIsNone(wrapper._pg)
+
+    @patch("torchft.process_group.torch.accelerator.current_accelerator")
+    @patch("torchft.process_group.torch.accelerator.is_available", return_value=True)
+    def test_wrapper_abort_backend_lookup_failure_is_nonfatal(
+        self, _is_available: Mock, current_accelerator: Mock
+    ) -> None:
+        current_accelerator.return_value = torch.device("privateuseone")
+
+        class FailingBackendLookupProcessGroup:
+            def _get_backend(self, _device: torch.device) -> None:
+                raise RuntimeError("backend unavailable")
+
+        wrapper = ProcessGroupWrapper(pg=cast(Any, FailingBackendLookupProcessGroup()))
+
+        wrapper.abort()
+
+        self.assertIsNone(wrapper._pg)
+
     @parameterized.expand(["cpu", "cuda"])
     def test_gloo_apis(self, device: str) -> None:
         if device == "cuda" and not torch.cuda.is_available():
