@@ -266,10 +266,15 @@ class HTTPTransport(CheckpointTransport[T]):
 
 
 def _to_cpu(values: List[T], pin_memory: bool) -> List[T]:
+    accelerator_type = (
+        torch.accelerator.current_accelerator().type
+        if torch.accelerator.is_available()
+        else None
+    )
     out = []
     for v in values:
         if isinstance(v, torch.Tensor):
-            if v.device.type in ("cuda", "xpu"):
+            if v.device.type == accelerator_type:
                 if pin_memory:
                     cpu = torch.empty(*tuple(v.size()), dtype=v.dtype, pin_memory=True)
                     cpu.copy_(v, non_blocking=True)
