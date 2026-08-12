@@ -19,6 +19,7 @@ from torchft.manager_integ_test import MyModel, Runner
 from torchft.process_group import (
     FakeProcessGroupWrapper,
     ProcessGroupBabyNCCL,
+    ProcessGroupBabyXCCL,
     ProcessGroupGloo,
 )
 
@@ -153,6 +154,8 @@ class DiLoCoTrainer:
     def setup_pg(self) -> FakeProcessGroupWrapper:
         if self.device.type == "cuda":
             return FakeProcessGroupWrapper(ProcessGroupBabyNCCL())
+        elif self.device.type == "xpu":
+            return FakeProcessGroupWrapper(ProcessGroupBabyXCCL())
         else:
             return FakeProcessGroupWrapper(
                 ProcessGroupGloo(timeout=timedelta(seconds=10))

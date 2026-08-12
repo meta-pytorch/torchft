@@ -769,7 +769,11 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.xpu.is_available(), "needs XPU")
-    @skipIf(True, "PyTorch XPU multiprocessing reductions not yet supported - see https://github.com/pytorch/pytorch/issues")
+    @skipIf(
+        True,
+        "PyTorch XPU multiprocessing reductions not yet supported - see "
+        "https://github.com/pytorch/pytorch/issues/170636",
+    )
     def test_baby_xccl_apis(self) -> None:
         # set to 1 if more than >=2 xpus
         device_id = 1 % torch.xpu.device_count()
@@ -941,7 +945,11 @@ class MultiPgBaseTest(TestCase):
 
         def init_pg(rank: int) -> ProcessGroup:
             if torch.accelerator.is_available():
-                torch.accelerator.set_device_idx(rank)
+                # CPU backends run with a WORLD_SIZE larger than the accelerator
+                # count, so wrap around instead of erroring out.
+                torch.accelerator.set_device_idx(
+                    rank % torch.accelerator.device_count()
+                )
             pg = cls._create_pg(cls.BACKEND)
             pg.configure(cls.store_addr, "0", rank, cls.WORLD_SIZE)
             return pg
@@ -995,11 +1003,12 @@ class MultiPgBaseTest(TestCase):
         for rank in range(self.WORLD_SIZE):
             pg = self.pg_pool[rank]
             # Each worker calls `func(pg=pg, rank=rank, tensor=tensor, *args, **kwargs)`
-            if device == "cuda":
-                device = f"cuda:{rank}"
-            elif device == "xpu":
-                device = f"xpu:{rank}"
-            tensor = torch.tensor([rank + 1], device=device)
+            rank_device = device
+            if "cuda" in device:
+                rank_device = f"cuda:{rank}"
+            elif "xpu" in device:
+                rank_device = f"xpu:{rank}"
+            tensor = torch.tensor([rank + 1], device=rank_device)
 
             fut = self.executor.submit(func, pg, rank, tensor)
             futures.append(fut)
@@ -1027,11 +1036,11 @@ class MultiPgBaseTest(TestCase):
         def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
             pg.set_timeout(timedelta(seconds=30))
 
-            if dev == "cuda":
+            if "cuda" in dev:
                 torch.cuda.set_device(rank)
                 # Use a separate stream to avoid deadlocks between threads.
                 torch.cuda.set_stream(torch.cuda.Stream())
-            elif dev == "xpu":
+            elif "xpu" in dev:
                 torch.xpu.set_device(rank)
                 # Use a separate stream to avoid deadlocks between threads.
                 torch.xpu.set_stream(torch.xpu.Stream())

@@ -29,12 +29,17 @@ class TestHTTPTransport(TestCase):
         ]
     )
     def test_checkpoint_server(self, name: str, num_chunks: int) -> None:
+        # Exercise the accelerator staging path (CUDA or XPU) when one is
+        # present, otherwise fall back to CPU tensors.
+        accel_device = (
+            torch.accelerator.current_accelerator()
+            if torch.accelerator.is_available()
+            else torch.device("cpu")
+        )
         expected: Dict[str, object] = {
             "state": "dict",
             "tensor": torch.rand(5, 2),
-            "cuda": torch.rand(
-                2, 3, device="cuda" if torch.cuda.is_available() else "cpu"
-            ),
+            "accelerator": torch.rand(2, 3, device=accel_device),
         }
         state_dict_fn = MagicMock()
         state_dict_fn.return_value = expected
@@ -133,6 +138,35 @@ class TestHTTPTransport(TestCase):
             )
 
         run_multi_recovery_test(self, init, device=device)
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(torch.xpu.is_available(), "XPU is not available")
+    def test_multi_http_transport_xpu(self) -> None:
+        device = torch.device("xpu")
+
+        def init(rank: int, world_size: int) -> CheckpointTransport[Dict[str, object]]:
+            return HTTPTransport(
+                timeout=timedelta(seconds=10),
+                num_chunks=0,
+            )
+
+        run_multi_recovery_test(self, init, device=device)
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(torch.accelerator.is_available(), "no accelerator is available")
+    def test_stream_is_created_for_accelerator(self) -> None:
+        """HTTPTransport stages through a device stream when an accelerator exists."""
+        acc = torch.accelerator.current_accelerator()
+        assert acc is not None
+
+        transport = HTTPTransport(timeout=timedelta(seconds=10), num_chunks=0)
+        try:
+            stream = transport._stream
+            self.assertIsNotNone(stream)
+            assert stream is not None
+            self.assertEqual(stream.device.type, acc.type)
+        finally:
+            transport.shutdown()
 
     def test_benchmark(self) -> None:
         bench_main(
