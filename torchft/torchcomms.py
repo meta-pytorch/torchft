@@ -83,7 +83,7 @@ class _TorchCommsWork(Work):
         return self._work.is_completed()
 
 
-_REDUCE_OP_MAP: dict[ReduceOp, object] = {
+_REDUCE_OP_MAP: dict[ReduceOp | ReduceOp.RedOpType, object] = {
     ReduceOp.SUM: torchcomms.ReduceOp.SUM,
     ReduceOp.PRODUCT: torchcomms.ReduceOp.PRODUCT,
     ReduceOp.MIN: torchcomms.ReduceOp.MIN,

@@ -651,7 +651,7 @@ def fused_reduce_fp8(
     output: torch.Tensor,
     all_reduce_group_size: int,
     all_reduce_rank: int,
-    reduce_op: ReduceOp = ReduceOp.SUM,
+    reduce_op: ReduceOp | ReduceOp.RedOpType = ReduceOp.SUM,
 ) -> None:
     """
     Reduces rows of the output tensor for the given rank. The output tensor

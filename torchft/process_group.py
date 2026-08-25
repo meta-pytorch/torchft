@@ -352,11 +352,14 @@ class ProcessGroup(BaseProcessGroup):
 
         group_name = self._register(name)
 
-        return dist.new_group(
-            ranks=[dist.get_rank()],
-            backend=group_name,
-            group_desc=group_name,
-            timeout=timedelta(seconds=60.0),  # this timeout isn't used
+        return cast(
+            ProcessGroup,
+            dist.new_group(
+                ranks=[dist.get_rank()],
+                backend=group_name,
+                group_desc=group_name,
+                timeout=timedelta(seconds=60.0),  # this timeout isn't used
+            ),
         )
 
     @property
