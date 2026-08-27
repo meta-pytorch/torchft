@@ -16,7 +16,8 @@ Easy Per Step Fault Tolerance for PyTorch
   |
 </p>
 <p align="center">
-  <a href="https://pypi.org/project/torchft-nightly/"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/torchft-nightly"></a>
+  <a href="https://pypi.org/project/torchft/"><img alt="PyPI - Stable Version" src="https://img.shields.io/pypi/v/torchft"></a>
+  <a href="https://pypi.org/project/torchft-nightly/"><img alt="PyPI - Nightly Version" src="https://img.shields.io/pypi/v/torchft-nightly"></a>
 </p>
 
 ---
@@ -113,9 +114,15 @@ See the design doc linked above for more details.
 
 ## Installing from PyPI
 
-We have nighty builds available at https://pypi.org/project/torchft-nightly/
+Install the latest stable release:
 
-To install torchft with minimal dependencies you can run:
+```sh
+pip install torchft
+```
+
+Nightly builds are available at https://pypi.org/project/torchft-nightly/
+
+To install a nightly build:
 
 ```sh
 pip install torchft-nightly
