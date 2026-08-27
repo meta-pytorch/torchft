@@ -43,10 +43,12 @@ from torchft.process_group import (
     ProcessGroup,
     ProcessGroupBabyGloo,
     ProcessGroupBabyNCCL,
+    ProcessGroupBabyXCCL,
     ProcessGroupDummy,
     ProcessGroupGloo,
     ProcessGroupNCCL,
     ProcessGroupWrapper,
+    ProcessGroupXCCL,
 )
 from torchft.work import _DummyWork
 
@@ -321,7 +323,7 @@ def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) ->
 def run_barrier_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     """Test barrier collective operation."""
     opts = BarrierOptions()
-    if tensor.is_cuda:
+    if tensor.is_cuda or tensor.is_xpu:
         device_id = tensor.device.index
         opts.device_ids = [device_id]
     barrier_work = pg.barrier(opts)
@@ -570,6 +572,34 @@ class ProcessGroupTest(TestCase):
         torch.cuda.synchronize()
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(torch.xpu.is_available(), "needs XPU")
+    def test_xccl_apis(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        device = "xpu"
+
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = ProcessGroupXCCL()
+        pg.configure(store_addr, "0", 0, 1)
+
+        self.assertEqual(pg.size(), 1)
+
+        _test_pg(pg, torch.tensor([2], device=device))
+
+        m = nn.Linear(3, 4).to(device)
+        m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
+        m(torch.rand(2, 3, device=device))
+
+        # reconfigure
+        store_addr = f"localhost:{store.port}/prefix2"
+        pg.configure(store_addr, "0", 0, 1)
+
+        _test_pg(pg, torch.tensor([2], device=device))
+
+        torch.xpu.synchronize()
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(
         torch.cuda.is_available() and torch.cuda.nccl.version() >= (2, 25),
         "needs NCCL >=2.25",
@@ -610,6 +640,23 @@ class ProcessGroupTest(TestCase):
         del store
 
         pg = ProcessGroupNCCL(timeout=timedelta(seconds=0.01))
+
+        with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
+            pg.configure(store_addr, "0", 0, 2)
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
+    @skipUnless(
+        torch.xpu.is_available(),
+        "needs XPU",
+    )
+    def test_xccl_init_timeout(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+        del store
+
+        pg = ProcessGroupXCCL(timeout=timedelta(seconds=0.01))
 
         with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
             pg.configure(store_addr, "0", 0, 2)
@@ -715,6 +762,45 @@ class ProcessGroupTest(TestCase):
             a.shutdown()
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+
+        t = torch.zeros(10)
+        with self.assertRaisesRegex(OSError, "handle is closed"):
+            a.allreduce([t], AllreduceOptions()).wait()
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(torch.xpu.is_available(), "needs XPU")
+    @skipIf(
+        True,
+        "PyTorch XPU multiprocessing reductions not yet supported - see "
+        "https://github.com/pytorch/pytorch/issues/170636",
+    )
+    def test_baby_xccl_apis(self) -> None:
+        # set to 1 if more than >=2 xpus
+        device_id = 1 % torch.xpu.device_count()
+        torch.xpu.set_device(device_id)
+
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+
+        store_addr = f"localhost:{store.port}/prefix"
+
+        a = ProcessGroupBabyXCCL(timeout=timedelta(seconds=10))
+        try:
+            a.configure(store_addr, "0", 0, 1)
+
+            _test_pg(a, torch.randn((2, 3), device="xpu"))
+
+            torch.xpu.synchronize()
+
+            # force collection to ensure no BabyWork objects remain
+            gc.collect()
+
+            self.assertEqual(a.num_active_work(), 0)
+        finally:
+            a.shutdown()
+            torch.xpu.synchronize()
+            torch.xpu.empty_cache()
 
         t = torch.zeros(10)
         with self.assertRaisesRegex(OSError, "handle is closed"):
@@ -859,7 +945,11 @@ class MultiPgBaseTest(TestCase):
 
         def init_pg(rank: int) -> ProcessGroup:
             if torch.accelerator.is_available():
-                torch.accelerator.set_device_idx(rank)
+                # CPU backends run with a WORLD_SIZE larger than the accelerator
+                # count, so wrap around instead of erroring out.
+                torch.accelerator.set_device_idx(
+                    rank % torch.accelerator.device_count()
+                )
             pg = cls._create_pg(cls.BACKEND)
             pg.configure(cls.store_addr, "0", rank, cls.WORLD_SIZE)
             return pg
@@ -893,6 +983,10 @@ class MultiPgBaseTest(TestCase):
             return ProcessGroupNCCL(timeout=timedelta(seconds=10))
         elif backend == "baby_nccl":
             return ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
+        elif backend == "xccl":
+            return ProcessGroupXCCL(timeout=timedelta(seconds=10))
+        elif backend == "baby_xccl":
+            return ProcessGroupBabyXCCL(timeout=timedelta(seconds=10))
         elif backend == "dummy":
             return ProcessGroupDummy(0, 1)
         else:
@@ -909,9 +1003,12 @@ class MultiPgBaseTest(TestCase):
         for rank in range(self.WORLD_SIZE):
             pg = self.pg_pool[rank]
             # Each worker calls `func(pg=pg, rank=rank, tensor=tensor, *args, **kwargs)`
+            rank_device = device
             if "cuda" in device:
-                device = f"cuda:{rank}"
-            tensor = torch.tensor([rank + 1], device=device)
+                rank_device = f"cuda:{rank}"
+            elif "xpu" in device:
+                rank_device = f"xpu:{rank}"
+            tensor = torch.tensor([rank + 1], device=rank_device)
 
             fut = self.executor.submit(func, pg, rank, tensor)
             futures.append(fut)
@@ -939,10 +1036,14 @@ class MultiPgBaseTest(TestCase):
         def worker(pg: ProcessGroup, rank: int, dev: str) -> str:
             pg.set_timeout(timedelta(seconds=30))
 
-            if dev == "cuda":
+            if "cuda" in dev:
                 torch.cuda.set_device(rank)
                 # Use a separate stream to avoid deadlocks between threads.
                 torch.cuda.set_stream(torch.cuda.Stream())
+            elif "xpu" in dev:
+                torch.xpu.set_device(rank)
+                # Use a separate stream to avoid deadlocks between threads.
+                torch.xpu.set_stream(torch.xpu.Stream())
 
             fault_rank = self.WORLD_SIZE - 1
             test = _COLLECTIVE_TO_FUNC[collective]
@@ -1067,3 +1168,36 @@ class NormalNcclMultiPgTest(MultiPgBaseTest):
     @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective_with_resiliency(self, collective: str) -> None:
         self._run_with_resiliency(collective, device="cuda")
+
+
+@skipUnless(
+    torch.xpu.is_available() and torch.xpu.device_count() >= 2, "needs 2 XPU devices"
+)
+class BabyXcclMultiPgTest(MultiPgBaseTest):
+    BACKEND = "baby_xccl"
+    WORLD_SIZE = 2
+
+    @parameterized.expand(_ALL_COLLECTIVES)
+    def test_collective(self, collective: str) -> None:
+        self._run_parallel(collective, device="xpu")
+
+    # @parameterized.expand(_ALL_COLLECTIVES)
+    # def test_collective_with_resiliency(self, collective: str) -> None:
+    #    self._run_with_resiliency(collective, device="xpu")
+
+
+@skipUnless(
+    torch.xpu.is_available() and torch.xpu.device_count() >= 2,
+    "needs 2 XPU devices",
+)
+class NormalXcclMultiPgTest(MultiPgBaseTest):
+    BACKEND = "xccl"
+    WORLD_SIZE = 2
+
+    @parameterized.expand(_ALL_COLLECTIVES)
+    def test_collective(self, collective: str) -> None:
+        self._run_parallel(collective, device="xpu")
+
+    @parameterized.expand(_ALL_COLLECTIVES)
+    def test_collective_with_resiliency(self, collective: str) -> None:
+        self._run_with_resiliency(collective, device="xpu")

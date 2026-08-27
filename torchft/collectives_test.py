@@ -5,13 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from typing import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Callable, List
 from unittest import skipUnless, TestCase
 
 import torch
 import torch.distributed as dist
 from parameterized import parameterized
-from torch import cuda
 from torch.distributed import ReduceOp, ReduceScatterOptions
 from torchft import _test_utils
 from torchft.process_group import ProcessGroup
@@ -40,17 +40,22 @@ else:
             print(f"Diff: {diff=}\n{expected=}\n{actual=}")
             raise AssertionError(f"Results not within tolerance {tolerance}")
 
-    @unittest.skip(
-        "Fails with 'NCCL Error 7: NCCL operation in progress' on recent torch"
-        " nightlies"
-    )
-    @skipUnless(
-        torch.cuda.is_available() and torch.cuda.device_count() >= 2,
-        "2 CUDA devices are required for this test",
-    )
-    class QuantizedAllReduceTest(MultiPgBaseTest):
-        BACKEND = "nccl"
-        WORLD_SIZE = 2
+    class QuantizedCollectiveTestMixin:
+        """
+        Device-agnostic body of the quantized collective tests.
+
+        Not a ``TestCase`` itself, so it is never collected directly. Concrete
+        subclasses mix it with :class:`MultiPgBaseTest` and set ``BACKEND`` and
+        ``DEVICE_TYPE`` to the accelerator under test.
+        """
+
+        DEVICE_TYPE = "cuda"
+
+        # Provided by MultiPgBaseTest.
+        WORLD_SIZE: int
+        pg_pool: List[ProcessGroup]
+        executor: ThreadPoolExecutor
+        _collect: Callable[[List[Future[object]]], None]
 
         def _run_parallel_collectives(
             self, collective: Callable[[ProcessGroup, int, str], None]
@@ -58,7 +63,7 @@ else:
             futures = []
             for rank in range(self.WORLD_SIZE):
                 pg = self.pg_pool[rank]
-                device = f"cuda:{rank}"
+                device = f"{self.DEVICE_TYPE}:{rank}"
                 fut = self.executor.submit(collective, pg, rank, device)
                 futures.append(fut)
 
@@ -75,7 +80,7 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            cuda.set_device(device)
+            torch.accelerator.set_device_index(device)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
@@ -114,7 +119,7 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            cuda.set_device(device)
+            torch.accelerator.set_device_index(device)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
@@ -211,3 +216,25 @@ else:
                     dtype,
                 )
             )
+
+    @unittest.skip(
+        "Fails with 'NCCL Error 7: NCCL operation in progress' on recent torch"
+        " nightlies"
+    )
+    @skipUnless(
+        torch.cuda.is_available() and torch.cuda.device_count() >= 2,
+        "2 CUDA devices are required for this test",
+    )
+    class QuantizedAllReduceTest(QuantizedCollectiveTestMixin, MultiPgBaseTest):
+        BACKEND = "nccl"
+        WORLD_SIZE = 2
+        DEVICE_TYPE = "cuda"
+
+    @skipUnless(
+        torch.xpu.is_available() and torch.xpu.device_count() >= 2,
+        "2 XPU devices are required for this test",
+    )
+    class QuantizedAllReduceXcclTest(QuantizedCollectiveTestMixin, MultiPgBaseTest):
+        BACKEND = "xccl"
+        WORLD_SIZE = 2
+        DEVICE_TYPE = "xpu"

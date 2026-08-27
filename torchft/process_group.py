@@ -1446,7 +1446,9 @@ def _maybe_share_tensors(
         for t in tensor:
             _maybe_share_tensors(t)
     elif isinstance(tensor, torch.Tensor):
-        if not tensor.is_shared():
+        # Device tensors (CUDA, XPU) are already shared across processes
+        # Only CPU tensors need explicit share_memory_() call
+        if not tensor.is_shared() and tensor.device.type == "cpu":
             tensor.share_memory_()
     else:
         raise TypeError(f"expected tensor or list but got {type(tensor)}")

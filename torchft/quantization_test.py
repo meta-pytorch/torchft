@@ -13,7 +13,12 @@ from torchft import _test_utils
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
-DEVICE = "cuda"
+# Resolved per-accelerator so the same test body covers CUDA and XPU.
+DEVICE: str = (
+    str(torch.accelerator.current_accelerator())
+    if torch.accelerator.is_available()
+    else "cpu"
+)
 
 try:
     # pyre-fixme[21]: Could not find a module corresponding to import `triton`
@@ -22,14 +27,15 @@ except ImportError:
     pass
 else:
     from torchft.quantization import (
+        _supports_native_fp8,
         fused_dequantize_from_fp8,
         fused_quantize_into_fp8,
         fused_reduce_fp8,
     )
 
     @skipUnless(
-        torch.cuda.is_available(),
-        "CUDA is required for this test",
+        torch.accelerator.is_available(),
+        "An accelerator (CUDA or XPU) is required for this test",
     )
     class QuantizationTest(TestCase):
         def run_test(
@@ -46,7 +52,7 @@ else:
                 torch.rand(
                     tensors_num * tensor_size,
                     dtype=type,
-                    device="cuda",
+                    device=DEVICE,
                 )
                 * multiplier
             )
@@ -128,3 +134,44 @@ else:
                 reduce_op=reduce_op,
                 type=type,
             )
+
+    @skipUnless(torch.xpu.is_available(), "XPU is required for this test")
+    class QuantizationXpuTest(TestCase):
+        def test_no_native_fp8_on_xpu(self) -> None:
+            """XPU has no native FP8, so the kernels must take the int8 path."""
+            self.assertFalse(_supports_native_fp8())
+
+        @parameterized.expand(
+            [
+                (torch.float32,),
+                (torch.float16,),
+                (torch.bfloat16,),
+            ]
+        )
+        def test_quantize_dequantize_roundtrip(self, dtype: torch.dtype) -> None:
+            """The int8 fallback round-trips XPU tensors within tolerance."""
+            world_size = 2
+            tensor_size = 512
+            inp = torch.rand(2 * tensor_size, dtype=dtype, device="xpu")
+
+            for split in _test_utils.gen_splits(inp, tensor_size):
+                inputs = inp.clone()
+                outputs = torch.empty_like(inputs)
+
+                tensors_in = [
+                    i.view(*s) for s, i in zip(split, torch.split(inputs, tensor_size))
+                ]
+                tensors_out = [
+                    o.view(*s) for s, o in zip(split, torch.split(outputs, tensor_size))
+                ]
+
+                quant = fused_quantize_into_fp8(tensors_in, world_size)
+                fused_dequantize_from_fp8(tensors_out, quant, world_size)
+
+                torch.xpu.synchronize()
+
+                self.assertFalse(_test_utils.any_nan(tensors_out))
+                diff = torch.abs(
+                    (inputs - outputs).div(inputs.to(torch.float32) + 0.0000001)
+                )
+                self.assertLessEqual(diff.mean().item(), 0.05)
