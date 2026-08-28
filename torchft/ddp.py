@@ -13,7 +13,7 @@ Manager to provide fault tolerance.
 """
 
 import sys
-from typing import cast, Optional, TYPE_CHECKING
+from typing import Any, cast, Optional, TYPE_CHECKING
 from unittest.mock import patch
 
 import torch
@@ -42,7 +42,7 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
       same across workers.
     """
 
-    def __init__(self, manager: "Manager", module: nn.Module, **kwargs: object) -> None:
+    def __init__(self, manager: "Manager", module: nn.Module, **kwargs: Any) -> None:
         # use a dummy PG to soak up the init all reduce, actual comms will go
         # through the comm_hook.
         pg = ProcessGroupDummy(0, 1)
@@ -56,7 +56,6 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
             # torchft as it will cause the buckets to diverge for recovering
             # replicas.
             find_unused_parameters=True,
-            # pyre-fixme[6]: got object
             **kwargs,
         )
 

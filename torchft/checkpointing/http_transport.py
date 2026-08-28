@@ -119,6 +119,7 @@ class HTTPTransport(CheckpointTransport[T]):
 
                             _streaming_save(ckpt_server._spec, self.wfile)
                         else:
+                            assert ckpt_server._chunks is not None
                             chunk = ckpt_server._chunks[int(key)]
 
                             self.send_response(200)
@@ -160,7 +161,6 @@ class HTTPTransport(CheckpointTransport[T]):
         ):
             # We have to set weights_only to False as there are some non-tensor
             # states like lr_scheduler.
-            # pyre-fixme[16]: needs torch>=2.7
             return cast(T, _streaming_load(f, weights_only=False))
 
     def address(self) -> str:
@@ -210,8 +210,8 @@ class HTTPTransport(CheckpointTransport[T]):
         """
         if not wait:
             # hack for nonblocking shutdown of socketserver threads
-            # pyre-fixme[16]: no attribute `__shutdown_request`.
-            self._server.__shutdown_request = True
+            # pyrefly: ignore [missing-attribute]
+            self._server._BaseServer__shutdown_request = True
         if wait:
             self._server.shutdown()
             self._thread.join()

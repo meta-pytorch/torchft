@@ -53,10 +53,7 @@ class ParameterServer(ABC):
         class RequestHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path != "/new_session":
-                    self.send_response(400)
-                    self.send_header("Content-type", "text/plain")
-                    self.end_headers()
-                    self.err(f"invalid path, got {self.path}")
+                    self.send_error(400, f"invalid path, got {self.path}")
                     return
 
                 try:
