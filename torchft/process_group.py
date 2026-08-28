@@ -1333,7 +1333,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
     """
 
     def __init__(self, manager: "Manager") -> None:
-        super().__init__(pg=manager._pg)
+        super().__init__(pg=cast(Any, manager._pg))
 
         self._manager = manager
 
