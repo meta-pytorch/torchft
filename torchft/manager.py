@@ -233,6 +233,8 @@ class Manager:
 
         self._load_state_dict_fns: Dict[str, Callable[[object], None]] = {}
         self._user_state_dicts: Dict[str, Callable[[], object]] = {}
+        self._state_dicts_on_training_thread: set[str] = set()
+        self._staged_user_state_dict: Optional[Dict[str, object]] = None
 
         self._original_fr_dump_temp_file: Optional[str] = os.environ.get(
             TORCH_FR_DUMP_TEMP_FILE_ENV
@@ -368,6 +370,9 @@ class Manager:
         if self._is_state_dict_read_allowed:
             return
 
+        if torch.accelerator.is_available():
+            synchronize()
+
         self._is_state_dict_read_allowed = True
         self._state_dict_lock.w_release()
 
@@ -378,18 +383,31 @@ class Manager:
         self._is_state_dict_read_allowed = False
         self._state_dict_lock.w_acquire()
 
+    def _barrier_replica_ranks(self) -> None:
+        if self._group_world_size > 1 and dist.is_initialized():
+            dist.barrier()
+
     def register_state_dict_fn(
         self,
         key: str,
         load_state_dict: Callable[[T], None],
         state_dict: Callable[[], T],
+        state_dict_on_training_thread: bool = False,
     ) -> None:
+        """Register state callbacks used for peer recovery.
+
+        Set ``state_dict_on_training_thread`` when materializing the state can
+        run collectives that require every replica-local rank to enter from the
+        training thread, as with FSDP state dictionaries.
+        """
         # Can't register duplicate keys
         assert key not in self._load_state_dict_fns
         assert key not in self._user_state_dicts
 
         self._load_state_dict_fns[key] = cast(Callable[[object], None], load_state_dict)
         self._user_state_dicts[key] = state_dict
+        if state_dict_on_training_thread:
+            self._state_dicts_on_training_thread.add(key)
 
     def set_state_dict_fns(
         self, load_state_dict: Callable[[T], None], state_dict: Callable[[], T]
@@ -586,8 +604,24 @@ class Manager:
         if self._quorum_future is not None:
             self._quorum_future.result()
 
+        # Selected state_dict callbacks may contain FSDP collectives. Run only
+        # those callbacks on the training thread, where every replica-local
+        # rank enters together. Other callbacks retain the existing lazy path.
+        staged_user_state_dict = {
+            key: value()
+            for key, value in self._user_state_dicts.items()
+            if key in self._state_dicts_on_training_thread
+        }
+        self._staged_user_state_dict = staged_user_state_dict or None
+
         self._errored = None
         self._healing = False
+
+        # The first quorum must finish initialization and apply any recovered
+        # state before the first forward, even when later quorums run async.
+        wait_for_quorum = not self._use_async_quorum or (
+            self._init_sync and self._quorum_id == -1
+        )
 
         # TODO: we should really be wrapping this whole section in a try-except
         # block to allow gracefully recovering from issues in PG setup and quorum.
@@ -603,7 +637,7 @@ class Manager:
                 else -1
             ),
         )
-        if not self._use_async_quorum:
+        if wait_for_quorum:
             self.wait_quorum()
 
             if self._healing:
@@ -661,6 +695,7 @@ class Manager:
         max_replica_world_size = quorum.max_world_size
         heal = quorum.heal
         replica_ids = quorum.replica_ids
+        is_initial_quorum = self._quorum_id == -1
 
         ranks_in_quorum = [
             extract_trailing_digits(replica_id.split(":")[0]) * self._group_world_size
@@ -742,6 +777,12 @@ class Manager:
                 self._logger.exception(f"got exception in pg configure: {e}")
                 self.report_error(e)
                 return
+
+        # FSDP state_dict materialization is collective over the replica-local
+        # default group. Ensure every local rank has finished first-quorum
+        # process-group setup before any rank starts checkpoint recovery.
+        if is_initial_quorum and self._init_sync:
+            self._barrier_replica_ranks()
 
         if allow_heal:
             # run recovery on the recovery stream if available
@@ -955,14 +996,31 @@ class Manager:
         self._batches_committed = state_dict["batches_committed"]
 
     def _manager_state_dict(self) -> Dict[str, object]:
-        with self._state_dict_lock.r_lock():
-            assert len(self._user_state_dicts) > 0, (
-                "user state_dict is not initialized."
-            )
-            return {
-                "user": {key: value() for key, value in self._user_state_dicts.items()},
-                "torchft": self.state_dict(),
-            }
+        # start_quorum() materializes FSDP state dicts on the training thread.
+        # Reading that staged object does not re-enter FSDP collectives, and must
+        # remain possible while the current training step holds the writer lock:
+        # runtime healing waits for this snapshot before optimizer.step() can
+        # release the lock.
+        user_state_dict = dict(self._staged_user_state_dict or {})
+        lazy_state_dicts = {
+            key: value
+            for key, value in self._user_state_dicts.items()
+            if key not in self._state_dicts_on_training_thread
+        }
+
+        # Retain the lock for callbacks that use the existing lazy path. Staged
+        # callbacks are already materialized and do not re-enter collectives.
+        if lazy_state_dicts:
+            with self._state_dict_lock.r_lock():
+                user_state_dict.update(
+                    {key: value() for key, value in lazy_state_dicts.items()}
+                )
+
+        assert user_state_dict, "user state_dict is not initialized."
+        return {
+            "user": user_state_dict,
+            "torchft": self.state_dict(),
+        }
 
     def state_dict(self) -> Dict[str, int]:
         """

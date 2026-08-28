@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest import TestCase
-from unittest.mock import create_autospec, MagicMock
+from unittest.mock import call, create_autospec, MagicMock
 
 import torch
 from torch.nn import Linear
@@ -32,13 +32,21 @@ class TestOptim(TestCase):
         optim.load_state_dict(optim.state_dict())
 
         optim.zero_grad()
-        self.assertEqual(manager.start_quorum.call_count, 1)
+        self.assertEqual(
+            manager.method_calls,
+            [call.start_quorum(), call.disallow_state_dict_read()],
+        )
 
         b = torch.rand(3)
         m(b).sum().backward()
 
         manager.should_commit.return_value = True
+        manager.reset_mock()
         optim.step()
+        self.assertEqual(
+            manager.method_calls,
+            [call.allow_state_dict_read(), call.should_commit()],
+        )
         manager.should_commit.return_value = False
         optim.step()
         self.assertEqual(len(optim.param_groups), 2)
@@ -47,3 +55,4 @@ class TestOptim(TestCase):
         self.assertEqual(len(optim.state), len(list(m.parameters())))
 
         self.assertEqual(manager.should_commit.call_count, 2)
+        self.assertEqual(manager.allow_state_dict_read.call_count, 2)

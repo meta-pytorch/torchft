@@ -9,19 +9,19 @@ Utility functions for TorchFT.
 """
 
 from contextlib import nullcontext
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import torch
 
 
 def get_stream_context(
     stream: Optional[torch.Stream],
-) -> Union[torch.cuda.StreamContext, torch.xpu.StreamContext, nullcontext[None]]:
+) -> Any:
     """
     Get the appropriate stream context for the given stream.
 
-    This function provides a unified way to handle stream contexts across different
-    accelerator types (CUDA, XPU).
+    This function provides a unified way to handle stream contexts across
+    accelerator types.
 
     Args:
         stream: The stream to create a context for. If None, returns nullcontext.
@@ -30,38 +30,41 @@ def get_stream_context(
         The appropriate stream context for the accelerator type, or nullcontext
         if stream is None or no accelerator is available.
     """
-    if stream is not None:
-        if torch.cuda.is_available():
-            # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
-            return torch.cuda.stream(stream)
-        elif torch.xpu.is_available():
-            # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
-            return torch.xpu.stream(stream)
-        else:
-            return nullcontext()
-    else:
+    if stream is None or not torch.accelerator.is_available():
         return nullcontext()
+
+    accelerator = torch.accelerator.current_accelerator().type
+    accelerator_module = getattr(torch, accelerator, None)
+    if accelerator_module is None or not hasattr(accelerator_module, "stream"):
+        return nullcontext()
+    return accelerator_module.stream(stream)
 
 
 def record_event() -> None:
     """
     Record an event in the current stream.
 
-    This function provides a unified way to record events across different
-    accelerator types (CUDA, XPU).
+    This function provides a unified way to record events across accelerator
+    types.
     """
-    if torch.xpu.is_available():
-        torch.xpu.current_stream().record_event(torch.xpu.Event())
-    else:
-        torch.cuda.current_stream().record_event(torch.cuda.Event(interprocess=True))
+    if not torch.accelerator.is_available():
+        return
+
+    accelerator = torch.accelerator.current_accelerator().type
+    accelerator_module = getattr(torch, accelerator)
+    event = (
+        accelerator_module.Event(interprocess=True)
+        if accelerator == "cuda"
+        else accelerator_module.Event()
+    )
+    accelerator_module.current_stream().record_event(event)
 
 
 def synchronize() -> None:
     """
-    This function provides a unified way to synchronize current stream across different
-    accelerator types (CUDA, XPU).
+    This function provides a unified way to synchronize the current stream
+    across accelerator types.
     """
-    if torch.cuda.is_available():
-        torch.cuda.current_stream().synchronize()
-    elif torch.xpu.is_available():
-        torch.xpu.current_stream().synchronize()
+    if torch.accelerator.is_available():
+        accelerator = torch.accelerator.current_accelerator().type
+        getattr(torch, accelerator).current_stream().synchronize()

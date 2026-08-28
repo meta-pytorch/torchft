@@ -233,7 +233,11 @@ class TestManager(TestCase):
     def test_quorum_heal_async_not_enough_participants(
         self, client_mock: MagicMock
     ) -> None:
-        manager = self._create_manager(use_async_quorum=True, min_replica_size=2)
+        manager = self._create_manager(
+            use_async_quorum=True,
+            min_replica_size=2,
+            init_sync=False,
+        )
         client_mock().should_commit = mock_should_commit
 
         quorum = QuorumResult()
@@ -295,7 +299,11 @@ class TestManager(TestCase):
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_heal_async_zero_grad(self, client_mock: MagicMock) -> None:
-        manager = self._create_manager(use_async_quorum=True, min_replica_size=1)
+        manager = self._create_manager(
+            use_async_quorum=True,
+            min_replica_size=1,
+            init_sync=False,
+        )
         client_mock().should_commit = mock_should_commit
 
         quorum = QuorumResult()
@@ -652,6 +660,34 @@ class TestManager(TestCase):
             timedelta(seconds=23),
         )
 
+    @patch("torchft.manager.dist.barrier", autospec=True)
+    @patch("torchft.manager.dist.is_initialized", return_value=True)
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_first_init_quorum_barriers_replica_ranks(
+        self,
+        client_mock: MagicMock,
+        _is_initialized_mock: MagicMock,
+        barrier_mock: MagicMock,
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=False, init_sync=True)
+
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_replica_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+        client_mock()._quorum.return_value = quorum
+
+        manager.start_quorum()
+        manager.start_quorum()
+
+        barrier_mock.assert_called_once_with()
+
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_skip_init(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(
@@ -680,6 +716,107 @@ class TestManager(TestCase):
         manager._init_sync = True
         manager.start_quorum()
         self.assertEqual(client_mock()._quorum.call_args.kwargs["init_sync"], True)
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_first_init_quorum_waits_when_async(
+        self, client_mock: MagicMock
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=True, init_sync=True)
+        quorum_future = MagicMock()
+        quorum_future.result.side_effect = lambda: setattr(manager, "_healing", True)
+        manager._apply_pending_state_dict = MagicMock()
+
+        with patch.object(manager._executor, "submit", return_value=quorum_future):
+            manager.start_quorum()
+
+        quorum_future.result.assert_called_once_with()
+        manager._apply_pending_state_dict.assert_called_once_with()
+        self.assertFalse(manager._healing)
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_async_quorum_does_not_wait_after_initialization(
+        self, client_mock: MagicMock
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=True, init_sync=True)
+        manager._quorum_id = 123
+        quorum_future = MagicMock()
+
+        with patch.object(manager._executor, "submit", return_value=quorum_future):
+            manager.start_quorum()
+
+        quorum_future.result.assert_not_called()
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_first_quorum_does_not_wait_when_init_sync_is_disabled(
+        self, client_mock: MagicMock
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=True, init_sync=False)
+        quorum_future = MagicMock()
+
+        with patch.object(manager._executor, "submit", return_value=quorum_future):
+            manager.start_quorum()
+
+        quorum_future.result.assert_not_called()
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_start_quorum_stages_user_state_on_calling_thread(
+        self, client_mock: MagicMock
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=True, init_sync=False)
+        manager._load_state_dict_fns.clear()
+        manager._user_state_dicts.clear()
+        state_dict = MagicMock(return_value={"value": 1})
+        manager.register_state_dict_fn(
+            "default",
+            MagicMock(),
+            state_dict,
+            state_dict_on_training_thread=True,
+        )
+        quorum_future = MagicMock()
+
+        with patch.object(manager._executor, "submit", return_value=quorum_future):
+            manager.start_quorum()
+
+        state_dict.assert_called_once_with()
+        state_dict.reset_mock()
+        result = manager._manager_state_dict()
+        state_dict.assert_not_called()
+        self.assertEqual(result["user"], {"default": {"value": 1}})
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_start_quorum_keeps_default_state_dict_lazy(
+        self, client_mock: MagicMock
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=True, init_sync=False)
+        state_dict = MagicMock(return_value={"value": 1})
+        manager._user_state_dicts["default"] = state_dict
+        quorum_future = MagicMock()
+
+        with patch.object(manager._executor, "submit", return_value=quorum_future):
+            manager.start_quorum()
+
+        state_dict.assert_not_called()
+        self.assertIsNone(manager._staged_user_state_dict)
+
+        result = manager._manager_state_dict()
+
+        state_dict.assert_called_once_with()
+        self.assertEqual(result["user"], {"default": {"value": 1}})
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_start_quorum_without_state_dict_callbacks(
+        self, client_mock: MagicMock
+    ) -> None:
+        manager = self._create_manager(use_async_quorum=True, init_sync=False)
+        manager._load_state_dict_fns.clear()
+        manager._user_state_dicts.clear()
+        quorum_future = MagicMock()
+
+        with patch.object(manager._executor, "submit", return_value=quorum_future):
+            manager.start_quorum()
+
+        self.assertIsNone(manager._staged_user_state_dict)
+        quorum_future.result.assert_not_called()
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_checkpoint_errors(self, client_mock: MagicMock) -> None:
@@ -829,6 +966,28 @@ class TestManager(TestCase):
         self.assertTrue(manager._is_state_dict_read_allowed)
         self.assertFalse(manager._state_dict_lock.w_locked())
 
+    @patch("torchft.manager.synchronize", autospec=True)
+    @patch("torchft.manager.torch.accelerator.is_available", return_value=True)
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_allow_state_dict_read_synchronizes_accelerator(
+        self,
+        client_mock: MagicMock,
+        is_available_mock: MagicMock,
+        synchronize_mock: MagicMock,
+    ) -> None:
+        manager = self._create_manager()
+        manager.disallow_state_dict_read()
+
+        manager.allow_state_dict_read()
+
+        synchronize_mock.assert_called_once_with()
+        self.assertTrue(manager._is_state_dict_read_allowed)
+        self.assertFalse(manager._state_dict_lock.w_locked())
+
+        # Calling allow_state_dict_read again should be a no-op.
+        manager.allow_state_dict_read()
+        synchronize_mock.assert_called_once_with()
+
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_state_dict_lock_concurrent_access(self, client_mock: MagicMock) -> None:
         """Test that _state_dict_lock properly protects concurrent access to the state dictionary."""
@@ -912,3 +1071,21 @@ class TestManager(TestCase):
 
         # Restore the original lock
         manager._state_dict_lock = original_lock
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_manager_staged_state_dict_bypasses_read_lock(
+        self, client_mock: MagicMock
+    ) -> None:
+        """A staged snapshot remains readable while a training step is active."""
+        manager = self._create_manager()
+        staged = {"model": {"weight": torch.tensor([1.0])}}
+        manager._staged_user_state_dict = staged
+        manager._state_dicts_on_training_thread.add("default")
+
+        mock_lock = create_autospec(RWLock)
+        manager._state_dict_lock = mock_lock
+
+        result = manager._manager_state_dict()
+
+        self.assertIs(result["user"]["model"], staged["model"])
+        mock_lock.r_lock.assert_not_called()

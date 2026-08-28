@@ -47,11 +47,13 @@ class OptimizerWrapper(Optimizer):
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         self.manager.start_quorum()
+        self.manager.disallow_state_dict_read()
         self.optim.zero_grad(set_to_none)
 
     # pyrefly: ignore [bad-override]
     def step(self, closure: Optional[object] = None) -> None:
         assert closure is None, "optimizers that use closures are not supported"
+        self.manager.allow_state_dict_read()
         if self.manager.should_commit():
             self.optim.step()
 

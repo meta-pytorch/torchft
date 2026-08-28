@@ -6,13 +6,14 @@
 
 import urllib.error
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Dict
 from unittest import skipUnless, TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 from parameterized import parameterized
-from torchft.checkpointing.http_transport import HTTPTransport
+from torchft.checkpointing.http_transport import _to_cpu, HTTPTransport
 from torchft.checkpointing.http_transport_bench import main as bench_main
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.checkpointing.transport_test import (
@@ -22,6 +23,28 @@ from torchft.checkpointing.transport_test import (
 
 
 class TestHTTPTransport(TestCase):
+    @patch(
+        "torchft.checkpointing.http_transport.torch.accelerator.current_accelerator"
+    )
+    @patch(
+        "torchft.checkpointing.http_transport.torch.accelerator.is_available",
+        return_value=True,
+    )
+    def test_to_cpu_uses_current_accelerator(
+        self, _is_available: MagicMock, current_accelerator: MagicMock
+    ) -> None:
+        current_accelerator.return_value = SimpleNamespace(type="test_accel")
+        accelerator_tensor = MagicMock(spec=torch.Tensor)
+        accelerator_tensor.device.type = "test_accel"
+        cpu_tensor = accelerator_tensor.cpu.return_value
+        existing_cpu_tensor = torch.tensor([1.0])
+
+        result = _to_cpu([accelerator_tensor, existing_cpu_tensor], pin_memory=False)
+
+        self.assertIs(result[0], cpu_tensor)
+        self.assertIs(result[1], existing_cpu_tensor)
+        accelerator_tensor.cpu.assert_called_once_with()
+
     @parameterized.expand(
         [
             ("no chunks", 0),

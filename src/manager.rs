@@ -535,6 +535,14 @@ fn compute_quorum_results(
     // Compute recovery assignments
 
     let force_recover = init_sync && max_step == 0;
+    // FSDP checkpoint callbacks can contain replica-local collectives. Keep
+    // every worker in a replica on the same recovery side instead of rotating
+    // the initial source by group rank.
+    let recovery_primary = if force_recover {
+        max_participants[0]
+    } else {
+        primary
+    };
 
     // Nodes are recovering if
     // 1. not at the max step (init_sync)
@@ -543,7 +551,7 @@ fn compute_quorum_results(
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
-            if p.step != max_step || force_recover && primary.replica_id != p.replica_id {
+            if p.step != max_step || force_recover && recovery_primary.replica_id != p.replica_id {
                 Some(i)
             } else {
                 None
@@ -570,7 +578,10 @@ fn compute_quorum_results(
     // The rank of the node that this rank is recovering from.
     let mut recover_src_replica_rank: Option<i64> = None;
     for (i, recovering_rank) in all_recover_dst_replica_ranks.iter().enumerate() {
-        let up_to_date_idx = (i + group_rank as usize) % up_to_date_ranks.len();
+        // Assign all workers of a recovering replica to the same source
+        // replica. Different recovering replicas are still spread across the
+        // available up-to-date replicas.
+        let up_to_date_idx = i % up_to_date_ranks.len();
         let recovering_recover_src_replica_rank = up_to_date_ranks[up_to_date_idx];
         if !recovery_assignments.contains_key(&recovering_recover_src_replica_rank) {
             recovery_assignments.insert(recovering_recover_src_replica_rank, Vec::new());
@@ -921,13 +932,18 @@ mod tests {
         assert_eq!(results.recover_src_replica_rank, Some(0));
         assert_eq!(results.recover_dst_replica_ranks, Vec::<i64>::new());
 
-        // rank 1 assignments should be offset from rank 0 above and the primary
+        // Every worker in a replica must use the same recovery source.
 
         let results = compute_quorum_results("replica_1", 1, &quorum, true)?;
-        assert!(!results.heal);
+        assert!(results.heal);
         assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_replica_rank, Some(0));
+        assert_eq!(results.recover_dst_replica_ranks, Vec::<i64>::new());
+
+        let results = compute_quorum_results("replica_0", 1, &quorum, true)?;
+        assert!(!results.heal);
         assert_eq!(results.recover_src_replica_rank, None);
-        assert_eq!(results.recover_dst_replica_ranks, vec![0]);
+        assert_eq!(results.recover_dst_replica_ranks, vec![1]);
 
         Ok(())
     }
@@ -1013,13 +1029,13 @@ mod tests {
         assert_eq!(results.recover_src_replica_rank, None);
         assert_eq!(results.recover_dst_replica_ranks, vec![2]);
 
-        // rank 1 assignments should be offset from rank 0 above
+        // rank 1 assignments must match rank 0 for collective state_dicts.
 
         let results = compute_quorum_results("replica_1", 1, &quorum, true)?;
         assert!(!results.heal);
         assert_eq!(results.replica_rank, 1);
         assert_eq!(results.recover_src_replica_rank, None);
-        assert_eq!(results.recover_dst_replica_ranks, vec![2]);
+        assert_eq!(results.recover_dst_replica_ranks, vec![0, 4]);
 
         Ok(())
     }
