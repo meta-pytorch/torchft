@@ -48,7 +48,6 @@ from torchft.process_group import (
 )
 
 try:
-    # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
     import torchcomms._comms_mccl
     from torchft.torchcomms import ProcessGroupTorchComms
 
@@ -203,7 +202,7 @@ class Runner:
     use_cuda: bool = False
     world_size: int = 1
     attempts: int = 3
-    manager_args: Dict[str, object] = field(default_factory=dict)
+    manager_args: Dict[str, Any] = field(default_factory=dict)
     train_loop_args: Dict[str, Any] = field(default_factory=dict)
 
     def _replica_main(self) -> List[object]:
@@ -297,7 +296,6 @@ def ddp_train_loop(
             )
             native_store = dist.PrefixStore(f"native/{rank}", native_store)
             pg = dist.ProcessGroup(native_store, runner.replica_id, runner.num_replicas)
-            # pyre-fixme[16]: ProcessGroupGloo is not exported in the distributed stubs.
             backend = dist.ProcessGroupGloo(
                 native_store,
                 runner.replica_id,
@@ -321,7 +319,6 @@ def ddp_train_loop(
             world_size=runner.world_size,
             lighthouse_addr=runner.lighthouse_address,
             port=19530 + runner.replica_id,
-            # pyre-fixme[6]: Incompatible parameter type
             **runner.manager_args,
         )
         stack.callback(lambda: manager.shutdown(wait=False))
@@ -751,7 +748,6 @@ def ddp_train_loop_torchcomms(
 
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
-        # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
         import torchcomms
 
         comm = torchcomms.new_comm(
@@ -770,7 +766,6 @@ def ddp_train_loop_torchcomms(
             world_size=runner.world_size,
             lighthouse_addr=runner.lighthouse_address,
             port=19530 + runner.replica_id,
-            # pyre-fixme[6]: Incompatible parameter type
             **runner.manager_args,
         )
         stack.callback(lambda: manager.shutdown(wait=False))
@@ -834,7 +829,6 @@ def all_reduce_callback(
             port=19530 + runner.replica_id,
             timeout=timedelta(seconds=10),
             quorum_timeout=timedelta(seconds=10),
-            # pyre-fixme[6]: Incompatible parameter type
             **runner.manager_args,
         )
         stack.callback(lambda: manager.shutdown(wait=False))

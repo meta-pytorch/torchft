@@ -20,13 +20,9 @@ from opentelemetry.sdk.resources import Resource
 # don't include them. We import them at runtime and provide type aliases for
 # static type checking.
 if TYPE_CHECKING:
-    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
     ReadableLogRecord = Any
-    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
     LogRecordExporter = Any
-    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
     LogRecordExportResult = Any
-    # pyre-fixme[33]: Aliasing to Any is prohibited. opentelemetry-sdk lacks type stubs.
     ConsoleLogRecordExporter = Any
 else:
     from opentelemetry.sdk._logs import ReadableLogRecord

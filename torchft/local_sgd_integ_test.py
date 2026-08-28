@@ -81,7 +81,6 @@ def local_sgd_train_loop(
             lighthouse_addr=runner.lighthouse_address,
             port=19530 + runner.replica_id,
             timeout=timedelta(seconds=10),
-            # pyre-fixme[6]: Incompatible parameter type
             **runner.manager_args,
         )
         stack.callback(lambda: manager.shutdown(wait=False))
@@ -290,7 +289,6 @@ class LocalSGDIntegTest(TestCase):
         # pyrefly: ignore [bad-argument-type]
         assert_equal_global_state(1, rep1, rep0)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(
         [
@@ -371,7 +369,6 @@ class LocalSGDIntegTest(TestCase):
 
         self.assertEqual(event_injectors[1].count[EventInjectorEvent.Failure], 1)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(
         [
@@ -450,7 +447,6 @@ class LocalSGDIntegTest(TestCase):
         for alpha in [0.0, 0.5, 1.0]
     ]
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(CONFIG)
     def test_streaming_diloco_upscale(
@@ -528,7 +524,6 @@ class LocalSGDIntegTest(TestCase):
         for event_injector in event_injectors:
             self.assertEqual(event_injectors[1].count[EventInjectorEvent.Barrier], 1)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(CONFIG)
     def test_streaming_diloco_commit_failure(

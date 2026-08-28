@@ -77,7 +77,6 @@ class FuturesTest(TestCase):
         with context_timeout(fail, timedelta(seconds=10)):
             pass
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of decorator
     @skipUnless(torch.cuda.is_available(), "CUDA is required for this test")
     def test_stream_timeout(self) -> None:
         torch.cuda.synchronize()

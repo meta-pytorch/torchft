@@ -549,7 +549,6 @@ class ProcessGroupTest(TestCase):
         ):
             _reconfigure_with_missing_peer(pg)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_nccl_apis(self) -> None:
         store = TCPStore(
@@ -577,7 +576,6 @@ class ProcessGroupTest(TestCase):
 
         torch.cuda.synchronize()
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(
         torch.cuda.is_available() and torch.cuda.nccl.version() >= (2, 25),
         "needs NCCL >=2.25",
@@ -605,7 +603,6 @@ class ProcessGroupTest(TestCase):
         self.assertEqual(mock_stream_timeout.call_count, 2)
         self.assertEqual(mock_context_timeout.return_value.__enter__.call_count, 4)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(
         torch.cuda.is_available(),
         "needs CUDA",
@@ -697,7 +694,6 @@ class ProcessGroupTest(TestCase):
         with self.assertRaisesRegex(OSError, "handle is closed"):
             a.allreduce([t], AllreduceOptions()).wait()
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_baby_nccl_apis(self) -> None:
         # set to 1 if more than >=2 gpus
@@ -755,7 +751,7 @@ class ProcessGroupTest(TestCase):
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
         self.assertIs(
-            _resolve_process_group(pg.group_name),  # pyre-ignore[6]: GroupName vs str
+            _resolve_process_group(cast(Any, pg.group_name)),
             pg,
         )
 
@@ -1021,7 +1017,6 @@ class NormalGlooMultiPgTest(MultiPgBaseTest):
     def test_collective(self, collective: str) -> None:
         self._run_parallel(collective, device="cpu")
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(
         torch.__version__ >= "2.7",
         "torch 2.6 has a bug with destructing PyWork objects",

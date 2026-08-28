@@ -6,20 +6,20 @@
 
 import io
 import warnings
-from typing import IO
+from typing import cast, IO
 
 import torch
 
 
-def _fallback_save(obj: object, f: IO[bytes]) -> None:
+def _fallback_save(obj: object, f: io.BufferedIOBase) -> None:
     warnings.warn(
         "using slow fallback torch.save implementation, please upgrade to PT 2.7+ for fast streaming saves"
     )
 
-    torch.save(obj, f)
+    torch.save(obj, cast(IO[bytes], f))
 
 
-def _fallback_load(f: IO[bytes], weights_only: bool = True) -> object:
+def _fallback_load(f: io.BufferedIOBase, weights_only: bool = True) -> object:
     warnings.warn(
         "using slow fallback torch.load implementation, please upgrade to PT 2.7+ for fast streaming loads"
     )
