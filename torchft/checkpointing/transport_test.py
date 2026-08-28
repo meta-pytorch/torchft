@@ -89,7 +89,6 @@ def run_multi_recovery_test(
             )
         else:
             got = transport.recv_checkpoint(
-                # pyrefly: ignore [unbound-name]
                 src_rank=0,
                 # pyrefly: ignore [unbound-name]
                 metadata=metadata,
@@ -111,7 +110,6 @@ def run_multi_recovery_test(
             )
         elif rank == 2:
             got = transport.recv_checkpoint(
-                # pyrefly: ignore [unbound-name]
                 src_rank=0,
                 # pyrefly: ignore [unbound-name]
                 metadata=metadata,

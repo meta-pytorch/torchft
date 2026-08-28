@@ -121,7 +121,6 @@ class TestHTTPTransport(TestCase):
 
         run_multi_recovery_test(self, init, device=device)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     @skipUnless(torch.cuda.is_available(), "CUDA is not available")
     def test_multi_http_transport_cuda(self) -> None:
         device = torch.device("cuda")

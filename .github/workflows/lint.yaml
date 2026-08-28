@@ -38,12 +38,12 @@ jobs:
         run: |
           set -eux
 
-          lintrunner --skip PYRE,FLAKE --force-color --all-files
-      - name: Run pyre
+          lintrunner --skip PYREFLY,FLAKE --force-color --all-files
+      - name: Run Pyrefly
         run: |
           set -eux
 
-          pyre check
+          pyrefly check --config pyrefly.toml
       - name: Run Rust Lint
         run: |
           set -eux

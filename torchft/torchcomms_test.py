@@ -25,10 +25,7 @@ from torch._C._distributed_c10d import (
 from torch.distributed import ProcessGroup as BaseProcessGroup, TCPStore
 
 try:
-    # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
     import torchcomms
-
-    # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
     import torchcomms._comms_mccl
 
     TORCHCOMMS_AVAILABLE = True

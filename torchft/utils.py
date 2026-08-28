@@ -9,7 +9,7 @@ Utility functions for TorchFT.
 """
 
 from contextlib import nullcontext
-from typing import Any, Optional, Union
+from typing import Any, cast, Optional, Union
 
 import torch
 
@@ -32,11 +32,9 @@ def get_stream_context(
     """
     if stream is not None:
         if torch.cuda.is_available():
-            # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
-            return torch.cuda.stream(stream)
+            return torch.cuda.stream(cast(torch.cuda.Stream, stream))
         elif torch.xpu.is_available():
-            # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
-            return torch.xpu.stream(stream)
+            return torch.xpu.stream(cast(torch.xpu.Stream, stream))
         else:
             return nullcontext()
     else:
