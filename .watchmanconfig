@@ -1,8 +1,0 @@
-{
-  "root_files": [
-    "torchft",
-    "*.py",
-    "pyrefly.toml",
-    ".watchmanconfig"
-  ]
-}
