@@ -1280,17 +1280,26 @@ class _ManagedWork(dist._Work):
         is_future_wrapped = False
         while managed_fut._next:
 
+            # `node` is bound per iteration, deliberately. This loop rebinds `managed_fut` on every
+            # pass, so a closure reading it through `nonlocal` sees whatever the loop left behind --
+            # the tail, whose `_callback` is None -- for every callback that runs after the loop
+            # rather than inline. A process group whose futures complete on the calling thread hides
+            # this, because `then()` fires the callback while `managed_fut` still points at the right
+            # node; one that completes them from another thread does not. ProcessGroupBabyNCCL
+            # delivers results from `_future_handler`, so every callback hit `assert
+            # managed_fut._callback` and the reduction failed with an empty AssertionError.
             def callback(
                 fut: torch.futures.Future[object],
+                node: _ManagedFuture[object] = managed_fut,
             ) -> object:
-                nonlocal managed_fut, value
+                nonlocal value
                 # change the stream to avoid making the callback stream
                 # dependent on process group stream running the allreduce
                 with get_stream_context(self._stream):
                     # Setup stream dependency
                     fut.wait()
-                    assert managed_fut._callback
-                    value = managed_fut._callback(
+                    assert node._callback
+                    value = node._callback(
                         _SimpleFuture(value),
                     )
                     return value
