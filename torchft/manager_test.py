@@ -13,11 +13,18 @@ from unittest import TestCase
 from unittest.mock import create_autospec, MagicMock, patch
 
 import torch
+import torch.distributed as dist
 from torch.distributed import ReduceOp, TCPStore
 from torchft._torchft import QuorumResult
 from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing.transport import CheckpointTransport
-from torchft.manager import Manager, MANAGER_ADDR_KEY, REPLICA_ID_KEY, WorldSizeMode
+from torchft.manager import (
+    _ManagedWork,
+    Manager,
+    MANAGER_ADDR_KEY,
+    REPLICA_ID_KEY,
+    WorldSizeMode,
+)
 from torchft.process_group import ProcessGroup
 from torchft.work import _DummyWork
 
@@ -912,3 +919,85 @@ class TestManager(TestCase):
 
         # Restore the original lock
         manager._state_dict_lock = original_lock
+
+
+class TestManagedWork(TestCase):
+    """`_ManagedWork`'s callback chain when the underlying future completes only
+    after the chain is built, e.g. from another thread as ProcessGroupBabyNCCL does."""
+
+    class _PendingWork(dist._Work):
+        """A `Work` whose future nobody has completed yet."""
+
+        def __init__(self, fut: torch.futures.Future[object]) -> None:
+            super().__init__()
+            self._fut = fut
+
+        def wait(self, timeout: Optional[timedelta] = None) -> bool:
+            return True
+
+        def block_current_stream(self, timeout: Optional[timedelta] = None) -> None:
+            return None
+
+        def synchronize(self) -> None:
+            return None
+
+        def get_future(self) -> torch.futures.Future[object]:
+            return self._fut
+
+    def _manager(self) -> MagicMock:
+        manager = create_autospec(Manager)
+        # pass futures through unchanged so callback errors surface in the test
+        manager.wrap_future = lambda fut, default, timeout=None: fut
+        return manager
+
+    def test_callback_runs_when_the_future_completes_after_the_chain_is_built(
+        self,
+    ) -> None:
+        """Regression test: callbacks used to read the loop variable and hit the
+        tail node, whose `_callback` is None."""
+        pending: torch.futures.Future[object] = torch.futures.Future()
+        work = _ManagedWork(self._manager(), self._PendingWork(pending), "initial")
+
+        ran: list[object] = []
+
+        def callback(fut: torch.futures.Future[object]) -> object:
+            ran.append(fut.value())
+            return "reduced"
+
+        tail = work.get_future().then(callback)
+
+        # builds the chain; `pending` is not complete so nothing can have run yet
+        work.block_current_stream()
+        self.assertEqual(ran, [])
+
+        completer = threading.Thread(
+            target=lambda: pending.set_result("from the process group")
+        )
+        completer.start()
+        completer.join()
+
+        self.assertEqual(ran, ["initial"], "the chained callback never ran")
+        self.assertEqual(tail.wait(), "reduced")
+
+    def test_a_two_callback_chain_runs_in_order(self) -> None:
+        """Same as above, with a chain of two callbacks."""
+        pending: torch.futures.Future[object] = torch.futures.Future()
+        work = _ManagedWork(self._manager(), self._PendingWork(pending), 0)
+
+        order: list[str] = []
+
+        def first(fut: torch.futures.Future[object]) -> object:
+            order.append("first")
+            return 1
+
+        def second(fut: torch.futures.Future[object]) -> object:
+            order.append("second")
+            return 2
+
+        tail = work.get_future().then(first).then(second)
+        work.block_current_stream()
+
+        pending.set_result(None)
+
+        self.assertEqual(order, ["first", "second"])
+        self.assertEqual(tail.wait(), 2)
