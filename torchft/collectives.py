@@ -8,8 +8,6 @@ import math
 from typing import Optional, TYPE_CHECKING
 
 import torch
-
-# pyre-ignore[21]: Could not find a module corresponding to import `triton`
 import triton
 from torch.distributed import ReduceOp
 from torch.distributed.distributed_c10d import (

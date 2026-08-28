@@ -2,7 +2,7 @@
   "root_files": [
     "torchft",
     "*.py",
-    ".pyre_configuration",
+    "pyrefly.toml",
     ".watchmanconfig"
   ]
 }

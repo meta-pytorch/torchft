@@ -22,8 +22,6 @@ from datetime import timedelta
 from typing import List, Optional, Union
 
 import torch
-
-# pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
 import torchcomms
 from torch.distributed.distributed_c10d import (
     AllgatherOptions,
@@ -53,7 +51,6 @@ class _TorchCommsWork(Work):
     def __init__(
         self,
         device: torch.device,
-        # pyre-fixme[11]: Annotation `TorchWork` is not defined as a type.
         work: torchcomms.TorchWork | None = None,
         value: object | None = None,
     ) -> None:
@@ -61,7 +58,6 @@ class _TorchCommsWork(Work):
         self._work: Optional[torchcomms.TorchWork] = work
         is_cpu = device.type == "cpu"
         self._fut: torch.futures.Future[object] = torch.futures.Future(
-            # pyre-fixme[6]: Expected `Optional[List[Union[int, str, device]]]`
             devices=[] if is_cpu else [device]
         )
         self._value = value
@@ -99,7 +95,6 @@ def _to_torchcomms_reduce_op(
     opts: Union[
         ReduceOp, AllreduceOptions, AllreduceCoalescedOptions, ReduceScatterOptions
     ],
-    # pyre-fixme[11]: Annotation `ReduceOp` is not defined as a type.
 ) -> "torchcomms.ReduceOp":
     """Convert a c10d reduce-op (or options carrying one) to ``torchcomms.ReduceOp``."""
     if isinstance(
@@ -131,7 +126,6 @@ class ProcessGroupTorchComms(ProcessGroup):
 
     def __init__(
         self,
-        # pyre-fixme[11]: Annotation `TorchComm` is not defined as a type.
         comm: torchcomms.TorchComm,
         timeout: timedelta = timedelta(seconds=60),
     ) -> None:

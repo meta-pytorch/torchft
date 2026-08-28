@@ -16,7 +16,6 @@ torch.set_printoptions(precision=4, sci_mode=False)
 DEVICE = "cuda"
 
 try:
-    # pyre-fixme[21]: Could not find a module corresponding to import `triton`
     import triton
 except ImportError:
     pass

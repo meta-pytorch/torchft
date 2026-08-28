@@ -40,7 +40,6 @@ class TestDDP(TestCase):
 
         call_count = 0
 
-        # pyre-ignore[53]: Captured variable `manager` is not annotated.
         def allreduce(
             tensor: torch.Tensor,
         ) -> Work:
