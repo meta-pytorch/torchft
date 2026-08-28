@@ -4,16 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
 import torch
-
-# pyre-ignore[21]: Could not find a module corresponding to import `triton`
 import triton
-
-# pyre-ignore[21]: Could not find a module corresponding to import `triton.language`
 import triton.language as tl
-
-# pyre-ignore[21]: Could not find a module corresponding to import `triton.runtime`
 import triton.runtime as tr
 from torch.distributed import ReduceOp
 
@@ -37,7 +30,6 @@ def _supports_native_fp8() -> bool:
     return False
 
 
-# pyre-ignore[11]: Annotation `tl.constexpr` is not defined
 def _get_fp8_max() -> tl.constexpr:
     if _supports_native_fp8():
         return tl.constexpr(448.0)
@@ -53,7 +45,6 @@ def _get_fp8_type() -> tl.constexpr:
 
 
 @triton.jit
-# pyre-ignore[11]: Annotation `tl.tensor` is not defined
 def _kernel_calculate_scale(row_max, TL_FP8_MAX: tl.constexpr) -> tl.tensor:
     row_scale = TL_FP8_MAX / row_max
     is_inf = row_scale == float("inf")

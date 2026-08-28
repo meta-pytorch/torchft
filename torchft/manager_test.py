@@ -29,9 +29,9 @@ def mock_should_commit(
 
 
 class TestManager(TestCase):
-    store: TCPStore  # pyre-fixme[13]: never initialized
-    load_state_dict: MagicMock  # pyre-fixme[13]: never initialized
-    manager: Optional[Manager]  # pyre-fixme[13]: never initialized
+    store: TCPStore
+    load_state_dict: MagicMock
+    manager: Optional[Manager]
 
     def tearDown(self) -> None:
         # Manager cleanup might be handled by _create_manager
@@ -171,7 +171,7 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 1)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
         manager.start_quorum()
@@ -222,9 +222,9 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 21)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.call_count, 1)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -280,9 +280,9 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 20)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.call_count, 1)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -340,9 +340,9 @@ class TestManager(TestCase):
         self.assertTrue(manager.current_step(), 21)
 
         self.assertEqual(manager._quorum_id, 123)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.call_count, 1)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -376,24 +376,25 @@ class TestManager(TestCase):
 
         manager.start_quorum()
         manager.allreduce(torch.tensor([1.0])).wait()
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
         # inject failure when work queued
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         manager._pg.allreduce.side_effect = RuntimeError("injected failure")
         manager.allreduce(torch.tensor([1.0])).wait()
         self.assertTrue(manager._errored)
         # this should be skipped due to error
         manager.allreduce(torch.tensor([1.0])).wait()
         self.assertEqual(manager._pg.allreduce.call_count, 2)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertFalse(manager.should_commit())
         self.assertTrue(manager._errored)
 
         # cleanup
+        # pyrefly: ignore [missing-attribute]
         manager._pg.allreduce.side_effect = None
 
         # inject failure when worked waited
@@ -450,13 +451,13 @@ class TestManager(TestCase):
 
         injected_failure = RuntimeError("injected failure")
 
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         manager._pg.errored.return_value = injected_failure
 
         self.assertFalse(manager.should_commit())
         assert manager._errored is not None
         self.assertEqual(manager._errored.original_exception, injected_failure)
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(manager._pg.errored.call_count, 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
@@ -589,7 +590,7 @@ class TestManager(TestCase):
         self.assertEqual(manager.participating_rank(), 1)
         self.assertEqual(quorum_future.result.call_count, 2)
 
-        # pyre-ignore[16]: _pg is mocked
+        # pyrefly: ignore [missing-attribute]
         manager._pg.allreduce.return_value = _DummyWork(None)
 
         self.assertTrue(manager.is_participating())
@@ -729,7 +730,7 @@ class TestManager(TestCase):
         manager = self._create_manager(use_async_quorum=True)
         client_mock().should_commit = MagicMock(return_value=False)
 
-        # pyre-ignore[16]: mock
+        # pyrefly: ignore [missing-attribute]
         manager._pg.configure.side_effect = RuntimeError("configure failure")
 
         quorum = QuorumResult()

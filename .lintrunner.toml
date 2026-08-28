@@ -108,15 +108,15 @@ command = [
 ]
 
 [[linter]]
-code = 'PYRE'
+code = 'PYREFLY'
 include_patterns = [
     '*.py',
     '**/*.py',
     '**/*.pyi',
 ]
 command = [
-    'python3',
-    'tools/linter/adapters/pyre_linter.py',
+    'python',
+    'tools/linter/adapters/pyrefly_linter.py',
     '--',
     '@{{PATHSFILE}}'
 ]
@@ -127,7 +127,6 @@ init_command = [
     'run',
     'pip_init',
     '--dry-run={{DRYRUN}}',
-    'pyre-check==0.9.23',
-    'click==8.1.0',
+    'pyrefly==1.2.0',
 ]
 is_formatter = false

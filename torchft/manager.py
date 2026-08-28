@@ -65,7 +65,6 @@ if TYPE_CHECKING:
 
 IS_TRITON_AVAILABLE = True
 try:
-    # pyre-ignore[21]: Could not find a module corresponding to import `triton`
     import triton
     from torchft.collectives import allreduce_quantized
 except ImportError:
@@ -732,7 +731,7 @@ class Manager:
                     self._update_fr_path()
                     # Only reset FR recording if available (requires NCCL Flight Recorder support)
                     if hasattr(torch._C._distributed_c10d, "_reset_fr_recording_nccl"):
-                        torch._C._distributed_c10d._reset_fr_recording_nccl()  # pyre-ignore
+                        torch._C._distributed_c10d._reset_fr_recording_nccl()
                     else:
                         self._logger.warn(
                             "Unable to reset NCCL flight recorder recording so traces will be "
@@ -796,7 +795,6 @@ class Manager:
                                 timeout=self._timeout,
                             )
 
-                        # pyre-fixme[6]: got object
                         self.load_state_dict(self._pending_state_dict["torchft"])
 
                         # This isn't strictly needed as loading the state_dict above should

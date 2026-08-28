@@ -35,6 +35,7 @@ dev = [
     "torchx-nightly",
     "lintrunner",
     "lintrunner-adapters",
+    "pyrefly==1.2.0",
 ]
 
 [tool.maturin]
