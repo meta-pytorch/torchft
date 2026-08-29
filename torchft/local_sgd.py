@@ -42,6 +42,31 @@ def extract_local_tensor(t: torch.Tensor) -> torch.Tensor:
     return new_tensor
 
 
+def _copy_local_tensor_to_parameter(
+    parameter: torch.Tensor, local_tensor: torch.Tensor
+) -> None:
+    target_device = (
+        parameter.to_local().device
+        if isinstance(parameter, DTensor)
+        else parameter.device
+    )
+    if local_tensor.device != target_device:
+        local_tensor = local_tensor.to(device=target_device, non_blocking=False)
+
+    if isinstance(parameter, DTensor):
+        parameter.data.copy_(
+            DTensor.from_local(
+                local_tensor,
+                parameter.device_mesh,
+                parameter.placements,
+                shape=parameter.shape,
+                stride=parameter.stride(),
+            )
+        )
+    else:
+        parameter.data.copy_(local_tensor)
+
+
 class LocalSGD:
     """
     LocalSGD is a context manager that
@@ -66,6 +91,7 @@ class LocalSGD:
         model: nn.Module,
         optimizer: optim.Optimizer,
         sync_every: int,
+        offload_averaged_parameters_to_cpu: bool = False,
     ) -> None:
         """
         Args:
@@ -73,6 +99,9 @@ class LocalSGD:
             model: The model to wrap.
             optimizer: The optimizer used by the model.
             sync_every: How often to sync the model weights.
+            offload_averaged_parameters_to_cpu: Stage each averaged parameter
+                on CPU until the quorum commits. This reduces peak accelerator
+                memory during synchronization at the cost of host transfers.
         """
         super().__init__()
         self._manager = manager
@@ -80,6 +109,9 @@ class LocalSGD:
         self._local_optimizer = optimizer
         self._local_step = 0
         self._sync_every = sync_every
+        self._offload_averaged_parameters_to_cpu = (
+            offload_averaged_parameters_to_cpu
+        )
         assert sync_every >= 1, "sync_every must be greater than or equal to 1"
 
         self._hooks: List[RemovableHandle] = []
@@ -138,6 +170,22 @@ class LocalSGD:
         """
         Performs the synchronization of the model weights across the manager.
         """
+        if self._offload_averaged_parameters_to_cpu:
+            averaged_parameters = []
+            parameters = list(self._model.parameters())
+            for parameter in parameters:
+                averaged_parameter = extract_local_tensor(parameter)
+                self._manager.allreduce(averaged_parameter).wait()
+                averaged_parameters.append(averaged_parameter.detach().cpu())
+                del averaged_parameter
+
+            if self._manager.should_commit():
+                for parameter, averaged_parameter in zip(
+                    parameters, averaged_parameters
+                ):
+                    _copy_local_tensor_to_parameter(parameter, averaged_parameter)
+            return
+
         averaged_parameters = self._average()
         if self._manager.should_commit():
             # Update the model parameters with the averaged values
