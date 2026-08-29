@@ -661,6 +661,7 @@ mod tests {
             min_replicas: 1,
             quorum_tick_ms: 100,
             heartbeat_timeout_ms: 5000,
+            expected_replicas: None,
         })
         .await?;
         let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
@@ -709,6 +710,7 @@ mod tests {
             min_replicas: 1,
             quorum_tick_ms: 100,
             heartbeat_timeout_ms: 5000,
+            expected_replicas: None,
         })
         .await?;
         let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
@@ -765,6 +767,7 @@ mod tests {
             min_replicas: 2,
             quorum_tick_ms: 100,
             heartbeat_timeout_ms: 5000,
+            expected_replicas: None,
         })
         .await?;
         let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
@@ -838,6 +841,7 @@ mod tests {
             min_replicas: 1,
             quorum_tick_ms: 100,
             heartbeat_timeout_ms: 5000,
+            expected_replicas: None,
         })
         .await?;
         let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
