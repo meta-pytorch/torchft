@@ -242,7 +242,7 @@ class MockDiLoCoTrainer(DiLoCoTrainer):
                     manager_steps.add(manager_curr_step)
 
                 # For each parameter, set a deterministic gradient
-                for _, layer in enumerate(self.model.layers):
+                for layer in self.model.layers:
                     if isinstance(layer, MockLinear):
                         # Set fixed gradients
                         layer.weight.grad = (
@@ -357,7 +357,7 @@ class DiLoCoMockedUpdateTest(TestCase):
                 )
                 futures.append(executor.submit(runner.run_replica))
 
-            for fut in as_completed(futures):
+            for _fut in as_completed(futures):
                 continue
 
             results = []
@@ -443,7 +443,7 @@ class DiLoCoMockedUpdateTest(TestCase):
                 futures.append(executor.submit(runner.run_replica))
 
             # Wait for all futures to complete
-            for fut in as_completed(futures):
+            for _fut in as_completed(futures):
                 continue
 
             results = []
@@ -509,9 +509,7 @@ class DiLoCoMockedUpdateTest(TestCase):
             return False
 
         # Compare fixture data with current results
-        for replica_idx, (fixture_history, current_history) in enumerate(
-            zip(fixture_data, results)
-        ):
+        for fixture_history, current_history in zip(fixture_data, results):
             fixture_history = fixture_history[0]["history"]
             current_history = current_history[0]["history"]
             for step, fixture_params in fixture_history.items():
