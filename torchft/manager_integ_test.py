@@ -286,7 +286,29 @@ def ddp_train_loop(
 
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
-        pg = ProcessGroupGloo()
+        pg: dist.ProcessGroup
+        native_store = train_loop_args.get("native_store")
+        if native_store is None:
+            pg = ProcessGroupGloo()
+        else:
+            # Independent connections are needed for concurrent Store waits.
+            native_store = dist.TCPStore(
+                "localhost", native_store.port, is_master=False, wait_for_workers=False
+            )
+            native_store = dist.PrefixStore(f"native/{rank}", native_store)
+            pg = dist.ProcessGroup(native_store, runner.replica_id, runner.num_replicas)
+            # pyre-fixme[16]: ProcessGroupGloo is not exported in the distributed stubs.
+            backend = dist.ProcessGroupGloo(
+                native_store,
+                runner.replica_id,
+                runner.num_replicas,
+                enable_reconfigure=True,
+            )
+            pg._set_default_backend(dist.ProcessGroup.BackendType.GLOO)
+            pg._register_backend(
+                torch.device("cpu"), dist.ProcessGroup.BackendType.GLOO, backend
+            )
+            stack.callback(pg.shutdown)
         manager = Manager(
             pg=pg,
             min_replica_size=2,
@@ -382,23 +404,35 @@ class ManagerIntegTest(TestCase):
             (
                 "async_quorum",
                 True,
+                False,
             ),
             (
                 "sync_quorum",
                 False,
+                False,
             ),
+            ("native_async_quorum", True, True),
+            ("native_sync_quorum", False, True),
         ]
     )
     def test_ddp_recovery(
         self,
         name: str,
         use_async_quorum: bool,
+        native: bool,
     ) -> None:
+        if native and not hasattr(dist.ProcessGroup, "reconfigure"):
+            self.skipTest("requires native process group reconfiguration")
         lighthouse = LighthouseServer(
             bind="[::]:0",
             min_replicas=2,
         )
         num_replicas = 2
+        native_store = (
+            dist.TCPStore("localhost", 0, is_master=True, wait_for_workers=False)
+            if native
+            else None
+        )
         futures = []
 
         event_injectors = [
@@ -417,6 +451,7 @@ class ManagerIntegTest(TestCase):
                         "use_async_quorum": use_async_quorum,
                     },
                     train_loop=ddp_train_loop,
+                    train_loop_args={"native_store": native_store},
                 )
                 futures.append(executor.submit(runner.run_replica))
 

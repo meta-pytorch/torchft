@@ -19,7 +19,7 @@ from torch.distributed.distributed_c10d import (
 from torch.futures import Future
 
 if TYPE_CHECKING:
-    from torchft.process_group import ProcessGroup
+    from torch.distributed import ProcessGroup
 
 from torchft.quantization import (
     fused_dequantize_from_fp8,

@@ -23,6 +23,7 @@ from torch._C._distributed_c10d import (
     ReduceScatterOptions,
 )
 from torch.distributed import ProcessGroup as BaseProcessGroup, TCPStore
+from torchft.process_group import reconfigure_with_store, ReconfigureOptions
 
 try:
     # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
@@ -156,7 +157,7 @@ class ProcessGroupTorchCommsMcclTest(TestCase):
         pg = self._make_pg()
 
         store_addr = f"localhost:{store.port}/prefix"
-        pg.configure(store_addr, "0", 0, 1, quorum_id=0)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         self.assertEqual(pg.size(), 1)
         self.assertEqual(pg.getBackendName(), "torchcomms:mccl")
@@ -165,16 +166,15 @@ class ProcessGroupTorchCommsMcclTest(TestCase):
         _test_torchcomms_pg(pg, torch.tensor([2], dtype=torch.float32, device="cuda:0"))
 
     def test_reconfigure(self) -> None:
-        """Verify that calling configure() twice works."""
+        """Verify that reconfiguring twice works."""
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
 
         pg = self._make_pg()
 
-        # First configure
         store_addr = f"localhost:{store.port}/prefix1"
-        pg.configure(store_addr, "0", 0, 1, quorum_id=0)
+        reconfigure_with_store(pg, store_addr, 0, 1)
         self.assertEqual(pg.size(), 1)
 
         # Run a collective
@@ -185,7 +185,7 @@ class ProcessGroupTorchCommsMcclTest(TestCase):
 
         # Reconfigure
         store_addr2 = f"localhost:{store.port}/prefix2"
-        pg.configure(store_addr2, "0", 0, 1, quorum_id=1)
+        reconfigure_with_store(pg, store_addr2, 0, 1)
         self.assertEqual(pg.size(), 1)
 
         # Run another collective after reconfigure
@@ -201,7 +201,7 @@ class ProcessGroupTorchCommsMcclTest(TestCase):
 
         pg = self._make_pg()
         store_addr = f"localhost:{store.port}/prefix"
-        pg.configure(store_addr, "0", 0, 1, quorum_id=0)
+        reconfigure_with_store(pg, store_addr, 0, 1)
         pg.shutdown()
         self.assertIsNone(pg._comm)
 
@@ -212,7 +212,7 @@ class ProcessGroupTorchCommsMcclTest(TestCase):
 
         pg = self._make_pg()
         store_addr = f"localhost:{store.port}/prefix"
-        pg.configure(store_addr, "0", 0, 1, quorum_id=0)
+        reconfigure_with_store(pg, store_addr, 0, 1)
         pg.abort()
         self.assertIsNone(pg._comm)
 
@@ -224,7 +224,7 @@ class ProcessGroupTorchCommsMcclTest(TestCase):
 
         pg = self._make_pg()
         store_addr = f"localhost:{store.port}/prefix"
-        pg.configure(store_addr, "0", 0, 1, quorum_id=0)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         m = nn.Linear(3, 4).cuda()
         try:
@@ -252,43 +252,30 @@ class ProcessGroupTorchCommsTest(TestCase):
     def setUp(self) -> None:
         _dummy_init_pg()
 
-    def test_reconfigure_handle_exchange(self) -> None:
+    def test_reconfigure_handles(self) -> None:
         """Test the reconfigure code path with a mocked TorchComm."""
         from torchft.torchcomms import ProcessGroupTorchComms
 
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        # Build a mock comm whose get_init_handle succeeds (reconfigure path).
         mock_comm = MagicMock()
         mock_comm.get_init_handle.return_value = "handle_rank0"
         mock_comm.get_backend.return_value = "nccl"
         mock_comm.get_device.return_value = torch.device("cpu")
 
-        mock_work = MagicMock()
-        mock_comm.reconfigure.return_value = mock_work
-
         pg = ProcessGroupTorchComms(comm=mock_comm, timeout=timedelta(seconds=60))
+        self.assertEqual(pg.get_reconfigure_handle(), "handle_rank0")
 
-        store_addr = f"localhost:{store.port}/prefix"
-        pg.configure(store_addr, "0", 0, 1, quorum_id=0)
+        opts = ReconfigureOptions()
+        opts.uuid = 7
+        opts.handles = ["handle_rank0", "handle_rank1"]
+        pg.reconfigure(opts).wait()
 
-        # reconfigure should have been called with uuid=0 and the handle list.
-        mock_comm.reconfigure.assert_called_once()
-        call_kwargs = mock_comm.reconfigure.call_args
-        self.assertEqual(call_kwargs.kwargs["uuid"], 0)
-        self.assertEqual(call_kwargs.kwargs["init_handles"], ["handle_rank0"])
-        mock_work.wait.assert_called_once()
-
-        # Second configure with a different quorum_id.
-        mock_comm.reconfigure.reset_mock()
-        mock_work.reset_mock()
-        store_addr2 = f"localhost:{store.port}/prefix2"
-        pg.configure(store_addr2, "0", 0, 1, quorum_id=1)
-
-        call_kwargs2 = mock_comm.reconfigure.call_args
-        self.assertEqual(call_kwargs2.kwargs["uuid"], 1)
+        mock_comm.reconfigure.assert_called_once_with(
+            uuid=7,
+            init_handles=["handle_rank0", "handle_rank1"],
+            timeout=timedelta(seconds=60),
+        )
+        mock_comm.reconfigure.return_value.wait.assert_called_once()
+        self.assertEqual(pg.size(), 2)
 
     def test_work_is_completed(self) -> None:
         """Test _TorchCommsWork.is_completed() delegation."""

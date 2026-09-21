@@ -12,8 +12,8 @@ This module provides a shim layer that wraps a ``torchcomms.TorchComm``
 communicator as a ``torchft.process_group.ProcessGroup``, enabling
 fault-tolerant reconfiguration via the TorchComm ``reconfigure()`` API.
 
-On each :meth:`configure` call, init-handles are exchanged via the store
-and ``TorchComm.reconfigure()`` is called.  The same ``TorchComm`` object
+The reconfigure handle is the TorchComm init handle and
+:meth:`ProcessGroupTorchComms.reconfigure` calls ``TorchComm.reconfigure()``.  The same ``TorchComm`` object
 is reused across reconfigurations.
 """
 
@@ -36,7 +36,8 @@ from torch.distributed.distributed_c10d import (
     ReduceScatterOptions,
     Work,
 )
-from torchft.process_group import create_store_client, ProcessGroup
+from torchft.process_group import ProcessGroup, ReconfigureOptions
+from torchft.work import _DummyWork
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -119,14 +120,14 @@ class ProcessGroupTorchComms(ProcessGroup):
     ``torchcomms.TorchComm`` communicator.
 
     The caller creates a ``TorchComm`` with ``enable_reconfigure=True`` and
-    hands it to this wrapper.  Each :meth:`configure` call exchanges
-    init-handles via the store and calls ``TorchComm.reconfigure()``.  The
-    same ``TorchComm`` object is reused across reconfigurations.
+    hands it to this wrapper.  Reconfigure handles are TorchComm init handles
+    and :meth:`reconfigure` calls ``TorchComm.reconfigure()``.  The same
+    ``TorchComm`` object is reused across reconfigurations.
 
     Args:
         comm: a ``torchcomms.TorchComm`` instance (with
             ``enable_reconfigure=True``).
-        timeout: timeout for store operations and communicator creation.
+        timeout: default timeout for communicator creation.
     """
 
     def __init__(
@@ -146,42 +147,22 @@ class ProcessGroupTorchComms(ProcessGroup):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def configure(
-        self,
-        store_addr: str,
-        replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
-    ) -> None:
-        assert self._comm is not None
+    def get_reconfigure_handle(self) -> str:
+        return self.comm.get_init_handle()
 
-        # Reconfigure path: exchange init-handles via the store.
-        store = create_store_client(store_addr, timeout=self._timeout)
-
-        handle: str = self._comm.get_init_handle()
-
-        # Publish our handle so every other rank can read it.
-        store.set(f"torchcomms_init_handle/{rank}", handle)
-
-        # Collect handles from all ranks (ordered list → rank = index).
-        all_handles: list[str] = []
-        for i in range(world_size):
-            key = f"torchcomms_init_handle/{i}"
-            store.wait([key])
-            all_handles.append(store.get(key).decode("utf-8"))
-
-        work = self._comm.reconfigure(
-            uuid=quorum_id,
-            init_handles=all_handles,
-            timeout=self._timeout,
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
+        handles = opts.handles
+        if not isinstance(handles, list):
+            raise ValueError("torchcomms process groups require ordered handles")
+        work = self.comm.reconfigure(
+            uuid=opts.uuid,
+            init_handles=handles,
+            timeout=opts.timeout or self._timeout,
         )
         work.wait()
 
-        self._world_size = world_size
+        self._world_size = len(handles)
+        return _DummyWork(None)
 
     @property
     def comm(self) -> "torchcomms.TorchComm":

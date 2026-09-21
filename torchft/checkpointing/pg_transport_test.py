@@ -21,7 +21,11 @@ from torchft.checkpointing.transport_test import (
     run_multi_recovery_test,
     TIMEOUT_REGEX,
 )
-from torchft.process_group import ProcessGroupBabyNCCL, ProcessGroupGloo
+from torchft.process_group import (
+    ProcessGroupBabyNCCL,
+    ProcessGroupGloo,
+    reconfigure_with_store,
+)
 
 
 class PGTransportTest(TestCase):
@@ -35,11 +39,8 @@ class PGTransportTest(TestCase):
 
         def init(rank: int, world_size: int) -> CheckpointTransport[dict[str, object]]:
             pg = ProcessGroupGloo()
-            pg.configure(
-                store_addr=f"localhost:{store.port}/prefix",
-                replica_id="0",
-                rank=rank,
-                world_size=world_size,
+            reconfigure_with_store(
+                pg, f"localhost:{store.port}/prefix", rank, world_size
             )
 
             return PGTransport[dict[str, object]](
@@ -61,11 +62,8 @@ class PGTransportTest(TestCase):
             torch.cuda.set_device(rank)
 
             pg = ProcessGroupBabyNCCL(timeout=timeout)
-            pg.configure(
-                store_addr=f"localhost:{store.port}/prefix",
-                replica_id="0",
-                rank=rank,
-                world_size=world_size,
+            reconfigure_with_store(
+                pg, f"localhost:{store.port}/prefix", rank, world_size
             )
 
             return PGTransport[dict[str, object]](pg, timeout=timeout, device=device)
@@ -88,11 +86,8 @@ class PGTransportTest(TestCase):
             torch.cuda.set_device(rank)
 
             pg = ProcessGroupBabyNCCL(timeout=timeout)
-            pg.configure(
-                store_addr=f"localhost:{store.port}/prefix",
-                replica_id="0",
-                rank=rank,
-                world_size=world_size,
+            reconfigure_with_store(
+                pg, f"localhost:{store.port}/prefix", rank, world_size
             )
 
             return PGTransport[dict[str, object]](
@@ -114,12 +109,7 @@ class PGTransportTimeoutTest(TestCase):
 
         def init(rank: int) -> ProcessGroupGloo:
             pg = ProcessGroupGloo(timeout=timedelta(seconds=10))
-            pg.configure(
-                store_addr=f"127.0.0.1:{self.store.port}/timeout",
-                replica_id="0",
-                rank=rank,
-                world_size=2,
-            )
+            reconfigure_with_store(pg, f"127.0.0.1:{self.store.port}/timeout", rank, 2)
             return pg
 
         with ThreadPoolExecutor(max_workers=2) as executor:

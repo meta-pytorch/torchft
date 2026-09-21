@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
+import json
 import os
 import sys
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -47,8 +48,20 @@ from torchft.process_group import (
     ProcessGroupGloo,
     ProcessGroupNCCL,
     ProcessGroupWrapper,
+    reconfigure_with_store,
+    ReconfigureOptions,
 )
 from torchft.work import _DummyWork
+
+
+def _reconfigure_with_missing_peer(pg: ProcessGroup) -> None:
+    opts = ReconfigureOptions()
+    opts.uuid = 1
+    opts.handles = [
+        pg.get_reconfigure_handle(),
+        json.dumps({"id": "missing", "store": "unused", "global_rank": None}),
+    ]
+    pg.reconfigure(opts).wait()
 
 
 def dummy_init_pg() -> None:
@@ -507,7 +520,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupGloo()
-        pg.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         self.assertEqual(pg.size(), 1)
 
@@ -530,16 +543,11 @@ class ProcessGroupTest(TestCase):
         m(torch.rand(2, 3, device=device))
 
     def test_gloo_timeout(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupGloo(timeout=timedelta(seconds=0.01))
         with self.assertRaisesRegex(
             RuntimeError, "(timeout after 10ms|Socket Timeout)"
         ):
-            pg.configure(store_addr, "0", 0, 2)
+            _reconfigure_with_missing_peer(pg)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
@@ -551,7 +559,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupNCCL()
-        pg.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         self.assertEqual(pg.size(), 1)
 
@@ -563,7 +571,7 @@ class ProcessGroupTest(TestCase):
 
         # reconfigure
         store_addr = f"localhost:{store.port}/prefix2"
-        pg.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         _test_pg(pg, torch.tensor([2], device=device))
 
@@ -586,7 +594,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupNCCL()
-        pg.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         t = torch.tensor([2], device=device)
         pg.allreduce([t], ReduceOp.SUM).wait()
@@ -606,24 +614,27 @@ class ProcessGroupTest(TestCase):
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
-        store_addr = f"localhost:{store.port}/prefix"
+        dead_store_addr = f"localhost:{store.port}"
         del store
 
         pg = ProcessGroupNCCL(timeout=timedelta(seconds=0.01))
 
+        # The missing peer is rank 0 so rendezvous uses its dead store.
+        opts = ReconfigureOptions()
+        opts.uuid = 1
+        opts.handles = [
+            json.dumps(
+                {"id": "missing", "store": dead_store_addr, "global_rank": None}
+            ),
+            pg.get_reconfigure_handle(),
+        ]
         with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
-            pg.configure(store_addr, "0", 0, 2)
+            pg.reconfigure(opts).wait()
 
     def test_baby_gloo_timeout(self) -> None:
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-
-        store_addr = f"localhost:{store.port}/prefix"
-
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=0.01))
         with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
-            a.configure(store_addr, "0", 0, 2)
+            _reconfigure_with_missing_peer(a)
 
     def test_reconfigure_baby_process_group(self) -> None:
         store = TCPStore(
@@ -632,13 +643,13 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         a = ProcessGroupBabyGloo()
-        a.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(a, store_addr, 0, 1)
         future_thread_1 = a._future_thread
         future_pipe_1 = a._future_pipe
         p_1 = a._p
 
         store_addr = f"localhost:{store.port}/prefix2"
-        a.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(a, store_addr, 0, 1)
         future_thread_2 = a._future_thread
         future_pipe_2 = a._future_pipe
         p_2 = a._p
@@ -670,7 +681,7 @@ class ProcessGroupTest(TestCase):
 
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         try:
-            a.configure(store_addr, "0", 0, 1)
+            reconfigure_with_store(a, store_addr, 0, 1)
 
             _test_pg(a)
 
@@ -701,7 +712,7 @@ class ProcessGroupTest(TestCase):
 
         a = ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
         try:
-            a.configure(store_addr, "0", 0, 1)
+            reconfigure_with_store(a, store_addr, 0, 1)
 
             _test_pg(a, torch.randn((2, 3), device="cuda"))
 
@@ -739,7 +750,7 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         pg = ProcessGroupGloo().register("test_func_col")
-        pg.configure(store_addr, "0", 0, 1)
+        reconfigure_with_store(pg, store_addr, 0, 1)
 
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
@@ -760,8 +771,10 @@ class ProcessGroupTest(TestCase):
         wrapper = ProcessGroupWrapper(pg=pg)
         self.assertIs(wrapper.parent, pg)
 
-        wrapper.configure("addr", "0", 0, 1)
-        self.assertEqual(pg.configure_count, 1)
+        opts = ReconfigureOptions()
+        opts.handles = [wrapper.get_reconfigure_handle()]
+        wrapper.reconfigure(opts).wait()
+        self.assertEqual(pg.reconfigure_count, 1)
 
         self.assertEqual(repr(wrapper), "ProcessGroupWrapper(pg=ProcessGroupDummy())")
 
@@ -865,7 +878,7 @@ class MultiPgBaseTest(TestCase):
             if torch.accelerator.is_available():
                 torch.accelerator.set_device_idx(rank)
             pg = cls._create_pg(cls.BACKEND)
-            pg.configure(cls.store_addr, "0", rank, cls.WORLD_SIZE)
+            reconfigure_with_store(pg, cls.store_addr, rank, cls.WORLD_SIZE)
             return pg
 
         futures = [cls.executor.submit(init_pg, rank) for rank in range(cls.WORLD_SIZE)]
@@ -954,7 +967,7 @@ class MultiPgBaseTest(TestCase):
             # Re-configure the PG to exclude the fault rank
             new_store_addr = f"localhost:{self.store.port}/reconfig_{collective}"
 
-            pg.configure(new_store_addr, "0", rank, self.WORLD_SIZE)
+            reconfigure_with_store(pg, new_store_addr, rank, self.WORLD_SIZE)
 
             # run the same collective again successfully
             t2 = torch.tensor([rank + 1], device=dev)

@@ -661,6 +661,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -679,6 +680,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -736,6 +738,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -776,6 +779,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -824,6 +828,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -846,6 +851,7 @@ mod tests {
                 shrink_only: false,
                 data: String::new(),
                 commit_failures: 0,
+                reconfigure_handles: vec![],
             }],
             created: Some(SystemTime::now().into()),
         });
@@ -866,6 +872,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -911,6 +918,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "b".to_string(),
@@ -921,6 +929,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             ],
             created: Some(SystemTime::now().into()),
@@ -939,6 +948,7 @@ mod tests {
                     shrink_only: true,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -958,6 +968,7 @@ mod tests {
                     shrink_only: true,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -1008,6 +1019,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 }),
             });
 
@@ -1055,6 +1067,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             },
         );
@@ -1082,6 +1095,7 @@ mod tests {
             shrink_only: false,
             data: String::new(),
             commit_failures: 0,
+            reconfigure_handles: vec![],
         }];
         let b = vec![QuorumMember {
             replica_id: "1".to_string(),
@@ -1092,6 +1106,7 @@ mod tests {
             shrink_only: false,
             data: String::new(),
             commit_failures: 0,
+            reconfigure_handles: vec![],
         }];
 
         // replica_id is the same
@@ -1106,6 +1121,7 @@ mod tests {
             shrink_only: false,
             data: String::new(),
             commit_failures: 0,
+            reconfigure_handles: vec![],
         }];
         // replica_id changed
         assert!(quorum_changed(&a, &c));
@@ -1123,6 +1139,7 @@ mod tests {
                 shrink_only,
                 data: String::new(),
                 commit_failures: 0,
+                reconfigure_handles: vec![],
             }
         }
 
@@ -1236,6 +1253,7 @@ mod tests {
                 shrink_only: false,
                 data: String::new(),
                 commit_failures,
+                reconfigure_handles: vec![],
             }
         }
 
