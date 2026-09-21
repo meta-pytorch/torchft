@@ -173,7 +173,10 @@ class PGTransport(CheckpointTransport[T]):
 
     Args:
         pg: the process group to use for communication
-        timeout: the timeout for communication
+        timeout: the default timeout for each communication wait. An explicit
+            timeout passed to send_checkpoint or recv_checkpoint overrides this
+            value. This is not a deadline for the entire checkpoint transfer and
+            does not change the process group's own timeout.
         device: the device to use for tensors
         state_dict: if specified this function will be called to do an inplace
             receive into the returned state_dict. This is much faster than
@@ -200,8 +203,15 @@ class PGTransport(CheckpointTransport[T]):
         pass
 
     def send_checkpoint(
-        self, dst_ranks: list[int], step: int, state_dict: T, timeout: timedelta
+        self,
+        dst_ranks: list[int],
+        step: int,
+        state_dict: T,
+        timeout: Optional[timedelta] = None,
     ) -> None:
+        """Send a checkpoint, using the constructor timeout if timeout is None."""
+        wait_timeout: timedelta = self._timeout if timeout is None else timeout
+
         with _timeit("preparing state_dict"):
             meta, tensors = _prepare_state_dict(state_dict, step, device=self._device)
 
@@ -226,28 +236,35 @@ class PGTransport(CheckpointTransport[T]):
                 # can free the memory to avoid OOMs
                 if original_device == torch.device("cpu"):
                     for w in work:
-                        w.wait(timeout)
+                        w.wait(wait_timeout)
                     work = []
 
             for w in work:
-                w.wait(timeout)
+                w.wait(wait_timeout)
 
     def recv_checkpoint(
-        self, src_rank: int, metadata: str, step: int, timeout: timedelta
+        self,
+        src_rank: int,
+        metadata: str,
+        step: int,
+        timeout: Optional[timedelta] = None,
     ) -> T:
+        """Receive a checkpoint, using the constructor timeout if timeout is None."""
+        wait_timeout: timedelta = self._timeout if timeout is None else timeout
+
         state_dict = self._state_dict() if self._state_dict else {}
         state_dict_leaves, _ = tree_flatten_with_path(state_dict)
 
         dst_tensors: dict[KeyPath, object] = dict(state_dict_leaves)
 
         len_t = torch.zeros(1, dtype=torch.int64, device=self._device)
-        self._pg.recv([len_t], src_rank, tag=1).wait(timeout)
+        self._pg.recv([len_t], src_rank, tag=1).wait(wait_timeout)
         length = cast(int, len_t.item())
 
         assert length > 0, f"invalid metadata length {length=}"
 
         buf = torch.empty(length, dtype=torch.uint8, device=self._device)
-        self._pg.recv([buf], src_rank, tag=2).wait(timeout)
+        self._pg.recv([buf], src_rank, tag=2).wait(wait_timeout)
 
         meta: _StateDictMeta = pickle.loads(buf.cpu().numpy().tobytes())
         assert meta.step == step
@@ -277,7 +294,7 @@ class PGTransport(CheckpointTransport[T]):
 
             if inplace is None:
                 # if not inplace we need to copy it to CPU to avoid OOMing
-                work.wait(timeout)
+                work.wait(wait_timeout)
                 t = t.cpu()
             else:
                 works.append(work)
@@ -301,6 +318,6 @@ class PGTransport(CheckpointTransport[T]):
                 values.append(v)
 
         for work in works:
-            work.wait(timeout)
+            work.wait(wait_timeout)
 
         return tree_unflatten(values, meta.treespec)
