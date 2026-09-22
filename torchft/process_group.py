@@ -331,10 +331,10 @@ class ProcessGroup(BaseProcessGroup):
             return self
 
         devices = ["cpu"]
-        if torch.cuda.is_available():
-            devices.append("cuda")
-        elif torch.xpu.is_available():
-            devices.append("xpu")
+        if torch.accelerator.is_available():
+            accelerator = torch.accelerator.current_accelerator().type
+            if accelerator not in devices:
+                devices.append(accelerator)
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
 
         return group_name
@@ -498,10 +498,10 @@ class ProcessGroupWrapper(ProcessGroup):
             else:
                 backend = None
                 try:
-                    if torch.cuda.is_available():
-                        backend = pg._get_backend(torch.device("cuda"))
-                    elif torch.xpu.is_available():
-                        backend = pg._get_backend(torch.device("xpu"))
+                    if torch.accelerator.is_available():
+                        backend = pg._get_backend(
+                            torch.accelerator.current_accelerator()
+                        )
                 except RuntimeError:
                     backend = None
                 if backend is not None and hasattr(backend, "abort"):
