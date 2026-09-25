@@ -6,14 +6,19 @@
 
 from typing import Dict
 from unittest import TestCase
-from unittest.mock import create_autospec, MagicMock
+from unittest.mock import create_autospec, MagicMock, patch
 
 import torch
 from parameterized import parameterized
 from torch import nn, optim, Tensor
 from torch.distributed.distributed_c10d import Work
 from torch.distributed.tensor import DTensor
-from torchft.local_sgd import DiLoCo, extract_local_tensor, LocalSGD
+from torchft.local_sgd import (
+    _copy_local_tensor_to_parameter,
+    DiLoCo,
+    extract_local_tensor,
+    LocalSGD,
+)
 from torchft.manager import Manager
 from torchft.work import _DummyWork
 
@@ -69,6 +74,84 @@ class TinyModel(nn.Module):
 
 
 class LocalSGDTest(TestCase):
+    def test_cpu_offload_commits_averaged_parameters(self) -> None:
+        model = TinyModel()
+        optimizer = optim.SGD(model.parameters())
+        manager = create_manager()
+        manager.should_commit.return_value = True
+        expected = [parameter.detach().clone() + 10 for parameter in model.parameters()]
+
+        def average(tensor: torch.Tensor) -> Work:
+            tensor.add_(10)
+            return _DummyWork(tensor)
+
+        manager.allreduce.side_effect = average
+        local_sgd = LocalSGD(
+            manager,
+            model,
+            optimizer,
+            sync_every=1,
+            offload_averaged_parameters_to_cpu=True,
+        )
+
+        local_sgd._perform_sync()
+
+        for parameter, expected_parameter in zip(model.parameters(), expected):
+            torch.testing.assert_close(parameter, expected_parameter)
+        self.assertEqual(manager.allreduce.call_count, 2)
+        manager.should_commit.assert_called_once_with()
+
+    def test_cpu_offload_discards_uncommitted_parameters(self) -> None:
+        model = TinyModel()
+        optimizer = optim.SGD(model.parameters())
+        manager = create_manager()
+        manager.should_commit.return_value = False
+        expected = [parameter.detach().clone() for parameter in model.parameters()]
+
+        def average(tensor: torch.Tensor) -> Work:
+            tensor.add_(10)
+            return _DummyWork(tensor)
+
+        manager.allreduce.side_effect = average
+        local_sgd = LocalSGD(
+            manager,
+            model,
+            optimizer,
+            sync_every=1,
+            offload_averaged_parameters_to_cpu=True,
+        )
+
+        local_sgd._perform_sync()
+
+        for parameter, expected_parameter in zip(model.parameters(), expected):
+            torch.testing.assert_close(parameter, expected_parameter)
+        self.assertEqual(manager.allreduce.call_count, 2)
+        manager.should_commit.assert_called_once_with()
+
+    @patch("torchft.local_sgd.DTensor.from_local")
+    def test_copy_local_tensor_reconstructs_dtensor(
+        self, from_local: MagicMock
+    ) -> None:
+        parameter = MagicMock(spec=DTensor)
+        parameter.to_local.return_value.device = torch.device("cpu")
+        parameter.device_mesh = MagicMock()
+        parameter.placements = (MagicMock(),)
+        parameter.shape = torch.Size([2])
+        parameter.stride.return_value = (1,)
+        local_tensor = torch.tensor([4.0, 5.0])
+        reconstructed = from_local.return_value
+
+        _copy_local_tensor_to_parameter(parameter, local_tensor)
+
+        from_local.assert_called_once_with(
+            local_tensor,
+            parameter.device_mesh,
+            parameter.placements,
+            shape=parameter.shape,
+            stride=(1,),
+        )
+        parameter.data.copy_.assert_called_once_with(reconstructed)
+
     def test_local_sgd_healthy(self) -> None:
         model = SimpleModel()
         optimizer = optim.SGD(model.parameters())
