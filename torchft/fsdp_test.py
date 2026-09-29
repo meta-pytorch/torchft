@@ -41,6 +41,9 @@ class FSDPTest(unittest.TestCase):
         os.environ["RANK"] = str(group_rank)
         os.environ["WORLD_SIZE"] = str(group_size)
 
+        # Replica-local ranks do not identify the physical CUDA device.
+        dist.init_process_group(device_id=torch.device("cuda", rank))
+
         manager = Mock(spec=Manager)
         pg: ProcessGroupGloo = Mock(spec=ProcessGroupGloo)
         device_mesh = init_device_mesh(
@@ -73,6 +76,7 @@ class FSDPTest(unittest.TestCase):
         shard_model.apply(apply_set_all_reduce_hook)
         # pyrefly: ignore [not-callable]
         shard_model(batch).mean().backward()
+        dist.destroy_process_group()
 
     # pyre-ignore[56]: Pyre was not able to infer the type of argument
     @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
