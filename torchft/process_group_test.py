@@ -727,7 +727,11 @@ class ProcessGroupTest(TestCase):
         m(torch.rand(2, 3))
 
     def test_functional_collectives(self) -> None:
+        # Registration must not inherit another test's CUDA-bound default group.
+        if dist.is_initialized():
+            dist.destroy_process_group()
         dummy_init_pg()
+        self.addCleanup(dist.destroy_process_group)
 
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
