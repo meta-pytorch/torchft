@@ -14,7 +14,6 @@ Manager to provide fault tolerance.
 
 import sys
 from typing import cast, Optional, TYPE_CHECKING
-from unittest.mock import patch
 
 import torch
 import torch.distributed as dist

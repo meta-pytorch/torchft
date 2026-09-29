@@ -26,7 +26,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing.connection import Connection
 from typing import (
-    Any,
     Callable,
     cast,
     Dict,
@@ -702,13 +701,12 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         """
         raise RuntimeError("ProcessGroupGloo does not support reduce_scatter.")
 
-    # pyre-fixme[15]: inconsistent override
     def reduce_scatter_tensor_coalesced(
         self,
         output_tensors: List[torch.Tensor],
         input_tensors: List[torch.Tensor],
         opts: ReduceScatterOptions,
-    ) -> None:
+    ) -> Work:
         """
         This function is a placeholder for the reduce_scatter_tensor_coalesced
         operation in the ProcessGroupGloo class.

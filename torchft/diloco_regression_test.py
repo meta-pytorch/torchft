@@ -14,7 +14,6 @@ import threading
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import timedelta
-from pathlib import Path
 from typing import Any, Callable, cast, Dict, List, Optional, overload, Tuple
 from unittest import skipIf, TestCase
 
