@@ -17,7 +17,6 @@ USE_STREAMING = os.getenv("USE_STREAMING", "False") == "True"
 USE_NCCL = os.getenv("USE_NCCL", "False") == "True"
 
 import torch
-import torch.nn.functional as F
 from torch import nn, optim
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.pipelining import pipeline, SplitPoint

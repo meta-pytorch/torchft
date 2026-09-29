@@ -8,7 +8,6 @@ import argparse
 import concurrent.futures
 import json
 import logging
-import os
 import subprocess
 import sys
 from enum import Enum

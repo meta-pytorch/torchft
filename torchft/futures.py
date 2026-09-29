@@ -10,7 +10,7 @@ import queue
 import sys
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Callable, Generator, Optional, TypeVar
 from unittest.mock import Mock
