@@ -186,6 +186,7 @@ impl ManagerClient {
         init_sync: bool,
         commit_failures: i64,
         timeout: Duration,
+        reconfigure_handle: String,
     ) -> Result<QuorumResult, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
@@ -195,6 +196,7 @@ impl ManagerClient {
                 shrink_only,
                 init_sync,
                 commit_failures,
+                reconfigure_handle,
             });
 
             // This timeout is processed on the server side so we also enable
@@ -216,6 +218,7 @@ impl ManagerClient {
                 max_world_size: resp.max_world_size,
                 heal: resp.heal,
                 replica_ids: resp.replica_ids,
+                reconfigure_handles: resp.reconfigure_handles,
             })
         })
     }
@@ -297,6 +300,7 @@ struct QuorumResult {
     max_world_size: i64,
     heal: bool,
     replica_ids: Vec<String>,
+    reconfigure_handles: Vec<String>,
 }
 
 #[pymethods]
@@ -316,6 +320,7 @@ impl QuorumResult {
             max_world_size: 1,
             heal: false,
             replica_ids: Vec::new(),
+            reconfigure_handles: Vec::new(),
         }
     }
 }
@@ -558,6 +563,7 @@ impl LighthouseClient {
                     shrink_only,
                     data: data_string,
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 }),
             });
 

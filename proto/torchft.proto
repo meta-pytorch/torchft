@@ -44,6 +44,8 @@ message QuorumMember {
   int64 commit_failures = 8;
   // User passing in data stored as JSON string.
   string data = 7;
+  // Process group reconfigure handles, indexed by group rank.
+  repeated string reconfigure_handles = 9;
 }
 
 message Quorum {
@@ -79,6 +81,7 @@ message ManagerQuorumRequest {
   bool shrink_only = 4;
   bool init_sync = 5;
   int64 commit_failures = 6;
+  string reconfigure_handle = 7;
 }
 
 message ManagerQuorumResponse {
@@ -97,6 +100,8 @@ message ManagerQuorumResponse {
   bool heal = 11;
   int64 commit_failures = 12;
   repeated string replica_ids = 13;
+  // This group rank's reconfigure handles, ordered by replica rank.
+  repeated string reconfigure_handles = 14;
 }
 
 message CheckpointMetadataRequest {

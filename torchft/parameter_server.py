@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler
 
 from torch.distributed import TCPStore
 from torchft.http import _IPv6HTTPServer
-from torchft.process_group import ProcessGroup
+from torchft.process_group import ProcessGroup, reconfigure_with_store
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -162,14 +162,14 @@ class ParameterServer(ABC):
 
         pg = cls.new_process_group()
         # client is always rank 1
-        pg.configure(store_addr, replica_id="0", rank=1, world_size=2)
+        reconfigure_with_store(pg, store_addr, 1, 2)
 
         return pg
 
     def _handle_session(self, session_id: str, store_addr: str) -> None:
         pg = self.new_process_group()
         # paramter server is always rank 0
-        pg.configure(store_addr, replica_id="0", rank=0, world_size=2)
+        reconfigure_with_store(pg, store_addr, 0, 2)
 
         self.forward(session_id, pg)
 

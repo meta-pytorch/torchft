@@ -16,13 +16,16 @@ places that would accept a standard process group. As these can change size at
 runtime users need to take care to not assume a static rank or world size.
 """
 
+import json
 import logging
 import os
+import socket
 import threading
 import time
+import uuid
 import warnings
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from multiprocessing.connection import Connection
 from typing import (
@@ -32,6 +35,7 @@ from typing import (
     Generator,
     List,
     Optional,
+    Set,
     Tuple,
     TYPE_CHECKING,
     TypeVar,
@@ -71,6 +75,7 @@ from torchft.utils import get_stream_context, record_event, synchronize
 from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
+    from torch.distributed.distributed_c10d import GroupName
     from torchft.manager import Manager
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -131,12 +136,101 @@ def create_store_client(store_addr: str, timeout: timedelta) -> Store:
     return store
 
 
+try:
+    from torch._C._distributed_c10d import ReconfigureOptions
+except ImportError:
+    # Shim for PyTorch < 2.14 which lacks native reconfiguration.
+    @dataclass
+    class ReconfigureOptions:
+        uuid: int = 0
+        handles: Union[List[str], Set[str]] = field(default_factory=list)
+        timeout: Optional[timedelta] = None
+        hints: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _Rendezvous:
+    """Rank assignment and store for a torchft process group reconfiguration."""
+
+    store_addr: str
+    rank: int
+    world_size: int
+    uuid: int
+    global_ranks: Optional[List[int]]
+
+
+def _rendezvous(opts: ReconfigureOptions, handle_id: str) -> _Rendezvous:
+    """
+    Parses ordered torchft reconfigure handles. The rank is this group's index
+    and all ranks rendezvous on the first handle's store, namespaced by the
+    communicator UUID.
+    """
+    handles = opts.handles
+    if not isinstance(handles, list):
+        raise ValueError("torchft process groups require ordered handles")
+    peers = [json.loads(handle) for handle in handles]
+    global_ranks = [peer["global_rank"] for peer in peers]
+    return _Rendezvous(
+        store_addr=f"{peers[0]['store']}/torchft/{opts.uuid}",
+        rank=[peer["id"] for peer in peers].index(handle_id),
+        world_size=len(peers),
+        uuid=opts.uuid,
+        global_ranks=None if None in global_ranks else global_ranks,
+    )
+
+
+_RECONFIGURE_TIMEOUT: timedelta = timedelta(seconds=60)
+
+
+def reconfigure_with_store(
+    pg: BaseProcessGroup,
+    store_addr: str,
+    rank: int,
+    world_size: int,
+    timeout: timedelta = _RECONFIGURE_TIMEOUT,
+) -> None:
+    """
+    Exchanges reconfigure handles through a store and reconfigures ``pg``.
+    This is for use without a :class:`~torchft.manager.Manager`, which
+    exchanges handles via the lighthouse.
+
+    Every call must use a unique prefixed store address. I.e.
+    localhost:1234/my/prefix/1
+
+    Args:
+        pg: the process group to reconfigure
+        store_addr: address of the store to exchange handles on
+        rank: rank of this process
+        world_size: world size of the new process group
+        timeout: timeout for the exchange and reconfiguration
+    """
+    store = create_store_client(store_addr, timeout)
+    store.set(f"handle/{rank}", pg.get_reconfigure_handle())
+    if rank == 0:
+        store.set("uuid", str(uuid.uuid4().int & ((1 << 63) - 1)))
+    keys = ["uuid", *(f"handle/{peer}" for peer in range(world_size))]
+    store.wait(keys, timeout)
+    communicator_id, *handles = store.multi_get(keys)
+    opts = ReconfigureOptions()
+    opts.uuid = int(communicator_id)
+    opts.handles = [handle.decode("utf-8") for handle in handles]
+    opts.timeout = timeout
+    # pyre-ignore[6]: may be the ReconfigureOptions shim on older torch
+    pg.reconfigure(opts).wait()
+
+
 class ProcessGroup(BaseProcessGroup):
     def __init__(self, *args: object, **kwargs: object) -> None:
         # pyre-fixme[6]: got object
         super().__init__(*args, **kwargs)
 
         self._group_name: Optional[str] = None
+        self._reconfigure_id: str = uuid.uuid4().hex
+        self._rendezvous_store: Optional[TCPStore] = None
+        self._replica_id: Optional[str] = None
+        self._group_rank: Optional[int] = None
+        self._group_world_size: Optional[int] = None
+        self._global_rank: Optional[int] = None
 
     # pyre-fixme[14]: inconsistent override
     def allgather(
@@ -279,35 +373,65 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    def configure(
+    @property
+    # pyrefly: ignore [bad-override]
+    def supports_reconfigure(self) -> bool:
+        return True
+
+    def set_rank_info(
         self,
-        store_addr: str,
         replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
+        group_rank: int,
+        group_world_size: int,
+        global_rank: Optional[int] = None,
     ) -> None:
         """
-        This reconfigures the ProcessGroup to use a new store, rank and world size.
-
-        Every time this is called it must be provided with a unique prefixed
-        store address. I.e. localhost:1234/my/prefix/1
-
-        This function will block until the underlying ProcessGroup is created.
-        If an error occurs this will throw.
+        Sets this rank's identity. The global rank is included in the
+        reconfigure handle for flight recorder.
 
         Args:
-            store_addr: address of the store to use
             replica_id: the replica_id for this group
-            rank: rank of this process
-            world_size: world size of this process group
-            quorum_id: current quorum's identifier
             group_rank: local rank within the replica group
             group_world_size: the number of ranks within a replica
-            global_ranks: the global ranks part of this process group
+            global_rank: the global rank of this process
+        """
+        self._replica_id = replica_id
+        self._group_rank = group_rank
+        self._group_world_size = group_world_size
+        self._global_rank = global_rank
+
+    def _handle_id(self) -> str:
+        return self._reconfigure_id
+
+    def get_reconfigure_handle(self) -> str:
+        """
+        Returns a handle identifying this group, its rendezvous store and rank
+        info. The store is hosted by this process group.
+        """
+        store = self._rendezvous_store
+        if store is None:
+            store = self._rendezvous_store = TCPStore(
+                host_name=socket.gethostname(),
+                port=0,
+                is_master=True,
+                wait_for_workers=False,
+            )
+        return json.dumps(
+            {
+                "id": self._handle_id(),
+                "store": f"{socket.gethostname()}:{store.port}",
+                "global_rank": self._global_rank,
+            }
+        )
+
+    # pyre-fixme[14]: inconsistent override
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
+        """
+        Reconfigures the process group with the ordered handles in ``opts``.
+        This process group's rank is the index of its own handle.
+
+        This blocks until the underlying process group is created. If an
+        error occurs this will throw.
         """
         raise NotImplementedError("not implemented")
 
@@ -419,16 +543,13 @@ class ProcessGroupWrapper(ProcessGroup):
     def __init__(
         self,
         timeout: timedelta = timedelta(seconds=60),
-        pg: Optional[ProcessGroup] = None,
+        pg: Optional[BaseProcessGroup] = None,
     ) -> None:
         super().__init__(0, 1)
         self._pg: Optional[BaseProcessGroup] = pg
         self._timeout = timeout
-        self._replica_id: str | None = None
         self._rank: int | None = None
-        self._quorum_id: int | None = None
-        self._group_rank: int | None = None
-        self._group_world_size: int | None = None
+        self._uuid: int | None = None
         self._global_ranks: list[int] | None = None
 
         self.errors_logger: logging.Logger = logging.getLogger("torchft_errors")
@@ -440,43 +561,46 @@ class ProcessGroupWrapper(ProcessGroup):
 
         raise NotImplementedError("not implemented")
 
-    def configure(
+    def set_rank_info(
         self,
-        store_addr: str,
         replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
+        group_rank: int,
+        group_world_size: int,
+        global_rank: Optional[int] = None,
     ) -> None:
+        super().set_rank_info(replica_id, group_rank, group_world_size, global_rank)
         pg = self._pg
-        self._replica_id = replica_id
-        self._quorum_id = quorum_id
-        self._group_rank = group_rank
-        self._group_world_size = group_world_size
-        self._rank = rank
-        self._global_ranks = global_ranks
         if isinstance(pg, ProcessGroup):
-            pg.configure(
-                store_addr,
-                replica_id,
-                rank,
-                world_size,
-                quorum_id,
-                group_rank,
-                group_world_size,
-                global_ranks,
-            )
-            return
+            pg.set_rank_info(replica_id, group_rank, group_world_size, global_rank)
+
+    def _handle_id(self) -> str:
+        pg = self._pg
+        if isinstance(pg, ProcessGroup):
+            return pg._handle_id()
+        return super()._handle_id()
+
+    def get_reconfigure_handle(self) -> str:
+        pg = self._pg
+        if isinstance(pg, ProcessGroup):
+            return pg.get_reconfigure_handle()
+        return super().get_reconfigure_handle()
+
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
+        rendezvous = _rendezvous(opts, self._handle_id())
+        self._rank = rendezvous.rank
+        self._uuid = rendezvous.uuid
+        self._global_ranks = rendezvous.global_ranks
+        pg = self._pg
+        if isinstance(pg, ProcessGroup):
+            return pg.reconfigure(opts)
 
         # abort if already initialized
         self.abort(errored=False)
 
-        store = create_store_client(store_addr, timeout=self._timeout)
+        store = create_store_client(rendezvous.store_addr, timeout=self._timeout)
 
-        self._pg = self._create_pg(store, rank, world_size)
+        self._pg = self._create_pg(store, rendezvous.rank, rendezvous.world_size)
+        return _DummyWork(None)
 
     def abort(self, errored: bool = True) -> None:
         if errored:
@@ -486,7 +610,7 @@ class ProcessGroupWrapper(ProcessGroup):
                     "job_id": os.environ.get("JOB_ID", "unknown"),
                     "replica_id": self._replica_id,
                     "rank": self._rank,
-                    "quorum_id": self._quorum_id,
+                    "uuid": self._uuid,
                     "error": "process_group_abort",
                 },
             )
@@ -663,8 +787,10 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         if self._global_ranks:
             backend_class.options.global_ranks_in_group = self._global_ranks
         if self._group_rank and self._group_world_size:
-            # pyrefly: ignore [bad-assignment]
-            backend_class.options.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
+            backend_class.options.group_name = cast(
+                "GroupName",
+                f"torchft_{self._uuid}_rank_{self._group_rank % self._group_world_size}",
+            )
 
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
@@ -870,8 +996,10 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         if self._global_ranks:
             opts.global_ranks_in_group = self._global_ranks
         if self._group_rank and self._group_world_size:
-            # pyrefly: ignore [bad-assignment]
-            opts.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
+            opts.group_name = cast(
+                "GroupName",
+                f"torchft_{self._uuid}_rank_{self._group_rank % self._group_world_size}",
+            )
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
@@ -1035,20 +1163,11 @@ class ProcessGroupDummy(ProcessGroup):
         self.wait_count = 0
         self.get_future_count = 0
         self._work: List[Work] = []
-        self.configure_count = 0
+        self.reconfigure_count = 0
 
-    def configure(
-        self,
-        store_addr: str,
-        replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
-    ) -> None:
-        self.configure_count += 1
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
+        self.reconfigure_count += 1
+        return _DummyWork(None)
 
     def allgather(
         self,
@@ -1196,7 +1315,7 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
     avoid having to modify modeling code to support error handling.
 
     After an error occurs all future operations will be skipped until the
-    process group is reconfigured via ``configure``.
+    process group is reconfigured via ``reconfigure``.
     """
 
     def __init__(self, pg: ProcessGroup) -> None:
@@ -1204,35 +1323,16 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
 
         self._error: Optional[Exception] = None
 
-    def configure(
-        self,
-        store_addr: str,
-        replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
-    ) -> None:
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
         self._error = None
 
-        super().configure(
-            store_addr,
-            replica_id,
-            rank,
-            world_size,
-            quorum_id,
-            group_rank,
-            group_world_size,
-            global_ranks,
-        )
+        return super().reconfigure(opts)
 
     def report_error(self, e: Exception) -> None:
         """
         Report an error to this process group. This will cause all future
         operations to be skipped until the process group is reconfigured via
-        ``configure``.
+        ``reconfigure``.
 
         Args:
             e: exception to report
@@ -1277,29 +1377,10 @@ class FakeProcessGroupWrapper(ProcessGroupWrapper):
 
         self._future_error: Optional[Exception] = None
 
-    def configure(
-        self,
-        store_addr: str,
-        replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
-    ) -> None:
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
         self._future_error = None
 
-        super().configure(
-            store_addr,
-            replica_id,
-            rank,
-            world_size,
-            quorum_id,
-            group_rank,
-            group_world_size,
-            global_ranks,
-        )
+        return super().reconfigure(opts)
 
     def report_future_error(self, e: Exception) -> None:
         """
@@ -1364,7 +1445,10 @@ class ManagedProcessGroup(ProcessGroupWrapper):
         return self._manager.num_participants()
 
     def getBackendName(self) -> str:
-        return self._manager._pg.getBackendName()
+        pg = self._manager._pg
+        if isinstance(pg, ProcessGroup):
+            return pg.getBackendName()
+        return pg._get_backend_name()
 
 
 class _BabyWork(Work):
@@ -1512,18 +1596,9 @@ class ProcessGroupBaby(ProcessGroup):
         if self._p is not None:
             self._p.kill()
 
-    def configure(
-        self,
-        store_addr: str,
-        replica_id: str,
-        rank: int,
-        world_size: int,
-        quorum_id: Optional[int] = None,
-        group_rank: Optional[int] = None,
-        group_world_size: Optional[int] = None,
-        global_ranks: Optional[list[int]] = None,
-    ) -> None:
-        self._world_size = world_size
+    def reconfigure(self, opts: ReconfigureOptions) -> Work:
+        rendezvous = _rendezvous(opts, self._handle_id())
+        self._world_size = rendezvous.world_size
 
         self.shutdown()
 
@@ -1544,9 +1619,9 @@ class ProcessGroupBaby(ProcessGroup):
         self._p = p = ctx.Process(
             target=self._worker,
             args=(
-                store_addr,
-                rank,
-                world_size,
+                rendezvous.store_addr,
+                rendezvous.rank,
+                rendezvous.world_size,
                 req_remote,
                 future_remote,
                 curr_device,
@@ -1569,6 +1644,7 @@ class ProcessGroupBaby(ProcessGroup):
         # fetch the status of the PG init
         # if an exception was returned get will throw
         assert req_local.recv(self._timeout) is None
+        return _DummyWork(None)
 
     @classmethod
     def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:

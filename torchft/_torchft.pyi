@@ -18,6 +18,7 @@ class ManagerClient:
         shrink_only: bool,
         timeout: timedelta,
         commit_failures: int,
+        reconfigure_handle: str,
         init_sync: bool = True,
     ) -> QuorumResult: ...
     def _checkpoint_metadata(self, rank: int, timeout: timedelta) -> str: ...
@@ -43,6 +44,7 @@ class QuorumResult:
     heal: bool
     commit_failures: int
     replica_ids: list[str]
+    reconfigure_handles: list[str]
 
 class ManagerServer:
     def __init__(

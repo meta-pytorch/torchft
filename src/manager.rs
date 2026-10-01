@@ -369,12 +369,21 @@ impl ManagerService for Arc<Manager> {
                 shrink_only: req.shrink_only,
                 data: String::new(),
                 commit_failures: req.commit_failures,
+                reconfigure_handles: vec![req.reconfigure_handle.clone()],
             };
             // TODO check step
             state.participants.insert(group_rank, member.clone());
             let rx = state.channel.subscribe();
 
             if (state.participants.len() as u64) == self.world_size {
+                let mut member = member;
+                member.reconfigure_handles = (0..self.world_size as i64)
+                    .map(|rank| {
+                        state.participants.get(&rank).map_or_else(String::new, |p| {
+                            p.reconfigure_handles.first().cloned().unwrap_or_default()
+                        })
+                    })
+                    .collect();
                 state.participants.clear();
                 let self_clone = self.clone();
                 tokio::spawn(async move {
@@ -621,6 +630,15 @@ fn compute_quorum_results(
             .max()
             .unwrap_or(0),
         replica_ids: participants.iter().map(|p| p.replica_id.clone()).collect(),
+        reconfigure_handles: participants
+            .iter()
+            .map(|p| {
+                p.reconfigure_handles
+                    .get(group_rank as usize)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect(),
     })
 }
 
@@ -736,6 +754,7 @@ mod tests {
             shrink_only: false,
             init_sync: true,
             commit_failures: 3,
+            reconfigure_handle: "handle".to_string(),
         });
         request.set_timeout(Duration::from_secs(10));
         let resp = client.quorum(request).await?.into_inner();
@@ -753,6 +772,7 @@ mod tests {
         assert_eq!(resp.replica_world_size, 1);
         assert_eq!(resp.heal, false);
         assert_eq!(resp.commit_failures, 3);
+        assert_eq!(resp.reconfigure_handles, vec!["handle".to_string()]);
 
         Ok(())
     }
@@ -799,6 +819,7 @@ mod tests {
                     shrink_only: false,
                     init_sync: true,
                     commit_failures: 0,
+                    reconfigure_handle: String::new(),
                 });
                 request.set_timeout(Duration::from_secs(10));
 
@@ -892,6 +913,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -902,6 +924,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             ],
             created: None,
@@ -946,6 +969,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -956,6 +980,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_2".to_string(),
@@ -966,6 +991,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_3".to_string(),
@@ -976,6 +1002,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_4".to_string(),
@@ -986,6 +1013,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             ],
             created: None,
@@ -1038,6 +1066,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -1048,6 +1077,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
             ],
             created: None,
@@ -1086,6 +1116,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 0,
+                    reconfigure_handles: vec![],
                 },
                 QuorumMember {
                     replica_id: "replica_1".to_string(),
@@ -1096,6 +1127,7 @@ mod tests {
                     shrink_only: false,
                     data: String::new(),
                     commit_failures: 2,
+                    reconfigure_handles: vec![],
                 },
             ],
             created: None,
@@ -1104,6 +1136,31 @@ mod tests {
         let results = compute_quorum_results("replica_0", 0, &quorum, true)?;
         assert_eq!(results.commit_failures, 2);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compute_quorum_results_reconfigure() -> Result<()> {
+        let member = |replica_id: &str| QuorumMember {
+            replica_id: replica_id.to_string(),
+            world_size: 2,
+            reconfigure_handles: vec![format!("{replica_id}/0"), format!("{replica_id}/1")],
+            ..Default::default()
+        };
+        let quorum = Quorum {
+            quorum_id: 1,
+            participants: vec![member("replica_1"), member("replica_0")],
+            created: Some(prost_types::Timestamp {
+                seconds: 10,
+                nanos: 0,
+            }),
+        };
+
+        let results = compute_quorum_results("replica_1", 1, &quorum, true)?;
+        assert_eq!(
+            results.reconfigure_handles,
+            vec!["replica_0/1", "replica_1/1"]
+        );
         Ok(())
     }
 
@@ -1206,6 +1263,7 @@ mod tests {
             shrink_only: false,
             init_sync: true,
             commit_failures: 3,
+            reconfigure_handle: String::new(),
         });
         request.set_timeout(Duration::from_secs(3));
         let resp = client.quorum(request).await?.into_inner();

@@ -35,32 +35,20 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from enum import Enum
-from typing import (
-    Any,
-    Callable,
-    cast,
-    Dict,
-    List,
-    Optional,
-    TYPE_CHECKING,
-    TypeAlias,
-    TypeVar,
-    Union,
-)
+from typing import Any, Callable, cast, Dict, List, Optional, TypeAlias, TypeVar, Union
 
 import torch
 import torch.distributed as dist
+from torch._C._distributed_c10d import ErrorType
 from torch.distributed import ReduceOp, TCPStore
 from torch.distributed.distributed_c10d import AllreduceOptions, ReduceOp, Work
 from torchft._torchft import ManagerClient, ManagerServer
 from torchft.checkpointing import CheckpointTransport, HTTPTransport
 from torchft.checkpointing._rwlock import RWLock
 from torchft.futures import future_timeout
+from torchft.process_group import ProcessGroup, ReconfigureOptions
 from torchft.utils import get_stream_context, synchronize
 from torchft.work import _DummyWork
-
-if TYPE_CHECKING:
-    from torchft.process_group import ProcessGroup
 
 IS_TRITON_AVAILABLE = True
 try:
@@ -160,7 +148,7 @@ class Manager:
 
     def __init__(
         self,
-        pg: "ProcessGroup",
+        pg: dist.ProcessGroup,
         load_state_dict: Optional[Callable[[T], None]],
         state_dict: Optional[Callable[[], T]],
         min_replica_size: int,
@@ -185,6 +173,10 @@ class Manager:
     ) -> None:
         """
         Args:
+            pg: torchft process group, or a native PyTorch process group created
+                with ``enable_reconfigure=True``. Native groups require a backend
+                supporting ``reconfigure`` and remain the same object across
+                quorum changes. The caller owns their shutdown.
             load_state_dict: function to load the state dict when recovering
             state_dict: function to save the state dict with recovering
             min_replica_size: minimum number of replicas on each step
@@ -226,6 +218,12 @@ class Manager:
                 before raising an exception. If None, will retry indefinitely.
             quorum_retries: the number of times to retry the quorum before crashing
         """
+        if not getattr(pg, "supports_reconfigure", False):
+            raise ValueError(
+                "Process groups must support reconfigure; native groups must be "
+                "created with enable_reconfigure=True"
+            )
+
         self.quorum_logger: logging.Logger = logging.getLogger("torchft_quorums")
         self.commits_logger: logging.Logger = logging.getLogger("torchft_commits")
         self.errors_logger: logging.Logger = logging.getLogger("torchft_errors")
@@ -360,6 +358,13 @@ class Manager:
                 + self._group_rank
             )
         )
+        if isinstance(pg, ProcessGroup):
+            pg.set_rank_info(
+                self._replica_id or "0",
+                self._group_rank,
+                self._group_world_size,
+                self._global_rank,
+            )
 
         self._update_fr_path()
 
@@ -625,6 +630,15 @@ class Manager:
         )
         self._quorum_future.result()
 
+    def _reconfigure_pg(self, communicator_id: int, handles: List[str]) -> None:
+        """Reconfigures the PG with handles exchanged via the lighthouse."""
+        opts = ReconfigureOptions()
+        opts.uuid = communicator_id
+        opts.handles = handles
+        opts.timeout = self._timeout
+        # pyre-ignore[6]: may be the ReconfigureOptions shim on older torch
+        self._pg.reconfigure(opts).wait()
+
     @torch.profiler.record_function("torchft::manager::_async_quorum")
     def _async_quorum(
         self,
@@ -648,24 +662,17 @@ class Manager:
                 timeout=quorum_timeout,
                 init_sync=self._init_sync,
                 commit_failures=self._commit_failures,
+                reconfigure_handle=self._pg.get_reconfigure_handle(),
             )
 
         quorum_id = quorum.quorum_id
         replica_rank = quorum.replica_rank
         replica_world_size = quorum.replica_world_size
         recover_src_manager_address = quorum.recover_src_manager_address
-        store_address = quorum.store_address
         max_step = quorum.max_step
         max_replica_rank = quorum.max_replica_rank
         max_replica_world_size = quorum.max_world_size
         heal = quorum.heal
-        replica_ids = quorum.replica_ids
-
-        ranks_in_quorum = [
-            extract_trailing_digits(replica_id.split(":")[0]) * self._group_world_size
-            + self._group_rank
-            for replica_id in replica_ids
-        ]
 
         # When using async quorum we need to take the recovered workers.
         # When not using async quorum we need to take the max world size as all
@@ -699,11 +706,7 @@ class Manager:
                     "step": max_step,
                 },
             )
-            store_prefixed_addr = (
-                f"{store_address}/torchft/{quorum_id}/{self._group_rank}"
-            )
-
-            self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
+            self._logger.info(f"reconfiguring for {quorum_id=}")
             # We use the replica rank and world as we want all replicas in the PG.
             try:
                 self._quorum_id = quorum_id
@@ -712,16 +715,7 @@ class Manager:
                     if torch.accelerator.is_available():
                         torch.accelerator.synchronize()
 
-                    self._pg.configure(
-                        store_prefixed_addr,
-                        self._replica_id if self._replica_id is not None else "0",
-                        replica_rank,
-                        replica_world_size,
-                        quorum_id,
-                        self._group_rank,
-                        self._group_world_size,
-                        ranks_in_quorum,
-                    )
+                    self._reconfigure_pg(quorum_id, quorum.reconfigure_handles)
 
                     # We need to reset the trace after reconfiguring the PG because that
                     # calls abort which may trigger a dump
@@ -890,8 +884,18 @@ class Manager:
             if torch.accelerator.is_available():
                 synchronize()
 
-        if err := self._pg.errored():
-            self.report_error(err)
+        pg = self._pg
+        if isinstance(pg, ProcessGroup):
+            if err := pg.errored():
+                self.report_error(err)
+        else:
+            for device in pg._device_types:
+                error = pg._get_backend(device).get_error()
+                if error != ErrorType.SUCCESS:
+                    self.report_error(
+                        dist.DistBackendError(f"Native process group error: {error}")
+                    )
+                    break
 
         # apply state_dict if healing
         if self._healing:

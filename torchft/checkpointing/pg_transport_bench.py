@@ -12,7 +12,11 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from torchft.checkpointing.pg_transport import _timeit, PGTransport
-from torchft.process_group import ProcessGroupBabyNCCL, ProcessGroupBabyXCCL
+from torchft.process_group import (
+    ProcessGroupBabyNCCL,
+    ProcessGroupBabyXCCL,
+    reconfigure_with_store,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -61,7 +65,7 @@ def main(argv: list[str]) -> None:
                 pg = ProcessGroupBabyXCCL(timeout=timeout)
             else:
                 pg = ProcessGroupBabyNCCL(timeout=timeout)
-            pg.configure(store_addr=store_addr, replica_id="0", rank=rank, world_size=2)
+            reconfigure_with_store(pg, store_addr, rank, 2)
 
             t = torch.zeros(10, device=device, dtype=torch.float32)
             pg.allreduce([t], dist.ReduceOp.SUM).wait(timeout=timeout)

@@ -8,12 +8,13 @@ import concurrent
 import threading
 import time
 from datetime import timedelta
-from typing import Optional
-from unittest import TestCase
-from unittest.mock import create_autospec, MagicMock, patch
+from typing import cast, Optional
+from unittest import skipUnless, TestCase
+from unittest.mock import create_autospec, MagicMock, patch, PropertyMock
 
 import torch
 import torch.distributed as dist
+from torch._C._distributed_c10d import ErrorType
 from torch.distributed import ReduceOp, TCPStore
 from torchft._torchft import QuorumResult
 from torchft.checkpointing._rwlock import RWLock
@@ -25,8 +26,11 @@ from torchft.manager import (
     REPLICA_ID_KEY,
     WorldSizeMode,
 )
-from torchft.process_group import ProcessGroup
+from torchft.process_group import ManagedProcessGroup, ProcessGroup
 from torchft.work import _DummyWork
+
+
+HAS_RECONFIGURE: bool = hasattr(dist.ProcessGroup, "reconfigure")
 
 
 def mock_should_commit(
@@ -53,9 +57,11 @@ class TestManager(TestCase):
         timeout: timedelta = timedelta(seconds=10),
         init_sync: bool = True,
         max_retries: Optional[int] = None,
+        pg: Optional[dist.ProcessGroup] = None,
     ) -> Manager:
-        pg = create_autospec(ProcessGroup)
-        pg.errored.return_value = None
+        if pg is None:
+            pg = create_autospec(ProcessGroup)
+            pg.errored.return_value = None
 
         self.store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
@@ -83,6 +89,9 @@ class TestManager(TestCase):
                 init_sync=init_sync,
                 max_retries=max_retries,
             )
+            if isinstance(pg, MagicMock):
+                # Mocked PGs have no peers to exchange reconfigure handles with.
+                manager._reconfigure_pg = create_autospec(manager._reconfigure_pg)
             self.manager = manager
         return manager
 
@@ -90,6 +99,85 @@ class TestManager(TestCase):
     def test_manager(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
         self.assertEqual(client_mock.call_count, 1)
+
+    @skipUnless(HAS_RECONFIGURE, "requires native reconfiguration")
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_native_process_group(self, client_mock: MagicMock) -> None:
+        store = dist.HashStore()
+        pg = dist.ProcessGroup(store, 0, 1)
+        # pyre-fixme[16]: ProcessGroupGloo is not exported in the distributed stubs.
+        backend = dist.ProcessGroupGloo(store, 0, 1, enable_reconfigure=True)
+        pg._set_default_backend(dist.ProcessGroup.BackendType.GLOO)
+        pg._register_backend(
+            torch.device("cpu"), dist.ProcessGroup.BackendType.GLOO, backend
+        )
+        self.addCleanup(pg.shutdown)
+        manager = self._create_manager(
+            pg=pg, min_replica_size=1, use_async_quorum=False, init_sync=False
+        )
+        client_mock().should_commit = mock_should_commit
+        quorum: QuorumResult = QuorumResult()
+        quorum.replica_rank = 0
+        quorum.replica_world_size = 1
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 0
+        quorum.max_replica_rank = 0
+        quorum.max_world_size = 1
+        quorum.heal = False
+
+        def _quorum(reconfigure_handle: str, **kwargs: object) -> QuorumResult:
+            quorum.reconfigure_handles = [reconfigure_handle]
+            return quorum
+
+        cast(MagicMock, client_mock()._quorum).side_effect = _quorum
+
+        # A failed native reconfiguration must follow the usual retry path.
+        quorum.quorum_id = 1
+        with patch.object(
+            dist.ProcessGroup, "reconfigure", side_effect=RuntimeError("failed")
+        ):
+            manager.start_quorum()
+            manager.wait_quorum()
+        self.assertIsNotNone(manager.errored())
+        self.assertFalse(manager.should_commit())
+
+        for generation in (2, 3):
+            quorum.quorum_id = generation
+            manager.start_quorum()
+            tensor = torch.ones(1)
+            self.assertTrue(manager.allreduce(tensor).wait())
+            torch.testing.assert_close(tensor, torch.ones(1))
+            self.assertTrue(manager.should_commit())
+            self.assertIs(manager._pg, pg)
+            self.assertEqual(ManagedProcessGroup(manager).getBackendName(), "gloo")
+
+        quorum.quorum_id = 4
+        manager.start_quorum()
+        manager.allreduce(torch.ones(1)).wait()
+        with patch.object(
+            # pyre-fixme[16]: ProcessGroupGloo is not exported in the distributed stubs.
+            dist.ProcessGroupGloo,
+            "get_error",
+            return_value=ErrorType.COMM_ERROR,
+        ):
+            self.assertFalse(manager.should_commit())
+        self.assertIsNotNone(manager.errored())
+
+    def test_native_process_group_requires_support(self) -> None:
+        with patch.object(
+            dist.ProcessGroup,
+            "supports_reconfigure",
+            new_callable=PropertyMock,
+            return_value=False,
+            create=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "enable_reconfigure=True"):
+                Manager(
+                    pg=dist.ProcessGroup(dist.HashStore(), 0, 1),
+                    load_state_dict=None,
+                    state_dict=None,
+                    min_replica_size=1,
+                )
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_state_dict(self, client_mock: MagicMock) -> None:
@@ -178,7 +266,6 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 1)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
         manager.start_quorum()
@@ -229,9 +316,7 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 21)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -287,9 +372,7 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager.current_step(), 20)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -347,9 +430,7 @@ class TestManager(TestCase):
         self.assertTrue(manager.current_step(), 21)
 
         self.assertEqual(manager._quorum_id, 123)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -383,18 +464,15 @@ class TestManager(TestCase):
 
         manager.start_quorum()
         manager.allreduce(torch.tensor([1.0])).wait()
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
         # inject failure when work queued
-        # pyre-ignore[16]: _pg is mocked
         manager._pg.allreduce.side_effect = RuntimeError("injected failure")
         manager.allreduce(torch.tensor([1.0])).wait()
         self.assertTrue(manager._errored)
         # this should be skipped due to error
         manager.allreduce(torch.tensor([1.0])).wait()
         self.assertEqual(manager._pg.allreduce.call_count, 2)
-        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertFalse(manager.should_commit())
@@ -457,7 +535,6 @@ class TestManager(TestCase):
 
         injected_failure = RuntimeError("injected failure")
 
-        # pyre-ignore[16]: _pg is mocked
         manager._pg.errored.return_value = injected_failure
 
         self.assertFalse(manager.should_commit())
@@ -596,7 +673,6 @@ class TestManager(TestCase):
         self.assertEqual(manager.participating_rank(), 1)
         self.assertEqual(quorum_future.result.call_count, 2)
 
-        # pyre-ignore[16]: _pg is mocked
         manager._pg.allreduce.return_value = _DummyWork(None)
 
         self.assertTrue(manager.is_participating())
@@ -736,8 +812,9 @@ class TestManager(TestCase):
         manager = self._create_manager(use_async_quorum=True)
         client_mock().should_commit = MagicMock(return_value=False)
 
-        # pyre-ignore[16]: mock
-        manager._pg.configure.side_effect = RuntimeError("configure failure")
+        cast(MagicMock, manager._reconfigure_pg).side_effect = RuntimeError(
+            "configure failure"
+        )
 
         quorum = QuorumResult()
         quorum.quorum_id = 123
