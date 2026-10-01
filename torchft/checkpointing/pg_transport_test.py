@@ -29,7 +29,6 @@ from torchft.process_group import (
 
 
 class PGTransportTest(TestCase):
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipIf(sys.platform == "darwin", "not passing on mac")
     def test_pg_transport_gloo(self) -> None:
         store: TCPStore = TCPStore(
@@ -49,7 +48,6 @@ class PGTransportTest(TestCase):
 
         run_multi_recovery_test(self, init, device=device)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.device_count() >= 3, "need three CUDA devices")
     def test_pg_transport_baby_nccl(self) -> None:
         store: TCPStore = TCPStore(
@@ -70,7 +68,6 @@ class PGTransportTest(TestCase):
 
         run_multi_recovery_test(self, init, device=device)
 
-    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.device_count() >= 3, "need three CUDA devices")
     def test_pg_transport_baby_nccl_inplace(self) -> None:
         store: TCPStore = TCPStore(

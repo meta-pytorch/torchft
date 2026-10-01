@@ -96,7 +96,6 @@ class _TimeoutManager:
                 )
                 self._watchdog_thread.start()
 
-            # pyre-fixme[7]: optional
             return self._event_loop
 
     def _watchdog_loop(self) -> None:
@@ -166,7 +165,7 @@ class _TimeoutManager:
             self._register_callback,
             loop,
             lambda: timed_fut.set_exception(
-                # pyre-fixme[6]: e is not T
+                # pyrefly: ignore [bad-argument-type]
                 TimeoutError(f"future did not complete within {timeout}")
             ),
             timeout,
@@ -187,7 +186,7 @@ class _TimeoutManager:
                 except Exception as e:
                     try:
                         # this can throw if the future is already done
-                        # pyre-fixme[6]: e is not T
+                        # pyrefly: ignore [bad-argument-type]
                         timed_fut.set_exception(e)
                     except Exception:
                         pass

@@ -14,13 +14,12 @@ We recommend using torchdata's StatefulDataLoader to checkpoint each replica's
 dataloader frequently to avoid duplicate batches.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch.distributed as dist
 from torch.utils import data
 
 
-# pyre-fixme[24]: expected generic parameter
 class DistributedSampler(data.distributed.DistributedSampler):
     """
     DistributedSampler extends the standard PyTorch DistributedSampler with a
@@ -50,7 +49,7 @@ class DistributedSampler(data.distributed.DistributedSampler):
         num_replica_groups: int,
         group_rank: Optional[int] = None,
         num_replicas: Optional[int] = None,
-        **kwargs: object,
+        **kwargs: Any,
     ) -> None:
         """
         Args:
@@ -72,6 +71,5 @@ class DistributedSampler(data.distributed.DistributedSampler):
             dataset,
             rank=self.global_rank,
             num_replicas=self.global_world_size,
-            # pyre-fixme[6]: got object
             **kwargs,
         )

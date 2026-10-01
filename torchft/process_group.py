@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from multiprocessing.connection import Connection
 from typing import (
+    Any,
     Callable,
     cast,
     Dict,
@@ -45,8 +46,6 @@ from typing import (
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
-# pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
@@ -215,13 +214,12 @@ def reconfigure_with_store(
     opts.uuid = int(communicator_id)
     opts.handles = [handle.decode("utf-8") for handle in handles]
     opts.timeout = timeout
-    # pyre-ignore[6]: may be the ReconfigureOptions shim on older torch
+    # pyrefly: ignore [bad-argument-type]
     pg.reconfigure(opts).wait()
 
 
 class ProcessGroup(BaseProcessGroup):
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        # pyre-fixme[6]: got object
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
         self._group_name: Optional[str] = None
@@ -232,7 +230,7 @@ class ProcessGroup(BaseProcessGroup):
         self._group_world_size: Optional[int] = None
         self._global_rank: Optional[int] = None
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override]
     def allgather(
         self,
         output_tensors: List[List[torch.Tensor]],
@@ -246,7 +244,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override-param-name]
     def allgather_into_tensor_coalesced(
         self,
         output_tensors: List[torch.Tensor],
@@ -260,7 +258,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override]
     def allreduce(
         self,
         tensors: List[torch.Tensor],
@@ -286,7 +284,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override]
     def alltoall_base(
         self,
         output_buffer: torch.Tensor,
@@ -302,7 +300,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override]
     def barrier(self, opts: BarrierOptions) -> Work:
         """
         Synchronizes all processes.
@@ -311,7 +309,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override]
     def broadcast(
         self, tensor_list: List[torch.Tensor], opts: BroadcastOptions
     ) -> Work:
@@ -327,7 +325,7 @@ class ProcessGroup(BaseProcessGroup):
         opts.rootRank = root
         return self.broadcast([tensor], opts)
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override-param-name]
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
         """
         Receives a list of tensors from the process with rank `rank`.
@@ -336,7 +334,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override]
     def reduce_scatter(
         self,
         output_tensors: List[torch.Tensor],
@@ -350,7 +348,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override-param-name]
     def reduce_scatter_tensor_coalesced(
         self,
         output_tensors: List[torch.Tensor],
@@ -364,7 +362,7 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    # pyre-fixme[14]: inconsistent override
+    # pyrefly: ignore [bad-override-param-name]
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
         """
         Sends a list of tensors to the process with rank `dst_rank`.
@@ -424,7 +422,6 @@ class ProcessGroup(BaseProcessGroup):
             }
         )
 
-    # pyre-fixme[14]: inconsistent override
     def reconfigure(self, opts: ReconfigureOptions) -> Work:
         """
         Reconfigures the process group with the ordered handles in ``opts``.
@@ -732,7 +729,7 @@ class ProcessGroupWrapper(ProcessGroup):
         self,
         output_tensors: List[torch.Tensor],
         input_tensors: List[List[torch.Tensor]],
-        opts: object,
+        opts: ReduceScatterOptions,
     ) -> Work:
         with self._run_context():
             return self._wrap_work(
@@ -780,7 +777,6 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.GLOO)
-        # pyre-fixme[16]: no attribute ProcessGroupGloo
         backend_class = BaseProcessGroupGloo(store, rank, world_size, self._timeout)
         backend_class._set_sequence_number_for_group()
 
@@ -808,13 +804,12 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     def getBackendName(self) -> str:
         return "torchft-gloo"
 
-    # pyre-fixme[14,15]: inconsistent override
     def reduce_scatter(
         self,
         output_tensors: List[torch.Tensor],
         input_tensors: List[List[torch.Tensor]],
         opts: ReduceScatterOptions,
-    ) -> None:
+    ) -> Work:
         """
         This function is a placeholder for the reduce_scatter operation in the
         ProcessGroupGloo class. However, this operation is not supported by the
@@ -966,7 +961,6 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
             return work
 
         timeout = self._timeout
-        # pyre-fixme[16]: no attribute timeout
         if hasattr(opts, "timeout") and opts.timeout.total_seconds() > 0:
             timeout = opts.timeout
         return _WorkAcceleratorTimeout(self, work, timeout)
@@ -985,12 +979,10 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
             yield
 
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
-        # pyre-fixme[21]: no attribute ProcessGroupNCCL
         from torch.distributed import ProcessGroupNCCL as BaseProcessGroupNCCL
 
         self._errored = None
 
-        # pyre-fixme[16]: no attribute ProcessGroupNCCL
         opts = BaseProcessGroupNCCL.Options()
         opts.config.blocking = False
         if self._global_ranks:
@@ -1003,7 +995,6 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
-        # pyre-fixme[16]: no attribute ProcessGroupNCCL
         backend_class = BaseProcessGroupNCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         backend_class.eager_connect_single_device(
@@ -1086,7 +1077,6 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
             return work
 
         timeout = self._timeout
-        # pyre-fixme[16]: no attribute timeout
         if hasattr(opts, "timeout") and opts.timeout.total_seconds() > 0:
             timeout = opts.timeout
         return _WorkAcceleratorTimeout(self, work, timeout)
@@ -1105,18 +1095,15 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
             yield
 
     def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
-        # pyre-fixme[21]: no attribute ProcessGroupXCCL
         from torch.distributed import ProcessGroupXCCL as BaseProcessGroupXCCL
 
         self._errored = None
 
-        # pyre-fixme[16]: no attribute ProcessGroupXCCL
         opts = BaseProcessGroupXCCL.Options()
         # opts.config.blocking = False
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.XCCL)
-        # pyre-fixme[16]: no attribute ProcessGroupXCCL
         backend_class = BaseProcessGroupXCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         backend_class.eager_connect_single_device(
@@ -1426,7 +1413,7 @@ class ManagedProcessGroup(ProcessGroupWrapper):
     """
 
     def __init__(self, manager: "Manager") -> None:
-        super().__init__(pg=manager._pg)
+        super().__init__(pg=cast(Any, manager._pg))
 
         self._manager = manager
 
@@ -2084,7 +2071,6 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.GLOO)
-        # pyre-fixme[16]: no attribute ProcessGroupGloo
         backend_class = BaseProcessGroupGloo(store, rank, world_size)
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
@@ -2094,13 +2080,12 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     def getBackendName(self) -> str:
         return "torchft-baby-gloo"
 
-    # pyre-fixme[15]: inconsistent override
     def reduce_scatter(
         self,
         output_tensors: List[torch.Tensor],
         input_tensors: List[List[torch.Tensor]],
         opts: ReduceScatterOptions,
-    ) -> None:
+    ) -> Work:
         """
         This function is a placeholder for the reduce_scatter operation in the
         ProcessGroupGloo class. However, this operation is not supported by the
@@ -2113,13 +2098,12 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
         """
         raise RuntimeError("ProcessGroupBabyGloo does not support reduce_scatter.")
 
-    # pyre-fixme[15]: inconsistent override
     def reduce_scatter_tensor_coalesced(
         self,
         output_tensors: List[torch.Tensor],
         input_tensors: List[torch.Tensor],
         opts: ReduceScatterOptions,
-    ) -> None:
+    ) -> Work:
         """
         This function is a placeholder for the reduce_scatter_tensor_coalesced
         operation in the ProcessGroupBabyGloo class.
@@ -2163,8 +2147,8 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
-        # pyre-fixme[16]: no attribute ProcessGroupNCCL
-        backend_class = BaseProcessGroupNCCL(store, rank, world_size)
+        opts = BaseProcessGroupNCCL.Options()
+        backend_class = BaseProcessGroupNCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         pg._register_backend(
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
@@ -2201,12 +2185,10 @@ class ProcessGroupBabyXCCL(ProcessGroupBaby):
         # Check if XPU and XCCL are available
         from torch.distributed import ProcessGroupXCCL as BaseProcessGroupXCCL
 
-        # pyre-fixme[16]: no attribute ProcessGroupXCCL
         opts = BaseProcessGroupXCCL.Options()
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.XCCL)
-        # pyre-fixme[16]: no attribute ProcessGroupXCCL
         backend_class = BaseProcessGroupXCCL(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         pg._register_backend(

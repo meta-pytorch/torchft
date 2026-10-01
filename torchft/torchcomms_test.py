@@ -26,10 +26,7 @@ from torch.distributed import ProcessGroup as BaseProcessGroup, TCPStore
 from torchft.process_group import reconfigure_with_store, ReconfigureOptions
 
 try:
-    # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
     import torchcomms
-
-    # pyre-fixme[21]: Could not find a module corresponding to import `torchcomms`.
     import torchcomms._comms_mccl
 
     TORCHCOMMS_AVAILABLE = True

@@ -78,7 +78,6 @@ class FSDPTest(unittest.TestCase):
         shard_model(batch).mean().backward()
         dist.destroy_process_group()
 
-    # pyre-ignore[56]: Pyre was not able to infer the type of argument
     @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
     def test_fsdp(self) -> None:
         context = multiprocessing.get_context("spawn")
@@ -91,7 +90,6 @@ class FSDPTest(unittest.TestCase):
             for fut in futures:
                 fut.result()
 
-    # pyre-ignore[56]: Pyre was not able to infer the type of argument
     @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
     def test_fsdp_tp(self) -> None:
         context = multiprocessing.get_context("spawn")
