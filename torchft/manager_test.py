@@ -1089,3 +1089,44 @@ class TestManagedWork(TestCase):
 
         self.assertEqual(order, ["first", "second"])
         self.assertEqual(tail.wait(), 2)
+
+    class _SlowWork(dist._Work):
+        """A `Work` that completes after one second.
+
+        Like native c10d `Work`, `wait` rejects None and treats a zero timeout
+        as no deadline.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._fut: torch.futures.Future[object] = torch.futures.Future()
+            self._fut.set_result(None)
+
+        def wait(self, timeout: Optional[timedelta] = timedelta(0)) -> bool:
+            if timeout is None:
+                raise TypeError("timeout must be a timedelta")
+            if timeout == timedelta(0) or timeout >= timedelta(seconds=1):
+                time.sleep(1)
+                return True
+            time.sleep(timeout.total_seconds())
+            raise RuntimeError("timed out")
+
+        def get_future(self) -> torch.futures.Future[object]:
+            return self._fut
+
+    def test_wait_passes_timeout_to_the_work(self) -> None:
+        manager = self._manager()
+        manager._logger = MagicMock()
+        work = _ManagedWork(manager, self._SlowWork(), None)
+
+        start = time.monotonic()
+        self.assertFalse(work.wait(timeout=timedelta(milliseconds=100)))
+        self.assertLess(time.monotonic() - start, 0.9)
+        manager.report_error.assert_called_once()
+
+    def test_wait_without_timeout_waits_for_the_work(self) -> None:
+        manager = self._manager()
+        work = _ManagedWork(manager, self._SlowWork(), None)
+
+        self.assertTrue(work.wait())
+        manager.report_error.assert_not_called()

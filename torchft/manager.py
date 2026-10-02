@@ -1328,7 +1328,11 @@ class _ManagedWork(dist._Work):
 
         try:
             with get_stream_context(self._stream):
-                self._work.wait()
+                # Native c10d Work.wait rejects None.
+                if timeout is not None:
+                    self._work.wait(timeout)
+                else:
+                    self._work.wait()
                 self._set_future_callback()
 
             with get_stream_context(self._stream):
