@@ -70,9 +70,14 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
 
         # We need to return the underlying future here otherwise
         # this can hang
-        fut = cast("_ManagedFuture[torch.Tensor]", fut)
-        assert fut._fut
-        return fut._fut
+        managed_fut = cast("_ManagedFuture[torch.Tensor]", fut)
+        # Manager returns a _DummyWork with a plain completed future after an
+        # error, so there is no managed wrapper to unwrap in that case.
+        if not hasattr(managed_fut, "_fut"):
+            return cast(torch.futures.Future[torch.Tensor], fut)
+
+        assert managed_fut._fut
+        return managed_fut._fut
 
 
 class PureDistributedDataParallel(nn.Module):

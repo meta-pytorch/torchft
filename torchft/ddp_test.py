@@ -64,3 +64,27 @@ class TestDDP(TestCase):
             self.assertIsNotNone(p.grad)
 
         self.assertGreaterEqual(call_count, 1)
+
+    def test_ddp_with_dummy_work_after_manager_error(self) -> None:
+        manager = create_autospec(Manager)
+        call_count = 0
+
+        def allreduce(tensor: torch.Tensor) -> Work:
+            nonlocal call_count
+            call_count += 1
+            return _DummyWork(tensor)
+
+        manager.allreduce = allreduce
+
+        m = nn.Linear(3, 4)
+        m = DistributedDataParallel(manager, m)
+
+        inp = torch.rand(2, 3)
+        out = m(inp)
+        loss = out.mean()
+        loss.backward()
+
+        for p in m.parameters():
+            self.assertIsNotNone(p.grad)
+
+        self.assertGreaterEqual(call_count, 1)
