@@ -48,6 +48,7 @@ from torchft.process_group import (
 )
 
 try:
+    # pyrefly: ignore [missing-import]
     import torchcomms._comms_mccl
     from torchft.torchcomms import ProcessGroupTorchComms
 
@@ -748,6 +749,7 @@ def ddp_train_loop_torchcomms(
 
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
+        # pyrefly: ignore [missing-import]
         import torchcomms
 
         comm = torchcomms.new_comm(

@@ -61,6 +61,7 @@ class TestManager(TestCase):
     ) -> Manager:
         if pg is None:
             pg = create_autospec(ProcessGroup)
+            # pyrefly: ignore [missing-attribute]
             pg.errored.return_value = None
 
         self.store = TCPStore(
@@ -79,6 +80,7 @@ class TestManager(TestCase):
         ):
             self.load_state_dict = MagicMock()
             manager = Manager(
+                # pyrefly: ignore [bad-argument-type]
                 pg=pg,
                 min_replica_size=min_replica_size,
                 load_state_dict=self.load_state_dict,
