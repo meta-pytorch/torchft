@@ -416,6 +416,7 @@ class Manager:
         self,
         tensor: torch.Tensor,
         should_quantize: bool = False,
+        # pyrefly: ignore [bad-function-definition]
         reduce_op: ReduceOp = ReduceOp.AVG,
     ) -> Work:
         """
@@ -461,6 +462,7 @@ class Manager:
             if should_quantize and IS_TRITON_AVAILABLE:
                 work = allreduce_quantized(
                     [tensor],
+                    # pyrefly: ignore [bad-argument-type]
                     pg_reduce_op,
                     self._pg,
                     torch.accelerator.current_stream(),

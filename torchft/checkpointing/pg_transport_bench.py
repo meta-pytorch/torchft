@@ -68,6 +68,7 @@ def main(argv: list[str]) -> None:
             reconfigure_with_store(pg, store_addr, rank, 2)
 
             t = torch.zeros(10, device=device, dtype=torch.float32)
+            # pyrefly: ignore [bad-argument-type]
             pg.allreduce([t], dist.ReduceOp.SUM).wait(timeout=timeout)
 
         with _timeit("create state_dict"):
