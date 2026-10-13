@@ -20,10 +20,11 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.algorithms.join import Joinable
 from torch.nn import parallel
+from torchft.manager import _ManagedFuture
 from torchft.process_group import ProcessGroup, ProcessGroupDummy, ProcessGroupGloo
 
 if TYPE_CHECKING:
-    from torchft.manager import _ManagedFuture, Manager
+    from torchft.manager import Manager
 
 
 class DistributedDataParallel(parallel.DistributedDataParallel):
@@ -65,14 +66,34 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
         state: "Manager", bucket: dist.GradBucket
     ) -> torch.futures.Future[torch.Tensor]:
         work = state.allreduce(bucket.buffer())
-        work.wait()
+        if not work.wait():
+            # The allreduce failed, usually because another replica died. The
+            # manager already knows about the error, so should_commit() will
+            # say no to this step and the gradients will be thrown away. There
+            # is no inner future yet, so just give DDP the bucket as it is. If
+            # we raised here, backward() would fail and this replica would die
+            # too, instead of skipping the step and going on.
+            return _completed(bucket.buffer())
+
         fut = work.get_future()
+        if not isinstance(fut, _ManagedFuture):
+            # After an error the manager returns a _DummyWork. Its future is a
+            # normal future that is already done, so return it as is.
+            return cast(torch.futures.Future[torch.Tensor], fut)
 
         # We need to return the underlying future here otherwise
         # this can hang
-        fut = cast("_ManagedFuture[torch.Tensor]", fut)
-        assert fut._fut
+        assert fut._fut is not None, (
+            "wait() returned True but the future chain is missing"
+        )
         return fut._fut
+
+
+def _completed(tensor: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
+    """Make a future that is already done and holds `tensor`."""
+    fut: torch.futures.Future[torch.Tensor] = torch.futures.Future()
+    fut.set_result(tensor)
+    return fut
 
 
 class PureDistributedDataParallel(nn.Module):
