@@ -233,6 +233,7 @@ def run_allreduce_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> Non
     """
     tc = tensor.clone()
     world_sz = pg.size()
+    # pyrefly: ignore [bad-argument-type]
     work = pg.allreduce([tc], ReduceOp.SUM)
     work.wait()
     expected_val = sum(r + 1 for r in range(world_sz))

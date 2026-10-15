@@ -162,6 +162,7 @@ else:
 
                 _check_result_tolerance(actual_output, expected_output, tolerance)
 
+        # pyrefly: ignore [bad-assignment]
         END_TO_END_CONFIGS: list[tuple[int, float, ReduceOp, torch.dtype]] = [
             (ts, m, o, t)
             for ts in [256, 1024, 2048]

@@ -26,7 +26,10 @@ from torch.distributed import ProcessGroup as BaseProcessGroup, TCPStore
 from torchft.process_group import reconfigure_with_store, ReconfigureOptions
 
 try:
+    # pyrefly: ignore [missing-import]
     import torchcomms
+
+    # pyrefly: ignore [missing-import]
     import torchcomms._comms_mccl
 
     TORCHCOMMS_AVAILABLE = True
