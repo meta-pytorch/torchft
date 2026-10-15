@@ -102,6 +102,7 @@ else:
                     mean_diff, tolerance, f"Results not within tolerance {tolerance}"
                 )
 
+        # pyrefly: ignore [bad-assignment]
         END_TO_END_CONFIGS: list[tuple[int, float, ReduceOp, torch.dtype]] = [
             (ts, m, o, t)
             for ts in [128, 512, 4096]
