@@ -6,7 +6,6 @@
 
 import concurrent
 import threading
-import time
 from datetime import timedelta
 from typing import cast, Optional
 from unittest import skipUnless, TestCase
@@ -1091,3 +1090,42 @@ class TestManagedWork(TestCase):
 
         self.assertEqual(order, ["first", "second"])
         self.assertEqual(tail.wait(), 2)
+
+    def test_wait_passes_timeout_to_the_work(self) -> None:
+        for timeout in (timedelta(milliseconds=100), timedelta(0)):
+            with self.subTest(timeout=timeout):
+                manager = self._manager()
+                inner_work = MagicMock(spec=dist._Work)
+                future: torch.futures.Future[object] = torch.futures.Future()
+                future.set_result(None)
+                inner_work.get_future.return_value = future
+                work = _ManagedWork(manager, inner_work, None)
+
+                self.assertTrue(work.wait(timeout=timeout))
+                inner_work.wait.assert_called_once_with(timeout)
+                manager.report_error.assert_not_called()
+
+    def test_wait_without_timeout_omits_the_argument(self) -> None:
+        manager = self._manager()
+        inner_work = MagicMock(spec=dist._Work)
+        future: torch.futures.Future[object] = torch.futures.Future()
+        future.set_result(None)
+        inner_work.get_future.return_value = future
+        work = _ManagedWork(manager, inner_work, None)
+
+        self.assertTrue(work.wait())
+        inner_work.wait.assert_called_once_with()
+        manager.report_error.assert_not_called()
+
+    def test_wait_reports_timeout_error(self) -> None:
+        manager = self._manager()
+        manager._logger = MagicMock()
+        inner_work = MagicMock(spec=dist._Work)
+        error = RuntimeError("timed out")
+        inner_work.wait.side_effect = error
+        work = _ManagedWork(manager, inner_work, None)
+        timeout = timedelta(milliseconds=100)
+
+        self.assertFalse(work.wait(timeout=timeout))
+        inner_work.wait.assert_called_once_with(timeout)
+        manager.report_error.assert_called_once_with(error)
