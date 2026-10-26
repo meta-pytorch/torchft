@@ -29,6 +29,7 @@ import concurrent.futures
 import logging
 import os
 import socket
+import threading
 import traceback
 import uuid
 import weakref
@@ -284,6 +285,9 @@ class Manager:
             max_workers=1, thread_name_prefix="async_quorum"
         )
         self._quorum_future: Optional[concurrent.futures.Future] = None
+        # Ident of the executor thread running _async_quorum, used to catch
+        # calls that would wait on the quorum from inside it.
+        self._quorum_thread_id: Optional[int] = None
 
         self._store = TCPStore(
             host_name=store_addr,
@@ -387,6 +391,15 @@ class Manager:
         load_state_dict: Callable[[T], None],
         state_dict: Callable[[], T],
     ) -> None:
+        """
+        Register a state dict to save and restore for recovery under ``key``.
+
+        ``state_dict`` is called on the quorum thread when another replica
+        recovers from this one, while the main thread may still be running the
+        forward/backward pass. It must not call into the Manager or the torchft
+        Optimizer wrapper (e.g. ``step()``/``zero_grad()``), modify parameters
+        or gradients, or run collectives on the training process groups.
+        """
         # Can't register duplicate keys
         assert key not in self._load_state_dict_fns
         assert key not in self._user_state_dicts
@@ -587,6 +600,8 @@ class Manager:
                 recovery operations will use the manager timeout
         """
 
+        self._check_not_quorum_thread("start_quorum")
+
         # wait for previous quorum to complete
         if self._quorum_future is not None:
             self._quorum_future.result()
@@ -629,7 +644,21 @@ class Manager:
         assert self._quorum_future is not None, (
             "must call start_quorum before wait_quorum"
         )
+        self._check_not_quorum_thread("wait_quorum")
         self._quorum_future.result()
+
+    def _check_not_quorum_thread(self, method: str) -> None:
+        # Waiting on the quorum future from the thread that runs it never returns.
+        if threading.get_ident() == self._quorum_thread_id:
+            raise RuntimeError(
+                f"Manager.{method}() was called from the quorum thread and would "
+                "deadlock. state_dict functions run on that thread when a peer "
+                "recovers from this replica, so they must not call into the Manager "
+                "or the torchft Optimizer wrapper. This happens with "
+                "torch.distributed.checkpoint.state_dict.get_optimizer_state_dict() "
+                "when the optimizer has no state yet: it calls optimizer.step() to "
+                "create it."
+            )
 
     def _reconfigure_pg(self, communicator_id: int, handles: List[str]) -> None:
         """Reconfigures the PG with handles exchanged via the lighthouse."""
@@ -649,6 +678,7 @@ class Manager:
         curr_device: int,
     ) -> None:
         torch.multiprocessing._set_thread_name("torchft_quorum")
+        self._quorum_thread_id = threading.get_ident()
 
         if curr_device >= 0 and torch.accelerator.is_available():
             torch.accelerator.set_device_index(curr_device)

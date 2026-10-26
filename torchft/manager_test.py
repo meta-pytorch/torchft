@@ -820,6 +820,43 @@ class TestManager(TestCase):
             raise error.original_exception
 
     @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_state_dict_fn_calling_manager_errors(self, client_mock: MagicMock) -> None:
+        """A state_dict fn that waits on the quorum (e.g. via the Optimizer
+        wrapper's step()) reports an error instead of deadlocking the quorum
+        thread."""
+        manager = self._create_manager(use_async_quorum=True)
+        client_mock().should_commit = MagicMock(return_value=False)
+        manager._checkpoint_transport = MagicMock(spec=CheckpointTransport)
+        manager.register_state_dict_fn(
+            "calls_manager",
+            load_state_dict=lambda _: None,
+            state_dict=lambda: manager.should_commit(),
+        )
+
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 0
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_replica_rank = 0
+        quorum.max_world_size = 2
+        quorum.heal = False
+        quorum.recover_dst_replica_ranks = [1]
+        client_mock()._quorum.return_value = quorum
+
+        manager.start_quorum()
+        assert manager._quorum_future is not None
+        done, _ = concurrent.futures.wait([manager._quorum_future], timeout=10)
+        self.assertEqual(len(done), 1, "quorum thread deadlocked")
+
+        error = manager.errored()
+        assert error is not None
+        with self.assertRaisesRegex(RuntimeError, "called from the quorum thread"):
+            raise error.original_exception
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_configure_errors(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(use_async_quorum=True)
         client_mock().should_commit = MagicMock(return_value=False)
