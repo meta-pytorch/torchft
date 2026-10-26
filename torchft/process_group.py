@@ -16,6 +16,7 @@ places that would accept a standard process group. As these can change size at
 runtime users need to take care to not assume a static rank or world size.
 """
 
+import functools
 import json
 import logging
 import os
@@ -1743,7 +1744,9 @@ class ProcessGroupBaby(ProcessGroup):
                     op_id: int = cast(int, op[1])
                     metadata: _OpMetadata = work[op_id]
 
-                    def callback(fut: Future[object], metadata: _OpMetadata) -> None:
+                    def callback(
+                        fut: Future[object], op_id: int, metadata: _OpMetadata
+                    ) -> None:
                         try:
                             # create an event after the collective has been issued
                             # to wait on this before we call "future"
@@ -1759,8 +1762,11 @@ class ProcessGroupBaby(ProcessGroup):
                         except Exception as e:
                             future_pipe.send((op_id, _FUTURE_EXCEPTION, e, None))
 
+                    # Bind op_id and metadata now. The callback can run after
+                    # this loop has moved on and reassigned both, which would
+                    # report the result under a later op's id.
                     metadata.work.get_future().add_done_callback(
-                        lambda fut: callback(fut, metadata)
+                        functools.partial(callback, op_id=op_id, metadata=metadata)
                     )
                 elif cmd == "num_active_work":
                     req_pipe.send(len(work))
@@ -1779,8 +1785,8 @@ class ProcessGroupBaby(ProcessGroup):
                     cmd = future_pipe.recv(timedelta(seconds=10))
                 except TimeoutError:
                     continue
-                except OSError:
-                    # subprocess exited
+                except (OSError, EOFError):
+                    # pipe closed or subprocess exited
                     break
 
                 op_id, mode, data, event = cast(
@@ -1822,11 +1828,11 @@ class ProcessGroupBaby(ProcessGroup):
         self._pipe.send(("wait", op_id, timeout))
 
         assert self._pipe is not None
-        op_id, event = cast(
+        resp_op_id, event = cast(
             Tuple[int, Optional[Union[torch.cuda.Event, torch.xpu.Event]]],
             self._pipe.recv(timeout or self._timeout),
         )
-        assert op_id == op_id
+        assert resp_op_id == op_id, f"waited on op {op_id} but got op {resp_op_id}"
         if event is not None:
             event.wait()
 

@@ -8,6 +8,7 @@ import gc
 import json
 import os
 import sys
+import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Callable, cast, Dict, List
@@ -694,6 +695,49 @@ class ProcessGroupTest(TestCase):
         t = torch.zeros(10)
         with self.assertRaisesRegex(OSError, "handle is closed"):
             a.allreduce([t], AllreduceOptions()).wait()
+
+    def test_baby_gloo_pending_futures(self) -> None:
+        """Futures of collectives that are still pending while the worker reads
+        later commands resolve under their own op ids."""
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+
+        pgs = [ProcessGroupBabyGloo(timeout=timedelta(seconds=10)) for _ in range(2)]
+        try:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                list(
+                    executor.map(
+                        lambda rank: reconfigure_with_store(
+                            pgs[rank], store_addr, rank, 2
+                        ),
+                        range(2),
+                    )
+                )
+
+            num_ops = 4
+            futs = [
+                pgs[0].allreduce([torch.ones(4)], AllreduceOptions()).get_future()
+                for _ in range(num_ops)
+            ]
+            # The worker handles commands in order, so once this returns it has
+            # registered every future callback while rank 1 hasn't joined yet.
+            pgs[0].num_active_work()
+            for _ in range(num_ops):
+                pgs[1].allreduce([torch.ones(4)], AllreduceOptions())
+
+            deadline = time.monotonic() + 10
+            while not all(f.done() for f in futs) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(all(f.done() for f in futs))
+
+            future_thread = pgs[0]._future_thread
+            assert future_thread is not None
+            self.assertTrue(future_thread.is_alive())
+        finally:
+            for pg in pgs:
+                pg.shutdown()
 
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_baby_nccl_apis(self) -> None:
