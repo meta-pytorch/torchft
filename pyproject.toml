@@ -41,8 +41,10 @@ dev = [
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "torchft._torchft"
+python-packages = ["torchft", "torchft_last_words"]
 
 [project.scripts]
+torchft_last_words = "torchft_last_words.service:main"
 torchft_lighthouse = "torchft._torchft:lighthouse_main"
 
 [tool.isort]
