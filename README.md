@@ -192,7 +192,9 @@ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join
 
 ### Example Training Loop (DDP)
 
-See [train_ddp.py](./train_ddp.py) for the full example.
+See the checked-in [train_ddp.py](./train_ddp.py) example for the model and
+optimizer checkpoint callbacks and the DDP training loop. Start the Lighthouse
+server above before launching the script.
 
 Invoke with:
 
@@ -200,33 +202,8 @@ Invoke with:
 TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train_ddp.py
 ```
 
-train.py:
-
-```py
-from torchft import Manager, DistributedDataParallel, Optimizer, ProcessGroupGloo
-
-manager = Manager(
-    pg=ProcessGroupGloo(),
-    load_state_dict=...,
-    state_dict=...,
-)
-
-m = nn.Linear(2, 3)
-m = DistributedDataParallel(manager, m)
-optimizer = Optimizer(manager, optim.AdamW(m.parameters()))
-
-for i in range(1000):
-    batch = torch.rand(2, 2, device=device)
-
-    optimizer.zero_grad()
-
-    out = m(batch)
-    loss = out.sum()
-
-    loss.backward()
-
-    optimizer.step()
-```
+See [Running DDP](#running-ddp) below for launching replica groups with TorchX
+or separate shells.
 
 ### Running DDP
 
