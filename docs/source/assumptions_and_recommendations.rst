@@ -3,6 +3,27 @@
 Assumptions and Recommendations
 ===============================
 
+Lighthouse deployment
+---------------------
+
+* Run one Lighthouse instance per training job. All replicas of that job must
+  connect to the same instance; separate jobs must use separate instances.
+  The current Lighthouse does not isolate independent jobs by a job ID.
+
+* Lighthouse coordinates metadata, heartbeats, and quorum over gRPC/TCP. It is
+  not a model, gradient, or checkpoint transfer server. A stable, low-latency
+  connection to the replicas is important, but Lighthouse itself does not
+  require a high-bandwidth interconnect such as InfiniBand. The process groups
+  and checkpoint transports have their own networking requirements.
+
+* Lighthouse is lightweight and can run on a single CPU core. For cloud VMs,
+  prefer dedicated CPU resources over shared or oversubscribed resources to
+  reduce noisy-neighbor latency and improve reliability. This is a deployment
+  recommendation, not a capacity or latency guarantee for every workload.
+
+Protocol assumptions
+--------------------
+
 There are a couple of assumptions we make without which this protocol guarantee stops to hold.
 
 * The state machine replication is done in a similar mechanism as any consensus protocol with a leader e.g. Raft. The leader, **lighthouse**, is a single point of failure so users should take care to make sure it's running on a dedicated instance to avoid noisy neighbor induced failures and automatic restarts to maximize availability.
