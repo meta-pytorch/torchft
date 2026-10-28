@@ -8,6 +8,7 @@ import gc
 import json
 import os
 import sys
+import weakref
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Callable, cast, Dict, List
@@ -733,6 +734,16 @@ class ProcessGroupTest(TestCase):
         m = nn.Linear(3, 4)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
+
+    def test_dummy_does_not_retain_work(self) -> None:
+        # DDP built on a ProcessGroupDummy calls allreduce on every backward, so
+        # the group must not keep the returned work alive or it leaks per step.
+        pg = ProcessGroupDummy(0, 1)
+        work = pg.allreduce([torch.zeros(1)], AllreduceOptions())
+        ref = weakref.ref(work)
+        del work
+        gc.collect()
+        self.assertIsNone(ref())
 
     def test_functional_collectives(self) -> None:
         # Registration must not inherit another test's CUDA-bound default group.
