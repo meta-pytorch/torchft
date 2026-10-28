@@ -1149,7 +1149,6 @@ class ProcessGroupDummy(ProcessGroup):
         self._world = world
         self.wait_count = 0
         self.get_future_count = 0
-        self._work: List[Work] = []
         self.reconfigure_count = 0
 
     def reconfigure(self, opts: ReconfigureOptions) -> Work:
@@ -1165,9 +1164,7 @@ class ProcessGroupDummy(ProcessGroup):
         for o, i in zip(output_tensors[0], input_tensor):
             o.copy_(i)
 
-        res = _DummyWork(output_tensors)
-        self._work.append(res)
-        return res
+        return _DummyWork(output_tensors)
 
     def allgather_into_tensor_coalesced(
         self,
@@ -1178,21 +1175,15 @@ class ProcessGroupDummy(ProcessGroup):
         for o, i in zip(output_tensors, input_tensors):
             o.copy_(i)
 
-        res = _DummyWork(output_tensors)
-        self._work.append(res)
-        return res
+        return _DummyWork(output_tensors)
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
-        res = _DummyWork(tensors)
-        self._work.append(res)
-        return res
+        return _DummyWork(tensors)
 
     def allreduce_coalesced(
         self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
     ) -> Work:
-        res = _DummyWork(tensors)
-        self._work.append(res)
-        return res
+        return _DummyWork(tensors)
 
     def alltoall_base(
         self,
@@ -1203,17 +1194,13 @@ class ProcessGroupDummy(ProcessGroup):
         opts: AllToAllOptions,
     ) -> Work:
         output_buffer.copy_(input_buffer)
-        res = _DummyWork([output_buffer])
-        self._work.append(res)
-        return res
+        return _DummyWork([output_buffer])
 
     def barrier(self, opts: Optional[BarrierOptions] = None) -> Work:
         return _DummyWork(None)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
-        res = _DummyWork(tensor_list)
-        self._work.append(res)
-        return res
+        return _DummyWork(tensor_list)
 
     def recv(self, tensors: List[torch.Tensor], src_rank: int, tag: int) -> Work:
         return _DummyWork(None)
@@ -1227,9 +1214,7 @@ class ProcessGroupDummy(ProcessGroup):
         for o, i in zip(output_tensors, input_tensors[0]):
             o.copy_(i)
 
-        res = _DummyWork(output_tensors)
-        self._work.append(res)
-        return res
+        return _DummyWork(output_tensors)
 
     def reduce_scatter_tensor_coalesced(
         self,
@@ -1240,9 +1225,7 @@ class ProcessGroupDummy(ProcessGroup):
         for o, i in zip(output_tensors, input_tensors):
             o.copy_(i)
 
-        res = _DummyWork(output_tensors)
-        self._work.append(res)
-        return res
+        return _DummyWork(output_tensors)
 
     def send(self, tensors: List[torch.Tensor], dst_rank: int, tag: int) -> Work:
         return _DummyWork(None)
