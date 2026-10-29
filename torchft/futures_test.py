@@ -77,6 +77,21 @@ class FuturesTest(TestCase):
         with context_timeout(fail, timedelta(seconds=10)):
             pass
 
+    def test_context_timeout_exception(self) -> None:
+        loop = Mock()
+        # register the timer inline so the context holds the timer handle
+        loop.call_soon_threadsafe.side_effect = lambda fn, *args: fn(*args)
+
+        with patch.object(
+            _TIMEOUT_MANAGER, "_maybe_start_event_loop", return_value=loop
+        ):
+            with self.assertRaisesRegex(RuntimeError, "test"):
+                with context_timeout(Mock(), timedelta(seconds=10)):
+                    raise RuntimeError("test")
+
+        # the timer is cancelled even though the block raised
+        loop.call_later.return_value.cancel.assert_called_once_with()
+
     @skipUnless(torch.cuda.is_available(), "CUDA is required for this test")
     def test_stream_timeout(self) -> None:
         torch.cuda.synchronize()
