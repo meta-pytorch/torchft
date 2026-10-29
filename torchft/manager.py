@@ -49,6 +49,7 @@ from torchft.futures import future_timeout
 from torchft.process_group import ProcessGroup, ReconfigureOptions
 from torchft.utils import get_stream_context, synchronize
 from torchft.work import _DummyWork
+from torchft_last_words.state import QuorumSnapshot
 
 IS_TRITON_AVAILABLE = True
 try:
@@ -284,6 +285,7 @@ class Manager:
             max_workers=1, thread_name_prefix="async_quorum"
         )
         self._quorum_future: Optional[concurrent.futures.Future] = None
+        self._quorum_member_ids: tuple[int, ...] = ()
 
         self._store = TCPStore(
             host_name=store_addr,
@@ -737,6 +739,13 @@ class Manager:
                 self.report_error(e)
                 return
 
+        self._quorum_member_ids = tuple(
+            sorted(
+                extract_trailing_digits(replica.split(":")[0])
+                for replica in quorum.replica_ids
+            )
+        )
+
         if allow_heal:
             # run recovery on the recovery stream if available
             recovery_stream = self._recovery_stream
@@ -978,6 +987,37 @@ class Manager:
             the state dict for this manager
         """
         return {"step": self._step, "batches_committed": self._batches_committed}
+
+    def quorum_snapshot(self) -> QuorumSnapshot:
+        """Read a completed quorum on the training thread without waiting.
+
+        Call after synchronous quorum/healing and before starting another quorum.
+        Pending or failed recovery never supplies an eligible boundary. Save
+        eligibility also requires the caller's complete application state.
+        """
+        future = self._quorum_future
+        if future is None or not future.done() or future.cancelled():
+            raise RuntimeError("TorchFT quorum has not completed")
+        future.result()
+        if self.errored() is not None or self._quorum_id < 0:
+            raise RuntimeError("TorchFT quorum is not healthy")
+        if self._pending_state_dict is not None or self._healing:
+            raise RuntimeError("TorchFT state restoration is incomplete")
+        members = self._quorum_member_ids
+        if (
+            not members
+            or len(set(members)) != len(members)
+            or len(members) != self.num_participants()
+        ):
+            raise RuntimeError(
+                "TorchFT quorum membership and participant count disagree"
+            )
+        return QuorumSnapshot(
+            quorum_id=self._quorum_id,
+            members=members,
+            step=self._step,
+            batches_committed=self._batches_committed,
+        )
 
     def current_step(self) -> int:
         """
