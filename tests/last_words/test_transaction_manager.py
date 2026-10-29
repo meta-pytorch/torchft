@@ -3,7 +3,7 @@
 import importlib
 from concurrent.futures import Future
 from threading import Event, Thread
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -29,6 +29,34 @@ def manager(library):
     return value
 
 
+@pytest.mark.parametrize("positional", [False, True])
+def test_constructor_defaults_to_synchronous_quorum(library, positional):
+    parent, module = library
+    with patch.object(parent.Manager, "__init__", autospec=True, return_value=None) as initialize:
+        if positional:
+            module.LastWordsManager(None, None, None, 1, False)
+        else:
+            module.LastWordsManager(pg=None, load_state_dict=None, state_dict=None, min_replica_size=1)
+        from inspect import signature
+
+        bound = signature(initialize).bind(*initialize.call_args.args, **initialize.call_args.kwargs)
+        assert bound.arguments["use_async_quorum"] is False
+
+
+@pytest.mark.parametrize("positional", [False, True])
+def test_constructor_rejects_async_before_native_startup(library, positional):
+    parent, module = library
+    with patch.object(parent.Manager, "__init__", autospec=True, return_value=None) as initialize:
+        with pytest.raises(ValueError, match="synchronous quorum"):
+            if positional:
+                module.LastWordsManager(None, None, None, 1, True)
+            else:
+                module.LastWordsManager(
+                    pg=None, load_state_dict=None, state_dict=None, min_replica_size=1, use_async_quorum=True
+                )
+        initialize.assert_not_called()
+
+
 def test_vote_is_issued_once_per_attempt(library, manager, monkeypatch):
     parent, _ = library
     vote = Mock(return_value=True)
@@ -40,16 +68,10 @@ def test_vote_is_issued_once_per_attempt(library, manager, monkeypatch):
     assert vote.call_count == 1
 
 
-def test_commit_timeout_is_unknown_and_disallows_publication(
-    library, manager, monkeypatch
-):
+def test_commit_timeout_is_unknown_and_disallows_publication(library, manager, monkeypatch):
     parent, module = library
-    monkeypatch.setattr(
-        parent.Manager, "should_commit", Mock(side_effect=TimeoutError("native commit"))
-    )
-    with pytest.raises(
-        module.TorchFTCommitTimeoutError, match="restart the entire replica"
-    ):
+    monkeypatch.setattr(parent.Manager, "should_commit", Mock(side_effect=TimeoutError("native commit")))
+    with pytest.raises(module.TorchFTCommitTimeoutError, match="restart the entire replica"):
         manager.should_commit()
     assert manager.commit_unknown and manager.commit_decided
     assert not manager.commit_authorized
@@ -90,9 +112,7 @@ def test_snapshot_is_prepared_by_waiting_training_thread(library, manager, monke
     manager._snapshot_error = None
     manager._healing_snapshot = None
     manager._quorum_timeout = __import__("datetime").timedelta(seconds=2)
-    manager.last_words_stop_requested = manager.last_words_terminal_stop_requested = (
-        None
-    )
+    manager.last_words_stop_requested = manager.last_words_terminal_stop_requested = None
     manager.elastic_enabled = True
     threads = []
 
@@ -131,9 +151,7 @@ def test_partial_restore_stays_ineligible(library, manager, monkeypatch):
     assert manager.restoration_incomplete
 
 
-def test_restore_completion_includes_device_sync_and_application_callback(
-    library, manager, monkeypatch
-):
+def test_restore_completion_includes_device_sync_and_application_callback(library, manager, monkeypatch):
     parent, _ = library
     calls = []
     manager.last_words_request = Mock()
@@ -159,7 +177,5 @@ def test_tensor_validation_precedes_all_live_copies(library):
     _, module = library
     original = [torch.tensor([2.0]), torch.tensor([3.0])]
     with pytest.raises(ValueError, match="shape or dtype"):
-        module.restore_tensor_leaves(
-            [torch.tensor([9.0]), torch.tensor([9.0, 8.0])], original
-        )
+        module.restore_tensor_leaves([torch.tensor([9.0]), torch.tensor([9.0, 8.0])], original)
     assert [item.item() for item in original] == [2.0, 3.0]

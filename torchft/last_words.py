@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+from inspect import signature
 from threading import Event
 from typing import Any, Callable
 
@@ -26,9 +27,7 @@ def snapshot_to_cpu(state):
         if isinstance(value, DTensor):
             value = value.to_local()
         copied.append(
-            value.detach().to(device="cpu", copy=True)
-            if isinstance(value, torch.Tensor)
-            else copy.deepcopy(value)
+            value.detach().to(device="cpu", copy=True) if isinstance(value, torch.Tensor) else copy.deepcopy(value)
         )
     return tree_unflatten(copied, spec)
 
@@ -39,9 +38,7 @@ def restore_tensor_leaves(snapshot, live_state):
     saved_leaves, saved_spec = tree_flatten(snapshot)
     live_leaves, live_spec = tree_flatten(live_state)
     if saved_spec != live_spec:
-        raise ValueError(
-            "TorchFT recovery state structure does not match the current model"
-        )
+        raise ValueError("TorchFT recovery state structure does not match the current model")
     # Validate every leaf before changing any live state.
     for saved, live in zip(saved_leaves, live_leaves):
         if isinstance(saved, torch.Tensor) != isinstance(live, torch.Tensor):
@@ -84,7 +81,11 @@ class LastWordsManager(Manager):
         barrier_after_initial_quorum=False,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        arguments = signature(Manager.__init__).bind(self, *args, **kwargs)
+        if arguments.arguments.get("use_async_quorum", False):
+            raise ValueError("Last words requires synchronous quorum and healing")
+        arguments.arguments["use_async_quorum"] = False
+        super().__init__(*arguments.args[1:], **arguments.kwargs)
         self._synchronize_device = synchronize_device or synchronize
         self._process_group_usable = process_group_usable or (lambda: True)
         self._barrier_after_initial_quorum = barrier_after_initial_quorum
@@ -123,15 +124,11 @@ class LastWordsManager(Manager):
             if self._group_world_size > 1:
                 dist.barrier()
             self._initial_quorum_barrier_pending = False
-        if (
-            getattr(self, "elastic_enabled", True)
-            and getattr(self, "last_words_request", None) is None
-        ):
+        if getattr(self, "elastic_enabled", True) and getattr(self, "last_words_request", None) is None:
             self.start_quorum()
         else:
             self.start_quorum(
-                allow_heal=getattr(self, "elastic_enabled", False)
-                or not self._last_words_initial_sync_complete
+                allow_heal=getattr(self, "elastic_enabled", False) or not self._last_words_initial_sync_complete
             )
         self._last_words_initial_sync_complete = True
         if getattr(self, "_barrier_after_initial_quorum", False) and not getattr(
@@ -153,9 +150,7 @@ class LastWordsManager(Manager):
             if (not elastic and stop_requested is not None and stop_requested()) or (
                 elastic and terminal_stop is not None and terminal_stop()
             ):
-                error = TorchFTQuorumStoppedError(
-                    "last words stop requested while waiting for quorum"
-                )
+                error = TorchFTQuorumStoppedError("last words stop requested while waiting for quorum")
                 if (
                     not self._last_words_initial_sync_complete
                     or self._pending_state_dict is not None
@@ -170,10 +165,7 @@ class LastWordsManager(Manager):
                 self._snapshot_error = error
                 self._snapshot_ready.set()
                 raise error
-            if (
-                self._snapshot_requested.wait(0.01)
-                and not self._snapshot_ready.is_set()
-            ):
+            if self._snapshot_requested.wait(0.01) and not self._snapshot_ready.is_set():
                 try:
                     self._healing_snapshot = self._export_snapshot()
                 except BaseException as error:
@@ -192,9 +184,7 @@ class LastWordsManager(Manager):
             self.commit_unknown = True
             self.report_error(error)
             self._checkpoint_transport.disallow_checkpoint()
-            raise TorchFTCommitTimeoutError(
-                "TorchFT commit RPC timed out; restart the entire replica"
-            ) from error
+            raise TorchFTCommitTimeoutError("TorchFT commit RPC timed out; restart the entire replica") from error
         except BaseException:
             self.commit_unknown = True
             raise
@@ -203,18 +193,14 @@ class LastWordsManager(Manager):
 
     def discard_interrupted_step(self, error):
         if self.commit_authorized:
-            raise RuntimeError(
-                "Cannot discard an authorized optimizer update; restart the replica"
-            ) from error
+            raise RuntimeError("Cannot discard an authorized optimizer update; restart the replica") from error
         # Device restart invalidates the old recovery stream event. Quorum was
         # applied synchronously before forward; no pending healing is lost here.
         self._recovery_event = None
         self.report_error(error)
         try:
             if getattr(self, "commit_unknown", False):
-                raise TorchFTCommitTimeoutError(
-                    "Cannot discard an attempt with an unknown commit result"
-                ) from error
+                raise TorchFTCommitTimeoutError("Cannot discard an attempt with an unknown commit result") from error
             future = getattr(self, "_quorum_future", None)
             if future is None or (future.done() and future.exception() is not None):
                 # No commit RPC can have been issued for a failed quorum future.
@@ -225,18 +211,14 @@ class LastWordsManager(Manager):
                 self._quorum_future = None
                 return
             if not getattr(self, "commit_decided", False) and self.should_commit():
-                raise RuntimeError(
-                    "An interrupted TorchFT attempt was unexpectedly authorized"
-                ) from error
+                raise RuntimeError("An interrupted TorchFT attempt was unexpectedly authorized") from error
         finally:
             # Rebuild a destroyed communicator even if membership is unchanged.
             self._quorum_id = -1
 
     def _export_snapshot(self):
         return {
-            "user": snapshot_to_cpu(
-                {key: fn() for key, fn in self._user_state_dicts.items()}
-            ),
+            "user": snapshot_to_cpu({key: fn() for key, fn in self._user_state_dicts.items()}),
             "torchft": self.state_dict(),
         }
 
@@ -293,9 +275,7 @@ class LastWordsManager(Manager):
         super()._apply_pending_state_dict()
         if getattr(self, "last_words_request", None) is not None:
             if not received_state:
-                raise RuntimeError(
-                    "Healing did not provide a complete checkpoint; replica is ineligible"
-                )
+                raise RuntimeError("Healing did not provide a complete checkpoint; replica is ineligible")
             if self.last_words_restore_incomplete:
                 self._synchronize_device()
                 after_heal = getattr(self, "after_heal", None)
@@ -313,13 +293,9 @@ class LastWordsManager(Manager):
     def _manager_state_dict(self):
         self._snapshot_requested.set()
         if not self._snapshot_ready.wait(self._quorum_timeout.total_seconds()):
-            raise TimeoutError(
-                "Training thread did not prepare the TorchFT healing state"
-            )
+            raise TimeoutError("Training thread did not prepare the TorchFT healing state")
         if self._snapshot_error is not None:
-            raise RuntimeError(
-                "TorchFT healing state export failed"
-            ) from self._snapshot_error
+            raise RuntimeError("TorchFT healing state export failed") from self._snapshot_error
         if self._healing_snapshot is None:
             raise RuntimeError("TorchFT healing state was not prepared")
         return self._healing_snapshot

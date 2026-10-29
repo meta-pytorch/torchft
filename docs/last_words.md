@@ -5,7 +5,8 @@ It is not documentation for an unmodified published wheel. The candidate adds
 Python coordination and Manager APIs while preserving upstream's native
 process-group reconfiguration. Build the native extension from this checkout;
 earlier results with the original 0.2.0 extension do not validate this branch.
-Real-device functional, precision and performance acceptance is incomplete.
+Real-device functional and numerical acceptance is incomplete; performance
+validation is deferred in the current plan.
 
 ## Ownership
 
@@ -81,6 +82,9 @@ injection points are keyword arguments `synchronize_device`,
 construction arguments remain applicable. The first two callbacks take no
 arguments. Synchronization must complete device work before restoration is
 declared complete, and the usability callback returns a boolean.
+LastWordsManager defaults to synchronous quorum and healing. An explicitly
+asynchronous configuration is rejected before native resources are initialized,
+including when the ordinary Manager arguments are supplied positionally.
 
 Bind application hooks before the first quorum:
 

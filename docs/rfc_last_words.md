@@ -99,6 +99,11 @@ The candidate Manager hooks are `set_last_words_hooks`, `begin_step`,
 state-dict registration and quorum/commit APIs. See [the interface notes](last_words.md)
 for signatures and threading constraints.
 
+The initial LastWordsManager contract requires synchronous quorum and healing.
+Unsupported asynchronous combinations fail during configuration, before native
+startup, rather than exposing a premature training boundary. This restriction
+applies to standalone users as well as the paired TorchTitan integration.
+
 The current logical-slot representation uses unique integer suffixes in replica
 IDs, as the paired application does. General identity mapping, asynchronous
 quorums and fixed-with-spares need further API design and coverage; they must not
