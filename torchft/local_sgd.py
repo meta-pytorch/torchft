@@ -499,43 +499,46 @@ class _StreamingDiLoCoFragment:
 
         Args:
             tensors: List of torch tensors (e.g., gradients).
-            bucket_size_bytes: Max size of each bucket in bytes.
+            bucket_size_bytes: Target size of each bucket in bytes. A tensor
+                larger than this gets a bucket of its own.
         """
         if not tensors:
             return
 
-        total_size = sum(t.numel() for t in tensors)
         dtype, device = tensors[0].dtype, tensors[0].device
+        bucket_numel = bucket_size_bytes // tensors[0].element_size()
 
-        offset = 0
         flat_index = 0
-        while offset < total_size:
-            chunk_size = min(
-                bucket_size_bytes // tensors[0].element_size(), total_size - offset
-            )
-            flat_buffer: torch.Tensor = torch.zeros(
-                chunk_size, dtype=dtype, device=device
-            )
-
+        while flat_index < len(tensors):
+            # A bucket always takes at least one tensor, so a tensor larger
+            # than the bucket size is reduced on its own.
             pack_offset: int = 0
             bucket_tensors: list[Tuple[torch.Tensor, int, int]] = []
             for t in tensors[flat_index:]:
                 numel = t.numel()
-                if pack_offset + numel > chunk_size:
+                if bucket_tensors and pack_offset + numel > bucket_numel:
                     break
-                flat_buffer[pack_offset : pack_offset + numel].copy_(t.view(-1))
                 bucket_tensors.append((t, pack_offset, numel))
                 pack_offset += numel
                 flat_index += 1
+
+            flat_buffer: torch.Tensor = torch.zeros(
+                pack_offset, dtype=dtype, device=device
+            )
+            for t, offset, numel in bucket_tensors:
+                flat_buffer[offset : offset + numel].copy_(t.view(-1))
 
             work = self._manager.allreduce(
                 flat_buffer, should_quantize=self.should_quantize
             )
 
+            # Bind the bucket as default arguments: the callback can run after
+            # the loop has moved on, e.g. when the work is waited on later.
             def callback(
                 fut: torch.futures.Future[list[torch.Tensor]],
+                bucket_tensors: list[Tuple[torch.Tensor, int, int]] = bucket_tensors,
+                flat_buffer: torch.Tensor = flat_buffer,
             ) -> list[torch.Tensor]:
-                nonlocal bucket_tensors, flat_buffer
                 for t, pack_offset, numel in bucket_tensors:
                     t.copy_(flat_buffer[pack_offset : pack_offset + numel].view_as(t))
 
@@ -546,11 +549,9 @@ class _StreamingDiLoCoFragment:
 
             self._allreduce_work.append(work)
 
-            offset += chunk_size
-
     def _allreduce_bucketized(self) -> None:
         """
-        Averages gradients using bucketized allreduce with a fixed buffer.
+        Averages gradients using bucketized allreduce, one flat buffer per bucket.
         """
         grads = list(self._grads.values())
         assert len(grads) > 0, "No gradients to allreduce"
