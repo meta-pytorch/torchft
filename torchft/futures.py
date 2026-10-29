@@ -242,9 +242,10 @@ class _TimeoutManager:
             self._register_callback, loop, callback, timeout, handle
         )
 
-        yield
-
-        handle.cancel()
+        try:
+            yield
+        finally:
+            handle.cancel()
 
     def _clear_del_queue(self) -> int:
         """
