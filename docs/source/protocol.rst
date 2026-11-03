@@ -1,5 +1,3 @@
-:github_url: https://github.com/pytorch/torchft/protocol
-
 Protocol
 ========
 
