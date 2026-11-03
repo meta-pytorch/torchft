@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import argparse
 import copy
 import json
 import logging
@@ -13,9 +12,8 @@ import sys
 import threading
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from contextlib import ExitStack
-from datetime import timedelta
-from typing import Any, Callable, cast, Dict, List, Optional, overload, Tuple
-from unittest import skipIf, TestCase
+from typing import Any, Callable, cast, Dict, List, Optional, overload
+from unittest import TestCase
 
 import torch
 from parameterized import parameterized
@@ -23,7 +21,6 @@ from torch import nn, optim
 from torchft._test.diloco_trainer import DiLoCoTrainer, MultiModel
 from torchft._torchft import LighthouseServer
 from torchft.local_sgd import DiLoCo
-from torchft.manager import Manager
 from torchft.manager_integ_test import EventInjector, EventInjectorEvent, Runner
 
 logging.basicConfig(level=logging.INFO)
