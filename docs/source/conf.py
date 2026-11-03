@@ -44,7 +44,7 @@ FBCODE = "fbcode" in os.getcwd()
 #
 needs_sphinx = "1.6"
 
-user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:25.0) Gecko/20100101 Firefox/25.0 github.com/pytorch/torchft"
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:25.0) Gecko/20100101 Firefox/25.0 github.com/meta-pytorch/torchft"
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
@@ -95,7 +95,7 @@ source_suffix = [".rst", ".md"]
 master_doc = "index"
 
 # General information about the project.
-project = "pytorch/torchft"
+project = "meta-pytorch/torchft"
 copyright = "2024, PyTorch Contributors"
 author = "PyTorch Contributors"
 
@@ -140,7 +140,7 @@ html_theme = "pytorch_sphinx_theme2"
 html_theme_path = [pytorch_sphinx_theme2.get_html_theme_path()]
 
 # opengraph protocol settings
-ogp_site_url = "http://pytorch.org/torchft"
+ogp_site_url = "https://meta-pytorch.org/torchft/"
 ogp_image = "https://pytorch.org/assets/images/social-share.jpg"
 
 # Theme options are theme-specific and customize the look and feel of a theme
@@ -165,7 +165,7 @@ html_theme_options = {
         },
         {
             "name": "GitHub",
-            "url": "https://github.com/pytorch/torchft",
+            "url": "https://github.com/meta-pytorch/torchft",
             "icon": "fa-brands fa-github",
         },
         {
@@ -193,9 +193,9 @@ html_context = {
     "theme_variables": theme_variables,
     "display_github": True,
     "github_url": "https://github.com",
-    "github_user": "pytorch",
+    "github_user": "meta-pytorch",
     "github_repo": "torchft",
-    "feedback_url": "https://github.com/pytorch/torchft",
+    "feedback_url": "https://github.com/meta-pytorch/torchft",
     "github_version": "main",
     "doc_path": "docs/source",
     "library_links": theme_variables.get("library_links", []),
@@ -204,7 +204,7 @@ html_context = {
 }
 
 # sitemap options
-html_baseurl = "https://pytorch.org/torchft/"  # needed for sphinx-sitemap
+html_baseurl = "https://meta-pytorch.org/torchft/"  # needed for sphinx-sitemap
 sitemap_locales = [None]
 sitemap_excludes = [
     "search.html",
@@ -422,4 +422,4 @@ def linkcode_resolve(domain, info) -> str | None:
 
     fn = os.path.relpath(fn, start=os.path.dirname(torchft.__file__))
 
-    return f"https://github.com/pytorch/torchft/blob/main/torchft/{fn}{linespec}"
+    return f"https://github.com/meta-pytorch/torchft/blob/main/torchft/{fn}{linespec}"

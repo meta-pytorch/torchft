@@ -10,8 +10,8 @@ Easy Per Step Fault Tolerance for PyTorch
 </h3>
 
 <p align="center">
-  | <a href="https://pytorch.org/torchft/"><b>Documentation</b></a>
-  | <a href="https://github.com/pytorch/torchft/blob/main/media/fault_tolerance_poster.pdf"><b>Poster</b></a>
+  | <a href="https://meta-pytorch.org/torchft/"><b>Documentation</b></a>
+  | <a href="https://github.com/meta-pytorch/torchft/blob/main/media/fault_tolerance_poster.pdf"><b>Poster</b></a>
   | <a href="https://docs.google.com/document/d/1OZsOsz34gRDSxYXiKkj4WqcD9x0lP9TcsfBeu_SsOY4/edit"><b>Design Doc</b></a>
   |
 </p>
@@ -56,7 +56,7 @@ relate to each other:
 
 ![Component Diagram](./media/overview.mmd.svg)
 
-See [torchft's documentation](https://pytorch.org/torchft) for more details.
+See [torchft's documentation](https://meta-pytorch.org/torchft/) for more details.
 
 ## Examples
 
