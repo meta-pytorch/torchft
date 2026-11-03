@@ -16,10 +16,22 @@ jobs:
             gpu-arch-type: "cpu"
             gpu-arch-version: ""
             torch-version: "nightly"
+            python-version: "3.12"
+          - runs-on: "linux.2xlarge"
+            gpu-arch-type: "cpu"
+            gpu-arch-version: ""
+            torch-version: "stable"
+            python-version: "3.14"
+          - runs-on: "linux.2xlarge"
+            gpu-arch-type: "cpu"
+            gpu-arch-version: ""
+            torch-version: "stable"
+            python-version: "3.15"
           - runs-on: "linux.g5.12xlarge.nvidia.gpu"
             gpu-arch-type: "cuda"
             gpu-arch-version: "12.4"
             torch-version: "nightly"
+            python-version: "3.12"
 
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
@@ -31,7 +43,7 @@ jobs:
         set -ex
 
         # install python and protobuf
-        conda create -n venv python=3.12 libprotobuf -y
+        conda create -n venv python=${{ matrix.python-version }} libprotobuf -y
         conda activate venv
         python -m pip install --upgrade pip
 
@@ -45,6 +57,9 @@ jobs:
         fi
         if [ "${{ matrix.torch-version }}" = "test" ]; then
           pip install --pre torch torchvision torchcomms --index-url https://download.pytorch.org/whl/test/cu126
+        fi
+        if [ "${{ matrix.torch-version }}" = "stable" ]; then
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
         fi
 
         # Install dependencies

@@ -14,6 +14,7 @@ use core::time::Duration;
 use std::cmp;
 use std::env;
 use std::sync::Arc;
+use std::sync::Once;
 use std::thread::available_parallelism;
 
 use anyhow::Result;
@@ -99,7 +100,7 @@ impl ManagerServer {
         connect_timeout: Duration,
         quorum_retries: i64,
     ) -> PyResult<Self> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(num_threads())
                 .thread_name("torchft-manager")
@@ -138,7 +139,7 @@ impl ManagerServer {
 
     /// shutdown shuts down the manager server.
     fn shutdown(&self, py: Python<'_>) {
-        py.allow_threads(move || {
+        py.detach(move || {
             self.handle.abort();
         })
     }
@@ -161,7 +162,7 @@ struct ManagerClient {
 impl ManagerClient {
     #[new]
     fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(num_threads())
                 .thread_name("torchft-mgrclnt")
@@ -188,7 +189,7 @@ impl ManagerClient {
         timeout: Duration,
         reconfigure_handle: String,
     ) -> Result<QuorumResult, StatusError> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
                 group_rank,
                 step,
@@ -229,7 +230,7 @@ impl ManagerClient {
         rank: i64,
         timeout: Duration,
     ) -> Result<String, StatusError> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut request = tonic::Request::new(CheckpointMetadataRequest { rank });
 
             // This timeout is processed on the server side so we also enable
@@ -266,7 +267,7 @@ impl ManagerClient {
         should_commit: bool,
         timeout: Duration,
     ) -> Result<bool, StatusError> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut request = tonic::Request::new(ShouldCommitRequest {
                 group_rank,
                 step,
@@ -372,7 +373,7 @@ async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
 ///     shrink_only (bool): Whether the quorum is for shrinking only.
 ///     timeout (timedelta): The timeout for quorum.
 ///     data (dict or None): The data to be passed with quorum.
-#[pyclass(get_all, set_all)]
+#[pyclass(get_all, set_all, from_py_object)]
 pub struct QuorumMember {
     replica_id: String,
     address: String,
@@ -400,11 +401,11 @@ impl QuorumMember {
 
 impl Clone for QuorumMember {
     fn clone(&self) -> Self {
-        Python::with_gil(|py| self.clone_with_py(py))
+        Python::attach(|py| self.clone_with_py(py))
     }
 }
 
-#[pyclass(get_all, set_all)]
+#[pyclass(get_all, set_all, from_py_object)]
 #[derive(Clone)]
 pub struct Timestamp {
     pub seconds: i64,
@@ -439,7 +440,7 @@ fn pydict_to_string<'py>(py: Python, data: Option<&Bound<'_, PyDict>>) -> PyResu
         Some(d) => {
             let json = py.import("json")?;
             let json_obj = json.call_method1("dumps", (d,))?;
-            let py_str: &Bound<PyString> = json_obj.downcast()?;
+            let py_str: &Bound<PyString> = json_obj.cast()?;
             Ok(py_str.to_str()?.to_owned())
         }
         None => Ok(String::new()),
@@ -453,7 +454,7 @@ fn string_to_pydict(py: Python, s: &str) -> PyResult<Option<Py<PyDict>>> {
 
     let json = py.import("json")?;
     let obj = json.call_method1("loads", (s,))?;
-    let dict: &Bound<PyDict> = obj.downcast()?;
+    let dict: &Bound<PyDict> = obj.cast()?;
     Ok(Some(dict.to_owned().into())) // convert Bound<PyDict> -> Py<PyDict>
 }
 
@@ -501,7 +502,7 @@ impl LighthouseClient {
     #[pyo3(signature = (addr, connect_timeout))]
     #[new]
     fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(num_threads())
                 .thread_name("torchft-lhclnt")
@@ -552,7 +553,7 @@ impl LighthouseClient {
         data: Option<&Bound<'_, PyDict>>,
     ) -> Result<Quorum, StatusError> {
         let data_string = pydict_to_string(py, data)?;
-        let quorum: Result<torchftpb::Quorum, StatusError> = py.allow_threads(move || {
+        let quorum: Result<torchftpb::Quorum, StatusError> = py.detach(move || {
             let mut request = tonic::Request::new(LighthouseQuorumRequest {
                 requester: Some(torchftpb::QuorumMember {
                     replica_id,
@@ -593,7 +594,7 @@ impl LighthouseClient {
         replica_id: String,
         timeout: Duration,
     ) -> Result<(), StatusError> {
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut req = tonic::Request::new(LighthouseHeartbeatRequest { replica_id });
             req.set_timeout(timeout);
             self.runtime.block_on(self.client.clone().heartbeat(req))?;
@@ -638,7 +639,7 @@ impl LighthouseServer {
         let quorum_tick_ms = quorum_tick_ms.unwrap_or(100);
         let heartbeat_timeout_ms = heartbeat_timeout_ms.unwrap_or(5000);
 
-        py.allow_threads(move || {
+        py.detach(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(num_threads())
                 .thread_name("torchft-lighths")
@@ -673,7 +674,7 @@ impl LighthouseServer {
 
     /// shutdown shuts down the lighthouse server.
     fn shutdown(&self, py: Python<'_>) {
-        py.allow_threads(move || {
+        py.detach(move || {
             self.handle.abort();
         })
     }
@@ -751,10 +752,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[pymodule]
+static SETUP_LOGGING: Once = Once::new();
+
+#[pymodule(gil_used = true)]
 fn _torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // setup logging on import
-    setup_logging().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    // setup logging on first import; the module init reruns on reimport
+    let mut result = Ok(());
+    SETUP_LOGGING.call_once(|| result = setup_logging().map_err(|e| e.to_string()));
+    result.map_err(PyRuntimeError::new_err)?;
 
     m.add_class::<Timestamp>()?;
     m.add_class::<QuorumMember>()?;
