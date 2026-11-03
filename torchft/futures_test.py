@@ -13,6 +13,7 @@ import torch
 from torch.futures import Future
 from torchft.futures import (
     _TIMEOUT_MANAGER,
+    _TimeoutManager,
     context_timeout,
     future_timeout,
     future_wait,
@@ -95,6 +96,17 @@ class FuturesTest(TestCase):
         del item
 
         self.assertEqual(_TIMEOUT_MANAGER._clear_del_queue(), 1)
+
+    def test_clear_del_queue(self) -> None:
+        manager = _TimeoutManager()
+        manager._del_queue.put(torch.Event(device="cpu"))
+        self.assertEqual(manager._clear_del_queue(), 1)
+
+        # an item referenced elsewhere must be detected
+        event = torch.Event(device="cpu")
+        manager._del_queue.put(event)
+        with self.assertRaisesRegex(AssertionError, "other references"):
+            manager._clear_del_queue()
 
     # Test that when a timeout handle gets stuck, `sys.exit(1)` is called
     @patch("sys.exit")

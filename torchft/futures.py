@@ -201,15 +201,19 @@ class _TimeoutManager:
 
         event: torch.Event = torch.Event()
         event.record()
+        # handler must not keep a reference to the event once it is queued
+        box = [event]
+        del event
 
         def handler() -> None:
-            if not event.query():
-                callback()
-
-            # cudaEventDestroy can block so we never want to delete in the event
-            # loop. Put it on the del queue so we can delete it in the main
-            # thread.
-            self._del_queue.put(event)
+            try:
+                if not box[0].query():
+                    callback()
+            finally:
+                # cudaEventDestroy can block so we never want to delete in the
+                # event loop. Put it on the del queue so we can delete it in the
+                # main thread.
+                self._del_queue.put(box.pop())
 
         loop.call_soon_threadsafe(
             self._register_callback, loop, handler, timeout, _TimerHandle()
@@ -258,10 +262,10 @@ class _TimeoutManager:
                 # get and immediately discard item
                 item = self._del_queue.get_nowait()
                 refcount = sys.getrefcount(item)
-                assert (
-                    # 1 from item, 1 from getrefcount
-                    refcount == 2
-                ), (
+                # 1 from item, 1 from getrefcount; Python 3.14+ borrows the
+                # local so getrefcount doesn't add one
+                expected = 1 if sys.version_info >= (3, 14) else 2
+                assert refcount == expected, (
                     f"items in del_queue reference should not have other references, found {refcount=}"
                 )
                 del item
