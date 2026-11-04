@@ -6,7 +6,6 @@
 
 import logging
 import os
-import sys
 from datetime import timedelta
 
 REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
@@ -20,9 +19,7 @@ import torch
 from torch import nn, optim
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.pipelining import pipeline, SplitPoint
-from torch.export import export
 from torch.utils.tensorboard import SummaryWriter
-from torchdata.stateful_dataloader import StatefulDataLoader
 from torchft import (
     DistributedSampler,
     Manager,
