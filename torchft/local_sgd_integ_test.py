@@ -21,7 +21,6 @@ from unittest import skipIf, TestCase
 import torch
 from parameterized import parameterized
 from torch import nn, optim
-from torch.distributed.pipelining import pipeline, SplitPoint
 from torch.distributed.tensor import DTensor, Replicate
 from torchft._test.diloco_trainer import DiLoCoTrainer, MultiMyModel
 from torchft._torchft import LighthouseServer
