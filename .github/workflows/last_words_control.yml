@@ -1,0 +1,21 @@
+name: Last-words control plane
+on:
+  pull_request:
+    paths:
+      - 'torchft_last_words/**'
+      - 'tests/last_words/**'
+      - '.github/workflows/last_words_control.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest pytest-timeout
+      - name: Exercise standard-library service and transport
+        run: python -m pytest tests/last_words/test_service_state.py tests/last_words/test_transport.py -v
