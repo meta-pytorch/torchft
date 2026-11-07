@@ -14,7 +14,7 @@ from torch import nn, optim, Tensor
 from torch.distributed.distributed_c10d import Work
 from torch.distributed.tensor import DTensor
 from torchft.local_sgd import DiLoCo, extract_local_tensor, LocalSGD
-from torchft.manager import Manager
+from torchft.manager import _ManagedWork, Manager
 from torchft.work import _DummyWork
 
 
@@ -275,6 +275,56 @@ class DiLoCoTest(TestCase):
         expected_grads = [g * 2 for g in grads]
         for param, expected in zip(model.parameters(), expected_grads):
             torch.testing.assert_close(param.grad, expected, rtol=1e-5, atol=1e-8)
+
+    @parameterized.expand(
+        [
+            # the second tensor has 3 elements, more than a bucket holds
+            ("tensor_larger_than_bucket", [2, 3], 2),
+            # 5 elements in total, more than a bucket holds
+            ("tensors_split_across_buckets", [2, 3], 4),
+            # needs three buckets: [2], [3] and [2]
+            ("three_buckets", [2, 3, 2], 4),
+        ]
+    )
+    def test_bucketization_multiple_buckets(
+        self, name: str, sizes: list[int], bucket_numel: int
+    ) -> None:
+        model = nn.Module()
+        model.params = nn.ParameterList(nn.Parameter(torch.zeros(n)) for n in sizes)
+        inner_opt = torch.optim.SGD(model.parameters(), lr=0.1)
+        outer_opt = torch.optim.SGD(model.parameters(), lr=0.1)
+
+        manager = create_autospec(Manager)
+        manager._use_async_quorum = False
+        manager.wrap_future = lambda fut, default, timeout=None: fut
+
+        # Fake allreduce: multiplies buffer by 2. Like Manager.allreduce it
+        # returns a _ManagedWork, which runs chained callbacks on wait().
+        def fake_allreduce(tensor: Tensor, should_quantize: bool) -> Work:
+            tensor.mul_(2)
+            return _ManagedWork(manager, _DummyWork(tensor), tensor)
+
+        manager.allreduce.side_effect = fake_allreduce
+
+        diloco = DiLoCo(
+            manager, [model], inner_opt, outer_opt, sync_every=2, use_bucketization=True
+        )
+        fragment = diloco._fragments[0]
+        # bucket_cap_mb holds the bucket size in bytes
+        fragment.bucket_cap_mb = bucket_numel * 4
+
+        grads = [torch.arange(1.0, n + 1) + 10 * i for i, n in enumerate(sizes)]
+        for g, (param_name, _) in zip(grads, model.named_parameters()):
+            fragment._grads[param_name] = g.clone()
+
+        fragment._average_grads()
+        for work in fragment._allreduce_work:
+            work.wait()
+        fragment._set_grads()
+
+        # Every gradient is reduced exactly once
+        for param, g in zip(model.parameters(), grads):
+            torch.testing.assert_close(param.grad, g * 2)
 
     def test_gradient_correctness(self) -> None:
         model = TinyModel()
