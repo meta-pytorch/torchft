@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import logging
 import os
 import threading
@@ -17,28 +16,15 @@ from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import auto, Enum
-from typing import (
-    Any,
-    cast,
-    Dict,
-    Generator,
-    List,
-    Optional,
-    Protocol,
-    Set,
-    Tuple,
-    TypeVar,
-)
+from typing import Any, cast, Dict, Generator, List, Optional, Protocol, Tuple, TypeVar
 from unittest import TestCase
 
 import torch
 import torch.distributed as dist
 from parameterized import parameterized
 from torch import nn, optim
-from torch._dynamo.utils import timed
 from torchft._torchft import LighthouseServer
 from torchft.ddp import DistributedDataParallel
-from torchft.local_sgd import DiLoCo, LocalSGD
 from torchft.manager import Manager
 from torchft.optim import OptimizerWrapper
 from torchft.process_group import (
