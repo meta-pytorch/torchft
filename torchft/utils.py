@@ -9,7 +9,7 @@ Utility functions for TorchFT.
 """
 
 from contextlib import nullcontext
-from typing import Any, cast, Optional, Union
+from typing import cast, Optional, Union
 
 import torch
 
