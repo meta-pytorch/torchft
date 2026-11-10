@@ -4,12 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import time
 from datetime import timedelta
 from multiprocessing.connection import Connection
 from typing import Union
-
-import torch.multiprocessing as mp
 
 
 class _MonitoredPipe:
