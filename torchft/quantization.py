@@ -62,6 +62,7 @@ def _fused_kernel_quantize_into_fp8(
     o_ptr,
     o_size_bytes_per_rank,
     all_reduce_size,
+    WIDE_INDEX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     TL_FP8_TYPE: tl.constexpr,
     TL_FP8_MAX: tl.constexpr,
@@ -88,6 +89,8 @@ def _fused_kernel_quantize_into_fp8(
     """
     # Index of the row in the input tensor
     i_row_idx = tl.program_id(0)
+    if WIDE_INDEX:
+        i_row_idx = i_row_idx.to(tl.int64)
     # Index of the input tensor
     i_idx = tl.program_id(1)
 
@@ -131,6 +134,8 @@ def _fused_kernel_quantize_into_fp8(
 
     # Compute maximum for the current row block by block
     col_offsets = tl.arange(0, BLOCK_SIZE)
+    if WIDE_INDEX:
+        col_offsets = col_offsets.to(tl.int64)
     col_maxes = tl.full((BLOCK_SIZE,), 0, dtype=tl.float32)
     for i_b in range(0, tl.cdiv(i_cols_num, BLOCK_SIZE)):
         i_row_block = tl.load(
@@ -148,6 +153,8 @@ def _fused_kernel_quantize_into_fp8(
 
     # Scale and quantize current row block by block
     col_offsets = tl.arange(0, BLOCK_SIZE)
+    if WIDE_INDEX:
+        col_offsets = col_offsets.to(tl.int64)
     for i_b in range(0, tl.cdiv(i_cols_num, BLOCK_SIZE)):
         i_row_block = tl.load(
             i_ptr + i_row_idx * i_row_stride + col_offsets * i_col_stride,
@@ -174,6 +181,7 @@ def _fused_kernel_dequantize_from_fp8(
     o_ptr,
     o_size_bytes_per_rank,
     all_reduce_size,
+    WIDE_INDEX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     TL_FP8_TYPE: tl.constexpr,
 ) -> None:
@@ -196,6 +204,8 @@ def _fused_kernel_dequantize_from_fp8(
     """
     # Index of the row in the input tensor
     i_row_idx = tl.program_id(0)
+    if WIDE_INDEX:
+        i_row_idx = i_row_idx.to(tl.int64)
     # Index of the input tensor
     i_idx = tl.program_id(1)
 
@@ -242,6 +252,8 @@ def _fused_kernel_dequantize_from_fp8(
 
     # Dequantize and store current row block by block
     col_offsets = tl.arange(0, BLOCK_SIZE)
+    if WIDE_INDEX:
+        col_offsets = col_offsets.to(tl.int64)
     for i_b in range(0, tl.cdiv(i_cols_num, BLOCK_SIZE)):
         i_quant_row_block = tl.load(
             o_quant_ptr + col_offsets,
@@ -269,6 +281,7 @@ def _fused_kernel_reduce_fp8(
     all_reduce_size,
     all_reduce_rank,
     division_factor,
+    WIDE_INDEX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     TL_FP8_TYPE: tl.constexpr,
     TL_FP8_MAX: tl.constexpr,
@@ -295,6 +308,9 @@ def _fused_kernel_reduce_fp8(
     """
     # Index of the row in the input tensor
     i_row_block_idx = tl.program_id(0)
+    if WIDE_INDEX:
+        i_row_block_idx = i_row_block_idx.to(tl.int64)
+        o_size_bytes_per_rank = tl.cast(o_size_bytes_per_rank, tl.int64)
     # Index of the input tensor
     i_idx = tl.program_id(1)
 
@@ -315,6 +331,8 @@ def _fused_kernel_reduce_fp8(
 
     o_row_block_acc = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
     col_offsets = tl.arange(0, BLOCK_SIZE)
+    if WIDE_INDEX:
+        col_offsets = col_offsets.to(tl.int64)
     # Compute scaling factor the reduced row
     o_row_max = 0.0
     for o_b in range(0, tl.cdiv(i_cols_num, BLOCK_SIZE)):
@@ -348,6 +366,8 @@ def _fused_kernel_reduce_fp8(
     )
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
+    if WIDE_INDEX:
+        col_offsets = col_offsets.to(tl.int64)
     # Reduce the row in blocks and write them out
     for o_b in range(0, tl.cdiv(i_cols_num, BLOCK_SIZE)):
         o_row_block_acc = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
@@ -483,6 +503,8 @@ def _prepare_quantize_fp8(
     i_strides = []
     i_offsets = []
     output_size = 0
+    max_input_offset = 0
+    max_metadata_value = 0
     i_max_row_num = 0
     output_size_per_rank = 0
     for i in range(i_num):
@@ -494,6 +516,11 @@ def _prepare_quantize_fp8(
         i_shapes.append([i_m, i_n])
         i_m_stride, i_n_stride = inputs[i].stride()
         i_strides.append([i_m_stride, i_n_stride])
+        max_input_offset = max(
+            max_input_offset,
+            max(i_m - 1, 0) * i_m_stride + max(i_n - 1, 0) * i_n_stride,
+        )
+        max_metadata_value = max(max_metadata_value, i_m, i_n, i_m_stride, i_n_stride)
         i_m_padded = triton.cdiv(i_m, all_reduce_group_size) * all_reduce_group_size
         i_max_row_num = max(i_max_row_num, i_m_padded)
 
@@ -507,14 +534,21 @@ def _prepare_quantize_fp8(
     d_i_ptrs = torch.empty(i_num, dtype=torch.int64, device=device)
     d_i_ptrs.copy_(torch.tensor(i_ptrs), non_blocking=True)
 
-    d_i_shapes = torch.empty(i_num, 2, dtype=torch.int32, device=device)
-    d_i_shapes.copy_(torch.tensor(i_shapes, dtype=torch.int32), non_blocking=True)
+    # Keep the fast 32-bit kernel for small inputs, but widen all index
+    # arithmetic when any address calculation can exceed its signed range.
+    index_dtype = (
+        torch.int64
+        if max(output_size, max_input_offset, max_metadata_value) >= 2**31
+        else torch.int32
+    )
+    d_i_shapes = torch.empty(i_num, 2, dtype=index_dtype, device=device)
+    d_i_shapes.copy_(torch.tensor(i_shapes, dtype=index_dtype), non_blocking=True)
 
-    d_i_strides = torch.empty(i_num, 2, dtype=torch.int32, device=device)
-    d_i_strides.copy_(torch.tensor(i_strides, dtype=torch.int32), non_blocking=True)
+    d_i_strides = torch.empty(i_num, 2, dtype=index_dtype, device=device)
+    d_i_strides.copy_(torch.tensor(i_strides, dtype=index_dtype), non_blocking=True)
 
-    d_i_offsets = torch.empty(i_num, dtype=torch.int32, device=device)
-    d_i_offsets.copy_(torch.tensor(i_offsets, dtype=torch.int32), non_blocking=True)
+    d_i_offsets = torch.empty(i_num, dtype=index_dtype, device=device)
+    d_i_offsets.copy_(torch.tensor(i_offsets, dtype=index_dtype), non_blocking=True)
 
     d_i_dtype = torch.empty(1, dtype=dtype, device=device)
 
@@ -582,6 +616,7 @@ def fused_quantize_into_fp8(
         output,
         output_size // all_reduce_group_size,
         all_reduce_group_size,
+        WIDE_INDEX=d_i_shapes.dtype == torch.int64,
         BLOCK_SIZE=BLOCK_SIZE_T,  # type: ignore
         TL_FP8_TYPE=_get_fp8_type(),
         TL_FP8_MAX=_get_fp8_max(),
@@ -632,6 +667,7 @@ def fused_dequantize_from_fp8(
         output,
         output_size // all_reduce_group_size,
         all_reduce_group_size,
+        WIDE_INDEX=d_i_shapes.dtype == torch.int64,
         BLOCK_SIZE=BLOCK_SIZE_T,  # type: ignore
         TL_FP8_TYPE=_get_fp8_type(),
     )
@@ -682,6 +718,7 @@ def fused_reduce_fp8(
         all_reduce_group_size,
         all_reduce_rank,
         1.0 if reduce_op == ReduceOp.SUM else float(all_reduce_group_size),
+        WIDE_INDEX=d_i_shapes.dtype == torch.int64,
         BLOCK_SIZE=BLOCK_SIZE_T,  # type: ignore
         TL_FP8_TYPE=_get_fp8_type(),
         TL_FP8_MAX=_get_fp8_max(),
