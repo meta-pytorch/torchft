@@ -9,7 +9,6 @@ from typing import Callable
 from unittest import skipUnless
 
 import torch
-import torch.distributed as dist
 from parameterized import parameterized
 from torch import cuda
 from torch.distributed import ReduceOp, ReduceScatterOptions
