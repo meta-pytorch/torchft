@@ -13,7 +13,6 @@ This module provides a prototype implementation of a fault tolerant parameter se
 
 import json
 import logging
-import socket
 import threading
 import urllib.request
 import uuid
@@ -23,6 +22,7 @@ from http.server import BaseHTTPRequestHandler
 from torch.distributed import TCPStore
 from torchft.http import _IPv6HTTPServer
 from torchft.process_group import ProcessGroup, reconfigure_with_store
+from torchft.utils import format_host_port, get_hostname
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -65,9 +65,8 @@ class ParameterServer(ABC):
 
                     session_id = str(uuid.uuid4())
 
-                    store_addr = (
-                        f"{socket.gethostname()}:{ps.store.port}/session/{session_id}"
-                    )
+                    host_port = format_host_port(get_hostname(), ps.store.port)
+                    store_addr = f"{host_port}/session/{session_id}"
 
                     logger.info(f"creating new session {session_id}")
 
@@ -119,7 +118,7 @@ class ParameterServer(ABC):
             an HTTP address
         """
         port = self._server.socket.getsockname()[1]
-        return f"http://{socket.gethostname()}:{port}/new_session"
+        return f"http://{format_host_port(get_hostname(), port)}/new_session"
 
     def _serve(self) -> None:
         try:

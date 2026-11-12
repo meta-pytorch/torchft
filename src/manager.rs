@@ -31,6 +31,7 @@ use tonic::transport::Server;
 use tonic::transport::server::TcpIncoming;
 
 use crate::net::connect;
+use crate::net::format_host_port;
 use crate::timeout::try_parse_grpc_timeout;
 use crate::torchftpb::CheckpointMetadataRequest;
 use crate::torchftpb::CheckpointMetadataResponse;
@@ -174,7 +175,10 @@ impl Manager {
     }
 
     pub fn address(&self) -> String {
-        format!("http://{}:{}", self.hostname, self.local_addr.port())
+        format!(
+            "http://{}",
+            format_host_port(&self.hostname, self.local_addr.port())
+        )
     }
 
     async fn _run_grpc(self: Arc<Self>) -> Result<()> {

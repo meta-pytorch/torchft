@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import concurrent
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import cast, Optional
 from unittest import skipUnless, TestCase
@@ -15,8 +17,9 @@ import torch
 import torch.distributed as dist
 from torch._C._distributed_c10d import ErrorType
 from torch.distributed import ReduceOp, TCPStore
-from torchft._torchft import QuorumResult
+from torchft._torchft import LighthouseServer, QuorumResult
 from torchft.checkpointing._rwlock import RWLock
+from torchft.checkpointing.http_transport import HTTPTransport
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.manager import (
     _ManagedWork,
@@ -25,7 +28,7 @@ from torchft.manager import (
     REPLICA_ID_KEY,
     WorldSizeMode,
 )
-from torchft.process_group import ManagedProcessGroup, ProcessGroup
+from torchft.process_group import ManagedProcessGroup, ProcessGroup, ProcessGroupGloo
 from torchft.work import _DummyWork
 
 
@@ -1129,3 +1132,145 @@ class TestManagedWork(TestCase):
         self.assertFalse(work.wait(timeout=timeout))
         inner_work.wait.assert_called_once_with(timeout)
         manager.report_error.assert_called_once_with(error)
+
+
+class TestManagerHostname(TestCase):
+    def _create_rank0_manager(
+        self,
+        env: dict[str, str],
+        hostname: Optional[str] = None,
+        store_addr: Optional[str] = None,
+    ) -> tuple[Manager, MagicMock]:
+        target_addr = store_addr or env.get("MASTER_ADDR", "")
+        store_host = "::1" if ":" in target_addr else "localhost"
+        store = TCPStore(
+            host_name=store_host,
+            port=0,
+            is_master=True,
+            wait_for_workers=False,
+        )
+        pg = create_autospec(ProcessGroup)
+        # pyrefly: ignore [missing-attribute]
+        pg.errored.return_value = None
+        full_env = {
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(store.port),
+            "RANK": "0",
+            "WORLD_SIZE": "1",
+            "TORCHFT_LIGHTHOUSE": "http://localhost:29510",
+            **env,
+        }
+        with (
+            patch.dict(os.environ, full_env, clear=True),
+            patch("torchft.manager.ManagerServer") as server_cls,
+            patch("torchft.manager.ManagerClient"),
+        ):
+            server_cls.return_value.address.return_value = "http://mocked:1234"
+            manager = Manager(
+                # pyrefly: ignore [bad-argument-type]
+                pg=pg,
+                min_replica_size=1,
+                load_state_dict=MagicMock(),
+                state_dict=lambda: {},
+                store_addr=store_addr,
+                hostname=hostname,
+            )
+            self.addCleanup(lambda: manager.shutdown(wait=False))
+        return manager, server_cls
+
+    def test_manager_honors_torchft_hostname_ipv4(self) -> None:
+        _, server_cls = self._create_rank0_manager({"TORCHFT_HOSTNAME": "10.4.0.12"})
+        self.assertEqual(server_cls.call_args.kwargs["hostname"], "10.4.0.12")
+
+    def test_manager_normalizes_ipv6_hostname_and_store_addr(self) -> None:
+        _, server_cls = self._create_rank0_manager(
+            {"TORCHFT_HOSTNAME": "[2001:db8::1]", "MASTER_ADDR": "[::1]"}
+        )
+        self.assertEqual(server_cls.call_args.kwargs["hostname"], "2001:db8::1")
+        self.assertTrue(server_cls.call_args.kwargs["store_addr"].startswith("[::1]:"))
+
+    def test_manager_explicit_hostname_overrides_env(self) -> None:
+        _, server_cls = self._create_rank0_manager(
+            {"TORCHFT_HOSTNAME": "10.4.0.12"}, hostname="explicit.host"
+        )
+        self.assertEqual(server_cls.call_args.kwargs["hostname"], "explicit.host")
+
+    def test_manager_live_quorum_with_torchft_hostname(self) -> None:
+        for env_host, expected_prefix in [
+            ("127.0.0.1", "http://127.0.0.1:"),
+            ("::1", "http://[::1]:"),
+        ]:
+            with self.subTest(env_host=env_host):
+                with patch.dict(os.environ, {"TORCHFT_HOSTNAME": env_host}):
+                    lh = LighthouseServer(bind="[::]:0", min_replicas=2)
+                    self.addCleanup(lh.shutdown)
+                    self.assertTrue(
+                        lh.address().startswith(expected_prefix),
+                        f"unexpected lighthouse address {lh.address()!r}",
+                    )
+
+                    state = [
+                        {"weight": torch.tensor([42.0])},
+                        {"weight": torch.tensor([0.0])},
+                    ]
+                    managers = []
+                    for i in range(2):
+                        store = TCPStore(
+                            host_name=env_host,
+                            port=0,
+                            is_master=True,
+                            wait_for_workers=False,
+                        )
+                        pg = ProcessGroupGloo()
+                        manager = Manager(
+                            pg=pg,
+                            min_replica_size=2,
+                            load_state_dict=lambda sd, idx=i: state.__setitem__(
+                                idx, sd
+                            ),
+                            state_dict=lambda idx=i: state[idx],
+                            replica_id=f"hostname_live_test_{i}",
+                            store_addr=env_host,
+                            store_port=store.port,
+                            rank=0,
+                            world_size=1,
+                            use_async_quorum=False,
+                            init_sync=True,
+                            lighthouse_addr=lh.address(),
+                        )
+                        self.addCleanup(manager.shutdown)
+                        assert manager._manager is not None
+                        self.assertTrue(
+                            manager._manager.address().startswith(expected_prefix),
+                            f"unexpected manager address {manager._manager.address()!r}",
+                        )
+                        assert isinstance(manager._checkpoint_transport, HTTPTransport)
+                        self.assertTrue(
+                            manager._checkpoint_transport.address().startswith(
+                                expected_prefix
+                            ),
+                            f"unexpected checkpoint address {manager._checkpoint_transport.address()!r}",
+                        )
+                        managers.append(manager)
+
+                    # Run 2 replicas concurrently through quorum, checkpoint sync, and allreduce.
+                    def _run_replica(args: tuple[Manager, float]) -> torch.Tensor:
+                        m, val = args
+                        m.start_quorum()
+                        t = torch.tensor([val])
+                        work = m.allreduce(t)
+                        work.wait()
+                        return t
+
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        results = list(
+                            pool.map(
+                                _run_replica, [(managers[0], 1.0), (managers[1], 3.0)]
+                            )
+                        )
+
+                    for t in results:
+                        self.assertTrue(torch.allclose(t, torch.tensor([2.0])))
+                    self.assertTrue(
+                        torch.equal(state[1]["weight"], torch.tensor([42.0]))
+                    )

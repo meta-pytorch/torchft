@@ -28,7 +28,6 @@ and Hybrid FSDP.
 import concurrent.futures
 import logging
 import os
-import socket
 import traceback
 import uuid
 import weakref
@@ -47,7 +46,12 @@ from torchft.checkpointing import CheckpointTransport, HTTPTransport
 from torchft.checkpointing._rwlock import RWLock
 from torchft.futures import future_timeout
 from torchft.process_group import ProcessGroup, ReconfigureOptions
-from torchft.utils import get_stream_context, synchronize
+from torchft.utils import (
+    format_host_port,
+    get_hostname,
+    get_stream_context,
+    synchronize,
+)
 from torchft.work import _DummyWork
 
 IS_TRITON_AVAILABLE = True
@@ -163,7 +167,7 @@ class Manager:
         lighthouse_addr: Optional[str] = None,
         replica_id: Optional[str] = None,
         port: Optional[int] = None,
-        hostname: str = socket.gethostname(),
+        hostname: Optional[str] = None,
         heartbeat_interval: timedelta = timedelta(milliseconds=100),
         checkpoint_transport: Optional[CheckpointTransport[Dict[str, T]]] = None,
         init_sync: bool = True,
@@ -207,7 +211,12 @@ class Manager:
             store_port: TCPStore port for this replica group
             lighthouse_addr: if rank==0, the address of the lighthouse server
             replica_id: if rank==0, the replica_id for this group
-            hostname: if rank==0, the hostname to advertise to the lighthouse server
+            hostname: if rank==0, the hostname or IP address to advertise to the
+                lighthouse server.
+                Hostname assignment priority:
+                1. this argument
+                2. TORCHFT_HOSTNAME env var
+                3. socket.gethostname()
             checkpoint_transport: the checkpoint transport to use for
                 transfering checkpoints to recovering replicas, defaults to HTTPTransport
             init_sync: whether to synchronize the model weights on step 0. If
@@ -263,7 +272,7 @@ class Manager:
             os.environ.get(QUORUM_RETRIES_ENV, str(quorum_retries))
         )
 
-        store_addr = store_addr or os.environ["MASTER_ADDR"]
+        store_addr = (store_addr or os.environ["MASTER_ADDR"]).strip().strip("[]")
         store_port = store_port or int(os.environ["MASTER_PORT"])
         self._group_rank: int = rank if rank is not None else int(os.environ["RANK"])
         group_rank = self._group_rank
@@ -318,9 +327,9 @@ class Manager:
             self._manager = ManagerServer(
                 replica_id=replica_id,
                 lighthouse_addr=lighthouse_addr,
-                hostname=hostname,
+                hostname=get_hostname(hostname),
                 bind=bind,
-                store_addr=f"{store_addr}:{store_port}",
+                store_addr=format_host_port(store_addr, store_port),
                 world_size=self._group_world_size,
                 heartbeat_interval=heartbeat_interval,
                 connect_timeout=connect_timeout,

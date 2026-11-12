@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import socket
 import threading
 import time
 import urllib.request
@@ -21,7 +20,7 @@ from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing._serialization import _streaming_load, _streaming_save
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.http import _IPv6HTTPServer
-from torchft.utils import get_stream_context
+from torchft.utils import format_host_port, get_hostname, get_stream_context
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -173,7 +172,7 @@ class HTTPTransport(CheckpointTransport[T]):
             an HTTP address
         """
         port = self._server.socket.getsockname()[1]
-        return f"http://{socket.gethostname()}:{port}/checkpoint/"
+        return f"http://{format_host_port(get_hostname(), port)}/checkpoint/"
 
     def _serve(self) -> None:
         try:

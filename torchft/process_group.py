@@ -19,7 +19,6 @@ runtime users need to take care to not assume a static rank or world size.
 import json
 import logging
 import os
-import socket
 import threading
 import time
 import uuid
@@ -70,7 +69,13 @@ from torch.utils._pytree import tree_any
 # We import these for backwards compatibility
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
-from torchft.utils import get_stream_context, record_event, synchronize
+from torchft.utils import (
+    format_host_port,
+    get_hostname,
+    get_stream_context,
+    record_event,
+    synchronize,
+)
 from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
@@ -406,10 +411,11 @@ class ProcessGroup(BaseProcessGroup):
         Returns a handle identifying this group, its rendezvous store and rank
         info. The store is hosted by this process group.
         """
+        host = get_hostname()
         store = self._rendezvous_store
         if store is None:
             store = self._rendezvous_store = TCPStore(
-                host_name=socket.gethostname(),
+                host_name=host,
                 port=0,
                 is_master=True,
                 wait_for_workers=False,
@@ -417,7 +423,7 @@ class ProcessGroup(BaseProcessGroup):
         return json.dumps(
             {
                 "id": self._handle_id(),
-                "store": f"{socket.gethostname()}:{store.port}",
+                "store": format_host_port(host, store.port),
                 "global_rank": self._global_rank,
             }
         )

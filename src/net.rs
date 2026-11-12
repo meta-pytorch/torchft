@@ -4,15 +4,47 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use std::env;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use gethostname::gethostname;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
 
 use crate::retry::ExponentialBackoff;
 use crate::retry::retry_backoff;
+
+pub const HOSTNAME_ENV: &str = "TORCHFT_HOSTNAME";
+
+fn normalize_host(host: &str) -> &str {
+    host.trim().trim_matches(|c| c == '[' || c == ']')
+}
+
+fn get_hostname_from(env_val: Option<&str>, fallback: impl FnOnce() -> String) -> String {
+    if let Some(raw) = env_val {
+        let normalized = normalize_host(raw);
+        if !normalized.is_empty() {
+            return normalized.to_string();
+        }
+    }
+    fallback()
+}
+
+pub fn get_hostname() -> String {
+    let env_val = env::var(HOSTNAME_ENV).ok();
+    get_hostname_from(env_val.as_deref(), || gethostname().into_string().unwrap())
+}
+
+pub fn format_host_port(host: &str, port: u16) -> String {
+    let bare = normalize_host(host);
+    if bare.contains(':') {
+        format!("[{}]:{}", bare, port)
+    } else {
+        format!("{}:{}", bare, port)
+    }
+}
 
 /// Formats an error with its full source chain since the Display
 /// implementation for many errors (e.g. tonic's "transport error") omits the
@@ -83,5 +115,34 @@ mod tests {
             "missing underlying cause in error: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_get_hostname_from() {
+        assert_eq!(
+            get_hostname_from(Some("10.0.0.5"), || "os-host".to_string()),
+            "10.0.0.5"
+        );
+        assert_eq!(
+            get_hostname_from(Some(" [::1] "), || "os-host".to_string()),
+            "::1"
+        );
+        assert_eq!(
+            get_hostname_from(Some("   "), || "os-host".to_string()),
+            "os-host"
+        );
+        assert_eq!(
+            get_hostname_from(Some("[]"), || "os-host".to_string()),
+            "os-host"
+        );
+        assert_eq!(get_hostname_from(None, || "os-host".to_string()), "os-host");
+    }
+
+    #[test]
+    fn test_format_host_port() {
+        assert_eq!(format_host_port("worker-0", 29510), "worker-0:29510");
+        assert_eq!(format_host_port("10.244.1.5", 29510), "10.244.1.5:29510");
+        assert_eq!(format_host_port("::1", 29510), "[::1]:29510");
+        assert_eq!(format_host_port(" [fd00::1] ", 29510), "[fd00::1]:29510");
     }
 }

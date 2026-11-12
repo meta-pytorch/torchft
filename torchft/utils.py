@@ -8,10 +8,14 @@
 Utility functions for TorchFT.
 """
 
+import os
+import socket
 from contextlib import nullcontext
-from typing import Any, cast, Optional, Union
+from typing import cast, Optional, Union
 
 import torch
+
+HOSTNAME_ENV: str = "TORCHFT_HOSTNAME"
 
 
 def get_stream_context(
@@ -68,3 +72,31 @@ def synchronize() -> None:
         torch.cuda.current_stream().synchronize()
     elif torch.xpu.is_available():
         torch.xpu.current_stream().synchronize()
+
+
+def get_hostname(hostname: Optional[str] = None) -> str:
+    """
+    Returns the unbracketed hostname or IP address to advertise to peers.
+
+    Resolution priority:
+        1. Explicit non-empty ``hostname`` argument.
+        2. ``TORCHFT_HOSTNAME`` environment variable.
+        3. ``socket.gethostname()``.
+
+    Surrounding IPv6 brackets (e.g. ``[::1]``) are stripped so the returned
+    value can be passed directly to APIs such as ``TCPStore`` and formatted
+    with :func:`format_host_port`.
+    """
+    raw = (hostname or "").strip().strip("[]")
+    env = os.environ.get(HOSTNAME_ENV, "").strip().strip("[]")
+    return raw or env or socket.gethostname()
+
+
+def format_host_port(host: str, port: int) -> str:
+    """
+    Formats a host and port as ``host:port``, wrapping IPv6 literals in brackets.
+    """
+    bare_host = host.strip().strip("[]")
+    if ":" in bare_host:
+        return f"[{bare_host}]:{port}"
+    return f"{bare_host}:{port}"

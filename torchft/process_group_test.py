@@ -854,6 +854,31 @@ class CreateStoreClientTest(TestCase):
         self.assertEqual(kwargs["port"], port)
         self.assertEqual(prefix_store.call_args.args[0], prefix)
 
+    @parameterized.expand(
+        [
+            ("ipv4", "127.0.0.1", "127.0.0.1:"),
+            ("ipv6", "::1", "[::1]:"),
+            ("bracketed_ipv6", "[::1]", "[::1]:"),
+        ]
+    )
+    def test_get_reconfigure_handle_honors_torchft_hostname(
+        self, _name: str, env_host: str, expected_prefix: str
+    ) -> None:
+        pg = ProcessGroupGloo()
+        with patch.dict(os.environ, {"TORCHFT_HOSTNAME": env_host}):
+            handle = json.loads(pg.get_reconfigure_handle())
+
+        self.assertTrue(
+            handle["store"].startswith(expected_prefix),
+            f"expected store starting with {expected_prefix!r}, got {handle['store']!r}",
+        )
+        # Verify the advertised store address round-trips through reconfigure.
+        opts = ReconfigureOptions()
+        opts.uuid = 1
+        opts.handles = [json.dumps(handle)]
+        pg.reconfigure(opts).wait()
+        pg.shutdown()
+
 
 class MultiPgBaseTest(TestCase):
     """

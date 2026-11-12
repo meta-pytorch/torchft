@@ -22,7 +22,6 @@ use axum::response::Html;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
-use gethostname::gethostname;
 use log::error;
 use log::info;
 use structopt::StructOpt;
@@ -38,6 +37,8 @@ use tonic::transport::Server;
 use tonic::transport::server::TcpIncoming;
 
 use crate::manager::manager_client_new;
+use crate::net::format_host_port;
+use crate::net::get_hostname;
 use crate::torchftpb::KillRequest;
 use crate::torchftpb::LighthouseHeartbeatRequest;
 use crate::torchftpb::LighthouseHeartbeatResponse;
@@ -68,6 +69,7 @@ struct State {
 pub struct Lighthouse {
     state: Mutex<State>,
     opt: LighthouseOpt,
+    hostname: String,
     listener: Mutex<Option<tokio::net::TcpListener>>,
     local_addr: SocketAddr,
     change_logger: ChangeLogger,
@@ -283,6 +285,7 @@ impl Lighthouse {
                 heartbeats: HashMap::new(),
             }),
             opt,
+            hostname: get_hostname(),
             local_addr: listener.local_addr()?,
             listener: Mutex::new(Some(listener)),
             change_logger: ChangeLogger::new(),
@@ -353,9 +356,8 @@ impl Lighthouse {
 
     pub fn address(&self) -> String {
         format!(
-            "http://{}:{}",
-            gethostname().into_string().unwrap(),
-            self.local_addr.port()
+            "http://{}",
+            format_host_port(&self.hostname, self.local_addr.port())
         )
     }
 

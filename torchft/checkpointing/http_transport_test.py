@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import urllib.error
 from datetime import timedelta
 from typing import Dict
 from unittest import skipUnless, TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 from parameterized import parameterized
@@ -142,3 +143,41 @@ class TestHTTPTransport(TestCase):
                 "--device=cpu",
             ]
         )
+
+    @parameterized.expand(
+        [
+            ("ipv4", "127.0.0.1", "http://127.0.0.1:"),
+            ("ipv6", "::1", "http://[::1]:"),
+            ("bracketed_ipv6", "[::1]", "http://[::1]:"),
+        ]
+    )
+    def test_torchft_hostname_override(
+        self, _name: str, env_host: str, expected_prefix: str
+    ) -> None:
+        expected: Dict[str, object] = {"tensor": torch.arange(4)}
+        with patch.dict(os.environ, {"TORCHFT_HOSTNAME": env_host}):
+            server = HTTPTransport[Dict[str, object]](
+                timeout=timedelta(seconds=10),
+                num_chunks=0,
+            )
+            try:
+                addr = server.address()
+                self.assertTrue(
+                    addr.startswith(expected_prefix),
+                    f"expected address starting with {expected_prefix!r}, got {addr!r}",
+                )
+                server.send_checkpoint(
+                    dst_ranks=[],
+                    step=1,
+                    state_dict=expected,
+                    timeout=timedelta(seconds=10),
+                )
+                out = server.recv_checkpoint(
+                    src_rank=0,
+                    metadata=addr,
+                    step=1,
+                    timeout=timedelta(seconds=10),
+                )
+                assertStateDictEqual(self, out, expected)
+            finally:
+                server.shutdown()

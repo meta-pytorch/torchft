@@ -4,9 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import time
 from datetime import timedelta
-from unittest import TestCase
+from unittest import mock, TestCase
+from urllib.parse import urlparse
 
 import torch.distributed as dist
 from torchft import Manager, ProcessGroupGloo
@@ -160,3 +162,38 @@ class TestLighthouse(TestCase):
 
         finally:
             lighthouse.shutdown()
+
+    def test_lighthouse_hostname_env_override(self) -> None:
+        for env_host, expected_host in (
+            ("127.0.0.1", "127.0.0.1"),
+            ("::1", "::1"),
+            ("[::1]", "::1"),
+        ):
+            with self.subTest(env_host=env_host):
+                with mock.patch.dict(os.environ, {"TORCHFT_HOSTNAME": env_host}):
+                    lighthouse = LighthouseServer(
+                        bind="[::]:0",
+                        min_replicas=1,
+                        join_timeout_ms=100,
+                    )
+                try:
+                    addr = lighthouse.address()
+                    parsed = urlparse(addr)
+                    self.assertEqual(parsed.hostname, expected_host)
+                    if ":" in expected_host:
+                        self.assertIn(f"[{expected_host}]:", addr)
+
+                    client = LighthouseClient(
+                        addr=addr,
+                        connect_timeout=timedelta(seconds=2),
+                    )
+                    quorum = client.quorum(
+                        replica_id="hostname_test",
+                        timeout=timedelta(seconds=2),
+                    )
+                    self.assertEqual(
+                        [m.replica_id for m in quorum.participants],
+                        ["hostname_test"],
+                    )
+                finally:
+                    lighthouse.shutdown()

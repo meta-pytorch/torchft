@@ -4,9 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from unittest import TestCase
+from unittest.mock import patch
 
 import torch
+from parameterized import parameterized
 from torchft.parameter_server import ParameterServer
 from torchft.process_group import ProcessGroup, ProcessGroupGloo
 
@@ -43,3 +46,26 @@ class TestParameterServer(TestCase):
         # recv from server (0) to client (1)
         pg.broadcast_one(data, root=0).wait()
         self.assertEqual(data[0].item(), 12 + 23)
+
+    @parameterized.expand(
+        [
+            ("ipv4", "127.0.0.1", "http://127.0.0.1:"),
+            ("ipv6", "::1", "http://[::1]:"),
+        ]
+    )
+    def test_parameter_server_torchft_hostname(
+        self, _name: str, env_host: str, expected_prefix: str
+    ) -> None:
+        with patch.dict(os.environ, {"TORCHFT_HOSTNAME": env_host}):
+            ps = MyParameterServer()
+            addr = ps.address()
+            self.assertTrue(
+                addr.startswith(expected_prefix),
+                f"expected address starting with {expected_prefix!r}, got {addr!r}",
+            )
+            pg = MyParameterServer.new_session(addr)
+
+            data = torch.tensor([12.0])
+            pg.broadcast_one(data, root=1).wait()
+            pg.broadcast_one(data, root=0).wait()
+            self.assertEqual(data[0].item(), 12 + 23)
