@@ -56,9 +56,12 @@ class HTTPTransport(CheckpointTransport[T]):
         self._timeout = timeout
         self._state_dict: Optional[T] = None
         self._num_chunks = num_chunks
+        # Only CUDA/XPU tensors are staged to CPU (see _to_cpu), so other
+        # accelerators (e.g. MPS, whose streams can't be synchronized) don't
+        # need a stream.
         self._stream: Optional[torch.Stream] = (
             torch.Stream(torch.accelerator.current_accelerator())
-            if torch.accelerator.is_available()
+            if torch.cuda.is_available() or torch.xpu.is_available()
             else None
         )
 
