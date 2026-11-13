@@ -8,7 +8,7 @@ import urllib.error
 from datetime import timedelta
 from typing import Dict
 from unittest import skipUnless, TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 from parameterized import parameterized
@@ -132,6 +132,37 @@ class TestHTTPTransport(TestCase):
             )
 
         run_multi_recovery_test(self, init, device=device)
+
+    def test_checkpoint_server_non_cuda_accelerator(self) -> None:
+        # Accelerators other than CUDA/XPU (e.g. MPS) must not get a staging
+        # stream: MPS streams can't be synchronized and CPU tensors don't need
+        # one.
+        expected: Dict[str, object] = {"tensor": torch.rand(5, 2)}
+        with (
+            patch("torch.accelerator.is_available", return_value=True),
+            patch(
+                "torch.accelerator.current_accelerator",
+                return_value=torch.device("mps"),
+            ),
+            patch("torch.cuda.is_available", return_value=False),
+            patch("torch.xpu.is_available", return_value=False),
+        ):
+            server = HTTPTransport(timeout=timedelta(seconds=10), num_chunks=0)
+            self.assertIsNone(server._stream)
+            server.send_checkpoint(
+                dst_ranks=[],
+                step=1,
+                state_dict=expected,
+                timeout=timedelta(seconds=10),
+            )
+        out = server.recv_checkpoint(
+            src_rank=0,
+            metadata=server.metadata(),
+            step=1,
+            timeout=timedelta(seconds=10),
+        )
+        assertStateDictEqual(self, out, expected)
+        server.shutdown()
 
     def test_benchmark(self) -> None:
         bench_main(
