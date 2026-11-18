@@ -270,21 +270,21 @@ class PGTransport(CheckpointTransport[T]):
         meta: _StateDictMeta = pickle.loads(buf.cpu().numpy().tobytes())
         assert meta.step == step
 
-        # Chunked batched receive into fresh device buffers: irecvs are posted
-        # in a tight loop per chunk (HCCL P2P completes a send only after its
-        # matching irecv is posted, so dense posting keeps the sender at fabric
-        # bandwidth), then waits drain and views rebuild. Chunks are bounded by
-        # TORCHFT_RECV_CHUNK_BYTES (default 1.5GB) so the peak device footprint
-        # is ~2 chunks instead of the whole state, and a lookahead chunk is
-        # posted before the previous one is waited so the sender never stalls
-        # across chunk boundaries. Buffers stay on device (no .cpu() D2H
-        # round-trip); _restore_tensor_leaves copies them into the live tensors
-        # with a fast D2D copy during apply. Inplace recv into live training
-        # tensors is NOT used: HCCL on Ascend triggers FORCE STOP when
-        # receiving into allocator-unsafe (live) storage, so fresh buffers
-        # (alloc-serial) are the safe fast path.
+        # Batch-receive straight into freshly allocated device buffers: post
+        # all irecvs for a chunk in one tight loop (a P2P send only completes
+        # once its matching irecv is posted, so dense posting lets the sender
+        # run at fabric bandwidth), then wait for the recvs and rebuild the
+        # tensors. Chunks are bounded by TORCHFT_RECV_CHUNK_BYTES (default
+        # 1.5GB) so the peak device footprint is ~2 chunks instead of the
+        # whole state, and a lookahead chunk is posted before the previous one
+        # is waited so the sender never stalls across chunk boundaries.
+        # Buffers stay on device (no .cpu() D2H round-trip); the caller copies
+        # them into the live tensors with a fast D2D copy during apply.
+        # Inplace recv into live training tensors is NOT used: some backends
+        # reject receiving into allocator-unsafe (live) storage, so fresh
+        # buffers (alloc-serial) are the safe fast path.
         chunk_bytes = int(
-            os.environ.get("TORCHFT_RECV_CHUNK_BYTES", str(1500 * 1024 * 1024))
+            os.environ.get("TORCHFT_RECV_CHUNK_BYTES", str(1000 * 1024 * 1024))
         )
         results: list[object] = [None] * len(meta.paths)
         tensor_metas: list[tuple] = []  # (pos, m, is_dt, spec) in tag order
