@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import os
 import pickle
 import time
 from contextlib import contextmanager
@@ -269,55 +270,84 @@ class PGTransport(CheckpointTransport[T]):
         meta: _StateDictMeta = pickle.loads(buf.cpu().numpy().tobytes())
         assert meta.step == step
 
-        i: int = 0
-        works: list[Work] = []
+        # Chunked batched receive into fresh device buffers: irecvs are posted
+        # in a tight loop per chunk (HCCL P2P completes a send only after its
+        # matching irecv is posted, so dense posting keeps the sender at fabric
+        # bandwidth), then waits drain and views rebuild. Chunks are bounded by
+        # TORCHFT_RECV_CHUNK_BYTES (default 1.5GB) so the peak device footprint
+        # is ~2 chunks instead of the whole state, and a lookahead chunk is
+        # posted before the previous one is waited so the sender never stalls
+        # across chunk boundaries. Buffers stay on device (no .cpu() D2H
+        # round-trip); _restore_tensor_leaves copies them into the live tensors
+        # with a fast D2D copy during apply. Inplace recv into live training
+        # tensors is NOT used: HCCL on Ascend triggers FORCE STOP when
+        # receiving into allocator-unsafe (live) storage, so fresh buffers
+        # (alloc-serial) are the safe fast path.
+        chunk_bytes = int(
+            os.environ.get("TORCHFT_RECV_CHUNK_BYTES", str(1500 * 1024 * 1024))
+        )
+        results: list[object] = [None] * len(meta.paths)
+        tensor_metas: list[tuple] = []  # (pos, m, is_dt, spec) in tag order
+        for pos, v in enumerate(meta.non_tensor_leaves):
+            if isinstance(v, _DTensorMeta):
+                tensor_metas.append((pos, v.local, True, v.spec))
+            elif isinstance(v, _TensorMeta):
+                tensor_metas.append((pos, v, False, None))
+            else:
+                results[pos] = v
 
-        def recv(path: KeyPath, v: _TensorMeta) -> torch.Tensor:
-            nonlocal i
+        chunks: list[list[tuple]] = []
+        cur: list[tuple] = []
+        cur_bytes = 0
+        for item in tensor_metas:
+            b = item[1].nbytes
+            if cur and cur_bytes + b > chunk_bytes:
+                chunks.append(cur)
+                cur = []
+                cur_bytes = 0
+            cur.append(item)
+            cur_bytes += b
+        if cur:
+            chunks.append(cur)
 
-            inplace = dst_tensors.get(path)
-            if (
-                isinstance(inplace, torch.Tensor)
-                and inplace.device.type == self._device.type
-            ):
-                if isinstance(inplace, DTensor):
-                    inplace = inplace._local_tensor
-                t = _cast_tensor(inplace, torch.uint8)
-                assert t.nbytes == v.nbytes, (
-                    "inplace tensor storage must be the same size"
+        prev_works: list[Work] = []
+        prev_bufs: list = []
+        prev_chunk: list = []
+        seq = 0
+        for chunk in chunks:
+            bufs = []
+            works = []
+            for pos, m, is_dt, spec in chunk:
+                t = torch.empty(m.nbytes, dtype=torch.uint8, device=self._device)
+                bufs.append(t)
+                works.append(self._pg.recv([t], src_rank, tag=3 + seq))
+                seq += 1
+            if prev_works:
+                for w in prev_works:
+                    w.wait(wait_timeout)
+                for (pos, m, is_dt, spec), t in zip(prev_chunk, prev_bufs):
+                    base = torch.as_strided(
+                        t.view(m.dtype),
+                        size=m.shape,
+                        stride=m.stride,
+                        storage_offset=m.storage_offset,
+                    )
+                    results[pos] = (
+                        DTensor(base, spec, requires_grad=False) if is_dt else base
+                    )
+            prev_works, prev_bufs, prev_chunk = works, bufs, chunk
+        if prev_works:
+            for w in prev_works:
+                w.wait(wait_timeout)
+            for (pos, m, is_dt, spec), t in zip(prev_chunk, prev_bufs):
+                base = torch.as_strided(
+                    t.view(m.dtype),
+                    size=m.shape,
+                    stride=m.stride,
+                    storage_offset=m.storage_offset,
                 )
-            else:
-                t = torch.empty(v.nbytes, dtype=torch.uint8, device=self._device)
+                results[pos] = (
+                    DTensor(base, spec, requires_grad=False) if is_dt else base
+                )
 
-            work = self._pg.recv([t], src_rank, tag=3 + i)
-            i += 1
-
-            if inplace is None:
-                # if not inplace we need to copy it to CPU to avoid OOMing
-                work.wait(wait_timeout)
-                t = t.cpu()
-            else:
-                works.append(work)
-
-            return torch.as_strided(
-                t.view(v.dtype),
-                size=v.shape,
-                stride=v.stride,
-                storage_offset=v.storage_offset,
-            )
-
-        values = []
-        for path, v in zip(meta.paths, meta.non_tensor_leaves):
-            if isinstance(v, _TensorMeta):
-                values.append(recv(path, v))
-            elif isinstance(v, _DTensorMeta):
-                tensor = recv(path, v.local)
-                values.append(DTensor(tensor, v.spec, requires_grad=False))
-            else:
-                # pyrefly: ignore [bad-argument-type]
-                values.append(v)
-
-        for work in works:
-            work.wait(wait_timeout)
-
-        return tree_unflatten(values, meta.treespec)
+        return tree_unflatten(results, meta.treespec)
