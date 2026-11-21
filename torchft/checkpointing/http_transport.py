@@ -13,10 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
-from typing import cast, Generator, List, Optional, TypeVar
+from typing import cast, Generator, List, Optional, Sequence, Sized, TypeVar
 
 import torch
-from torch.utils._pytree import tree_flatten, tree_unflatten, TreeSpec
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing._serialization import _streaming_load, _streaming_save
 from torchft.checkpointing.transport import CheckpointTransport
@@ -47,15 +47,24 @@ class HTTPTransport(CheckpointTransport[T]):
     Args:
         timeout: the timeout for HTTP requests
         num_chunks: the number of chunks to split the checkpoint into (0 for no chunking)
+        weights_only: load received checkpoints with ``weights_only=True``.
+            Disabling this unpickles arbitrary objects from the peer, which
+            allows remote code execution by an untrusted peer. Types other
+            than tensors, primitives and builtin containers (e.g. namedtuples,
+            custom classes) must be allowlisted on the receiving replica via
+            ``torch.serialization.add_safe_globals``.
     """
 
-    def __init__(self, timeout: timedelta, num_chunks: int) -> None:
+    def __init__(
+        self, timeout: timedelta, num_chunks: int, *, weights_only: bool = True
+    ) -> None:
         self._checkpoint_lock = RWLock(timeout=timeout.total_seconds())
         self._disallowed = False
         self._step = -1
         self._timeout = timeout
         self._state_dict: Optional[T] = None
         self._num_chunks = num_chunks
+        self._weights_only = weights_only
         self._stream: Optional[torch.Stream] = (
             torch.Stream(torch.accelerator.current_accelerator())
             if torch.accelerator.is_available()
@@ -63,7 +72,8 @@ class HTTPTransport(CheckpointTransport[T]):
         )
 
         # staged checkpoint information
-        self._spec: Optional[TreeSpec] = None
+        # state_dict structure with leaves replaced by their flattened index
+        self._skeleton: object = None
         self._chunks: Optional[List[List[object]]] = None
 
         # We don't allow checkpoints until the first send_checkpoint to avoid
@@ -117,7 +127,7 @@ class HTTPTransport(CheckpointTransport[T]):
                             self.send_header("Content-type", "application/octet-stream")
                             self.end_headers()
 
-                            _streaming_save(ckpt_server._spec, self.wfile)
+                            _streaming_save(ckpt_server._skeleton, self.wfile)
                         else:
                             assert ckpt_server._chunks is not None
                             chunk = ckpt_server._chunks[int(key)]
@@ -144,8 +154,7 @@ class HTTPTransport(CheckpointTransport[T]):
         )
         self._thread.start()
 
-    @classmethod
-    def _load_from_address(cls, address: str, timeout: timedelta) -> object:
+    def _load_from_address(self, address: str, timeout: timedelta) -> object:
         """
         Loads a checkpoint from the given address.
 
@@ -159,9 +168,7 @@ class HTTPTransport(CheckpointTransport[T]):
             _time(msg),
             urllib.request.urlopen(address, timeout=timeout.total_seconds()) as f,
         ):
-            # We have to set weights_only to False as there are some non-tensor
-            # states like lr_scheduler.
-            return cast(T, _streaming_load(f, weights_only=False))
+            return cast(T, _streaming_load(f, weights_only=self._weights_only))
 
     def address(self) -> str:
         """
@@ -233,8 +240,10 @@ class HTTPTransport(CheckpointTransport[T]):
         # Unflatten so non-chunked transfer uses CPU tensors
         self._state_dict = tree_unflatten(values, spec)
 
-        # Save spec for chunked
-        self._spec = spec
+        # TreeSpec can't be loaded with weights_only=True so chunked transfer
+        # sends the structure with index leaves instead.
+        if self._num_chunks > 0:
+            self._skeleton = tree_unflatten(list(range(len(values))), spec)
         self._chunks = _split_chunks(values, self._num_chunks)
 
         self.allow_checkpoint(step)
@@ -256,13 +265,37 @@ class HTTPTransport(CheckpointTransport[T]):
                     for url in urls
                 ]
 
-                spec, *chunks = [future.result() for future in futures]
-                spec = cast(TreeSpec, spec)
+                skeleton, *chunks = [future.result() for future in futures]
                 chunks = cast(List[List[object]], chunks)
 
             values = _merge_chunks(chunks, self._num_chunks)
 
-            return tree_unflatten(values, spec)
+            return cast(T, _unflatten_skeleton(skeleton, values))
+
+
+def _unflatten_skeleton(skeleton: object, values: Sequence[object]) -> object:
+    """
+    Rebuilds a state_dict from a structure with index leaves received from a
+    peer. Rejects shared containers (exponential traversal) and invalid indices.
+    """
+    seen = set()
+
+    def is_leaf(node: object) -> bool:
+        if type(node) is int:
+            return True
+        if node is None or (isinstance(node, Sized) and len(node) == 0):
+            return False
+        if id(node) in seen:
+            raise ValueError("invalid checkpoint metadata: shared container")
+        seen.add(id(node))
+        return False
+
+    indices, spec = tree_flatten(skeleton, is_leaf=is_leaf)
+    if not all(type(i) is int for i in indices) or sorted(indices) != list(
+        range(len(values))
+    ):
+        raise ValueError("invalid checkpoint metadata: bad leaf indices")
+    return tree_unflatten([values[i] for i in indices], spec)
 
 
 def _to_cpu(values: List[T], pin_memory: bool) -> List[T]:
