@@ -3,8 +3,6 @@ project-includes = ["torchft"]
 project-excludes = ["**/__pycache__/**"]
 untyped-def-behavior = "check-and-infer-return-any"
 replace-imports-with-any = [
-    "torchcomms",
-    "torchcomms.*",
     "triton",
     "triton.*",
 ]
