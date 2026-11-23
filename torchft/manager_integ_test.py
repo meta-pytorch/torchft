@@ -813,6 +813,8 @@ def all_reduce_callback(
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
         if device.type == "cuda":
+            # Manager and the baby PG worker bind to the caller's current device.
+            torch.cuda.set_device(device)
             pg = ProcessGroupBabyNCCL()
         else:
             pg = ProcessGroupGloo()

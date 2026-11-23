@@ -24,7 +24,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-          pip install --pre torch torchvision torchcomms --index-url https://download.pytorch.org/whl/nightly/cu126
+          pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu132
           pip install .[dev] -v
 
           # install recent version of Rust via rustup

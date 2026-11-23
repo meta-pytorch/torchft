@@ -910,6 +910,25 @@ class _WorkAcceleratorTimeout(Work):
         return fut
 
 
+def _new_nccl_backend(
+    store: Store,
+    rank: int,
+    world_size: int,
+    opts: "torch.distributed.ProcessGroupNCCL.Options",
+) -> "torch.distributed.ProcessGroupNCCL":
+    """Creates a NCCL backend bound to the current CUDA device."""
+    from torch.distributed import ProcessGroupNCCL as BaseProcessGroupNCCL
+
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    try:
+        # nccl2 binds at construction and defaults to rank % device_count.
+        # pyrefly: ignore [unexpected-keyword]
+        return BaseProcessGroupNCCL(store, rank, world_size, opts, device_id=device)
+    except TypeError:
+        # Legacy ProcessGroupNCCL has no device_id and binds lazily.
+        return BaseProcessGroupNCCL(store, rank, world_size, opts)
+
+
 class ProcessGroupNCCL(ProcessGroupWrapper):
     """
     This is a reconfigurable version of ProcessGroupNCCL.
@@ -995,7 +1014,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
-        backend_class = BaseProcessGroupNCCL(store, rank, world_size, opts)
+        backend_class = _new_nccl_backend(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         backend_class.eager_connect_single_device(
             torch.device(torch.accelerator.current_device_index())
@@ -2131,7 +2150,7 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
         opts = BaseProcessGroupNCCL.Options()
-        backend_class = BaseProcessGroupNCCL(store, rank, world_size, opts)
+        backend_class = _new_nccl_backend(store, rank, world_size, opts)
         backend_class._set_sequence_number_for_group()
         pg._register_backend(
             torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
