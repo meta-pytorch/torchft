@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import urllib.error
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import Dict
 from unittest import skipUnless, TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 from parameterized import parameterized
@@ -120,6 +121,34 @@ class TestHTTPTransport(TestCase):
             )
 
         run_multi_recovery_test(self, init, device=device)
+
+    def test_staging_waits_for_the_callers_stream(self) -> None:
+        # The copies to CPU run on the transport's staging stream, but the
+        # tensors were written on the caller's current stream, so staging must
+        # wait for that stream before it copies anything.
+        server = HTTPTransport(timeout=timedelta(seconds=10), num_chunks=0)
+        staging = MagicMock()
+        current = MagicMock()
+        server._stream = staging
+        with (
+            patch(
+                "torchft.checkpointing.http_transport.torch.accelerator.current_stream",
+                return_value=current,
+            ),
+            patch(
+                "torchft.checkpointing.http_transport.get_stream_context",
+                return_value=nullcontext(),
+            ),
+        ):
+            server.send_checkpoint(
+                dst_ranks=[],
+                step=1,
+                state_dict={"tensor": torch.rand(2)},
+                timeout=timedelta(seconds=10),
+            )
+        server.shutdown()
+        self.assertEqual(staging.method_calls[0], ("wait_stream", (current,), {}))
+        staging.synchronize.assert_called_once_with()
 
     @skipUnless(torch.cuda.is_available(), "CUDA is not available")
     def test_multi_http_transport_cuda(self) -> None:

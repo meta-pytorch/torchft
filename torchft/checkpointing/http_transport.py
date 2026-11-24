@@ -224,6 +224,13 @@ class HTTPTransport(CheckpointTransport[T]):
     ) -> None:
         values, spec = tree_flatten(state_dict)
 
+        if self._stream is not None:
+            # The copies below run on the staging stream. Order them after the
+            # work already queued on the caller's current stream, which wrote
+            # these tensors; otherwise a copy can read a tensor before it is
+            # written.
+            self._stream.wait_stream(torch.accelerator.current_stream())
+
         with get_stream_context(self._stream):
             with _time("transferring state_dict to CPU"):
                 values = _to_cpu(values, pin_memory=False)

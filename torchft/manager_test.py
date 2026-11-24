@@ -6,6 +6,7 @@
 
 import concurrent
 import threading
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import cast, Optional
 from unittest import skipUnless, TestCase
@@ -818,6 +819,55 @@ class TestManager(TestCase):
         assert error is not None
         with self.assertRaisesRegex(RuntimeError, "send failure"):
             raise error.original_exception
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_recovery_send_waits_for_the_training_stream(
+        self, client_mock: MagicMock
+    ) -> None:
+        # The checkpoint for a recovering peer is sent from the quorum thread on
+        # the recovery stream, while the state dict was written on the training
+        # thread's stream. start_quorum records an event on the training stream
+        # and the recovery stream waits on it before the send.
+        manager = self._create_manager(use_async_quorum=True)
+        recovery_stream = MagicMock()
+        manager._recovery_stream = recovery_stream
+        transport = MagicMock(spec=CheckpointTransport)
+        manager._checkpoint_transport = transport
+        order = MagicMock()
+        order.attach_mock(recovery_stream.wait_event, "wait_event")
+        order.attach_mock(transport.send_checkpoint, "send_checkpoint")
+
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 0
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_replica_rank = 0
+        quorum.max_world_size = 2
+        quorum.heal = False
+        quorum.recover_dst_replica_ranks = [1]
+        client_mock()._quorum.return_value = quorum
+
+        training_stream = MagicMock()
+        accelerator = MagicMock()
+        accelerator.is_available.return_value = True
+        accelerator.current_device_index.return_value = 0
+        accelerator.current_stream.return_value = training_stream
+        with (
+            patch("torchft.manager.torch.accelerator", accelerator),
+            patch("torchft.manager.get_stream_context", return_value=nullcontext()),
+        ):
+            manager.start_quorum()
+            manager.wait_quorum()
+
+        self.assertIsNone(manager.errored())
+        state_dict_ready = training_stream.record_event.return_value
+        self.assertEqual(
+            [c[0] for c in order.mock_calls], ["wait_event", "send_checkpoint"]
+        )
+        recovery_stream.wait_event.assert_called_once_with(state_dict_ready)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_configure_errors(self, client_mock: MagicMock) -> None:

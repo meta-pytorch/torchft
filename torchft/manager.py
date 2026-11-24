@@ -578,6 +578,10 @@ class Manager:
         It's best practice to call this before the forwards pass of each step for
         performance as computing quorum may take some time.
 
+        The state dict must be written on, or joined into, the current stream
+        before this call: a checkpoint sent to a recovering peer waits only for
+        the work queued on this stream so far.
+
         Args:
             allow_heal: (experimental) whether to allow healing at the beginning of the step
                 If allow_heal is set, the manager will attempt to heal either
@@ -597,6 +601,16 @@ class Manager:
         # TODO: we should really be wrapping this whole section in a try-except
         # block to allow gracefully recovering from issues in PG setup and quorum.
 
+        # The state dict was last written on this thread's current stream (the
+        # previous step's optimizer step). A checkpoint for a recovering peer is
+        # sent from the quorum thread on the recovery stream, so mark where
+        # those writes end for the recovery stream to wait on.
+        state_dict_ready = (
+            torch.accelerator.current_stream().record_event()
+            if allow_heal and self._recovery_stream is not None
+            else None
+        )
+
         self._quorum_future = self._executor.submit(
             self._async_quorum,
             allow_heal=allow_heal,
@@ -607,6 +621,7 @@ class Manager:
                 if torch.accelerator.is_available()
                 else -1
             ),
+            state_dict_ready=state_dict_ready,
         )
         if not self._use_async_quorum:
             self.wait_quorum()
@@ -647,6 +662,7 @@ class Manager:
         shrink_only: bool,
         quorum_timeout: timedelta,
         curr_device: int,
+        state_dict_ready: Optional[torch.Event] = None,
     ) -> None:
         torch.multiprocessing._set_thread_name("torchft_quorum")
 
@@ -743,6 +759,10 @@ class Manager:
             with get_stream_context(recovery_stream):
                 try:
                     if quorum.recover_dst_replica_ranks:
+                        if recovery_stream is not None and state_dict_ready is not None:
+                            # Order the send after the training stream's writes
+                            # to the state dict (recorded in start_quorum).
+                            recovery_stream.wait_event(state_dict_ready)
                         self._logger.info(
                             f"peers need recovery from us {quorum.recover_dst_replica_ranks}"
                         )
