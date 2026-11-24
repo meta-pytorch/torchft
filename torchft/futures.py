@@ -330,7 +330,7 @@ def stream_timeout(callback: Callable[[], None], timeout: timedelta) -> None:
     Registers a callback that will be called after the specified timeout if
     the current stream doesn't complete in time.
 
-    This uses a cuda Event to track the completion of the current stream. If
+    This uses an accelerator event to track the completion of the current stream. If
     the stream is not complete after the timeout, the callback is called.
 
     Args:

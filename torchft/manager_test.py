@@ -28,6 +28,10 @@ from torchft.manager import (
 from torchft.process_group import ManagedProcessGroup, ProcessGroup
 from torchft.work import _DummyWork
 
+# The PrivateUse1 backend's current name: "privateuseone", or e.g. "neuron"
+# once an out-of-tree backend such as torch-neuronx has renamed it.
+_PRIVATEUSE1: str = torch._C._get_privateuse1_backend_name()
+
 
 HAS_RECONFIGURE: bool = hasattr(dist.ProcessGroup, "reconfigure")
 
@@ -1116,6 +1120,45 @@ class TestManagedWork(TestCase):
         self.assertTrue(work.wait())
         inner_work.wait.assert_called_once_with()
         manager.report_error.assert_not_called()
+
+    def _synchronize_on(self, device_type: Optional[str]) -> MagicMock:
+        """Calls `synchronize()` with `device_type` as the current accelerator
+        and returns the underlying work."""
+        inner_work = MagicMock(spec=dist._Work)
+        future: torch.futures.Future[object] = torch.futures.Future()
+        future.set_result(None)
+        inner_work.get_future.return_value = future
+        # created without a stream so the mocked accelerator is never queried
+        # for a real one
+        work = _ManagedWork(self._manager(), inner_work, None)
+        work._stream = None
+
+        with (
+            patch(
+                "torchft.utils.torch.accelerator.is_available",
+                return_value=device_type is not None,
+            ),
+            patch(
+                "torchft.utils.torch.accelerator.current_accelerator",
+                return_value=torch.device(device_type) if device_type else None,
+            ),
+        ):
+            work.synchronize()
+
+        self.assertTrue(work._is_set_future_callback_called)
+        return inner_work
+
+    def test_synchronize_blocks_stream_on_cuda(self) -> None:
+        inner_work = self._synchronize_on("cuda")
+        inner_work.block_current_stream.assert_called_once_with()
+
+    def test_synchronize_uses_future_callback_on_other_devices(self) -> None:
+        # Only CUDA implements the default Work.block_current_stream(); any
+        # other accelerator, and CPU, only set up the future callback chain.
+        for device_type in ("xpu", _PRIVATEUSE1, None):
+            with self.subTest(device_type=device_type):
+                inner_work = self._synchronize_on(device_type)
+                inner_work.block_current_stream.assert_not_called()
 
     def test_wait_reports_timeout_error(self) -> None:
         manager = self._manager()

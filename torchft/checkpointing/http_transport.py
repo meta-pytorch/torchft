@@ -21,7 +21,7 @@ from torchft.checkpointing._rwlock import RWLock
 from torchft.checkpointing._serialization import _streaming_load, _streaming_save
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.http import _IPv6HTTPServer
-from torchft.utils import get_stream_context
+from torchft.utils import get_stream_context, synchronizable_stream
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -56,11 +56,10 @@ class HTTPTransport(CheckpointTransport[T]):
         self._timeout = timeout
         self._state_dict: Optional[T] = None
         self._num_chunks = num_chunks
-        self._stream: Optional[torch.Stream] = (
-            torch.Stream(torch.accelerator.current_accelerator())
-            if torch.accelerator.is_available()
-            else None
-        )
+        # _to_cpu stages any non-CPU tensor. It uses a separate stream only if
+        # the accelerator's streams can be synchronized (not MPS); otherwise it
+        # stages on the current stream.
+        self._stream: Optional[torch.Stream] = synchronizable_stream()
 
         # staged checkpoint information
         self._spec: Optional[TreeSpec] = None
@@ -269,7 +268,8 @@ def _to_cpu(values: List[T], pin_memory: bool) -> List[T]:
     out = []
     for v in values:
         if isinstance(v, torch.Tensor):
-            if v.device.type in ("cuda", "xpu"):
+            # Stage tensors on any accelerator (or other non-CPU device) to CPU.
+            if v.device.type not in ("cpu", "meta"):
                 if pin_memory:
                     cpu = torch.empty(*tuple(v.size()), dtype=v.dtype, pin_memory=True)
                     cpu.copy_(v, non_blocking=True)

@@ -10,10 +10,11 @@ import os
 import sys
 import weakref
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import timedelta
-from typing import Any, Callable, cast, Dict, List
+from typing import Any, Callable, cast, Dict, Generator, List, Optional
 from unittest import skipIf, skipUnless, TestCase
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.distributed as dist
@@ -39,6 +40,7 @@ from torch.distributed import (
 from torchft.manager import Manager
 from torchft.process_group import (
     _ErrorSwallowingWork,
+    _is_any_accelerator,
     create_store_client,
     ErrorSwallowingProcessGroupWrapper,
     ManagedProcessGroup,
@@ -53,6 +55,10 @@ from torchft.process_group import (
     ReconfigureOptions,
 )
 from torchft.work import _DummyWork
+
+# The PrivateUse1 backend's current name: "privateuseone", or e.g. "neuron"
+# once an out-of-tree backend such as torch-neuronx has renamed it.
+_PRIVATEUSE1: str = torch._C._get_privateuse1_backend_name()
 
 
 def _reconfigure_with_missing_peer(pg: ProcessGroup) -> None:
@@ -336,7 +342,7 @@ def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) ->
 def run_barrier_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     """Test barrier collective operation."""
     opts = BarrierOptions()
-    if tensor.is_cuda:
+    if tensor.device.type != "cpu":
         device_id = tensor.device.index
         opts.device_ids = [device_id]
     barrier_work = pg.barrier(opts)
@@ -507,6 +513,182 @@ _COLLECTIVE_TO_FUNC: Dict[str, Callable[[ProcessGroup, int, torch.Tensor], None]
     "send/recv": run_send_recv_test,
 }
 _ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
+
+
+@contextmanager
+def _mock_accelerator(device_type: Optional[str]) -> Generator[None, None, None]:
+    """Pretends ``device_type`` is the current accelerator (None: no accelerator)."""
+    with (
+        patch(
+            "torchft.utils.torch.accelerator.is_available",
+            return_value=device_type is not None,
+        ),
+        patch(
+            "torchft.utils.torch.accelerator.current_accelerator",
+            return_value=torch.device(device_type) if device_type is not None else None,
+        ),
+    ):
+        yield
+
+
+class AcceleratorDispatchTest(TestCase):
+    """
+    Checks that the accelerator specific paths use whatever accelerator
+    torch.accelerator reports rather than a fixed list of device types.
+    These run without accelerator hardware by mocking torch.accelerator.
+    """
+
+    @patch("torchft.process_group.dist.Backend.register_backend")
+    def test_register_includes_current_accelerator(
+        self, register_backend: Mock
+    ) -> None:
+        with _mock_accelerator(_PRIVATEUSE1):
+            group_name = ProcessGroupDummy(0, 1)._register("test_backend")
+
+        self.assertEqual(group_name, "torchft-dummy:test_backend")
+        self.assertEqual(
+            register_backend.call_args.kwargs["devices"], ["cpu", _PRIVATEUSE1]
+        )
+
+    @patch("torchft.process_group.dist.Backend.register_backend")
+    def test_register_does_not_duplicate_cpu(self, register_backend: Mock) -> None:
+        with _mock_accelerator("cpu"):
+            ProcessGroupDummy(0, 1)._register("test_cpu_backend")
+
+        self.assertEqual(register_backend.call_args.kwargs["devices"], ["cpu"])
+
+    @patch("torchft.process_group.dist.Backend.register_backend")
+    def test_register_without_accelerator_uses_cpu_only(
+        self, register_backend: Mock
+    ) -> None:
+        with _mock_accelerator(None):
+            ProcessGroupDummy(0, 1)._register("test_no_accelerator")
+
+        self.assertEqual(register_backend.call_args.kwargs["devices"], ["cpu"])
+
+    def test_wrapper_abort_uses_current_accelerator_backend(self) -> None:
+        backend = Mock()
+
+        class BackendOnlyProcessGroup:
+            def _get_backend(self, requested_device: torch.device) -> Mock:
+                self.requested_device = requested_device
+                return backend
+
+        pg = BackendOnlyProcessGroup()
+        wrapper = ProcessGroupWrapper(pg=cast(Any, pg))
+
+        with _mock_accelerator(_PRIVATEUSE1):
+            wrapper.abort()
+
+        self.assertEqual(pg.requested_device, torch.device(_PRIVATEUSE1))
+        backend.abort.assert_called_once_with()
+        self.assertIsNone(wrapper._pg)
+
+    def test_wrapper_abort_backend_lookup_failure_is_nonfatal(self) -> None:
+        class FailingBackendLookupProcessGroup:
+            def _get_backend(self, _device: torch.device) -> None:
+                raise RuntimeError("backend unavailable")
+
+        wrapper = ProcessGroupWrapper(pg=cast(Any, FailingBackendLookupProcessGroup()))
+
+        with _mock_accelerator(_PRIVATEUSE1):
+            wrapper.abort()
+
+        self.assertIsNone(wrapper._pg)
+
+    def test_gloo_registers_current_accelerator(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        pg = ProcessGroupGloo()
+        with _mock_accelerator(_PRIVATEUSE1):
+            reconfigure_with_store(pg, f"localhost:{store.port}/prefix", 0, 1)
+
+        base_pg = pg.parent
+        self.assertIs(
+            base_pg._get_backend(torch.device(_PRIVATEUSE1)),
+            base_pg._get_backend(torch.device("cpu")),
+        )
+
+    def test_is_any_accelerator(self) -> None:
+        accelerator_tensor = MagicMock(spec=torch.Tensor)
+        accelerator_tensor.device = torch.device(_PRIVATEUSE1)
+        cpu_tensor = torch.zeros(1)
+
+        with _mock_accelerator(_PRIVATEUSE1):
+            self.assertTrue(_is_any_accelerator([[cpu_tensor, accelerator_tensor]]))
+            self.assertTrue(_is_any_accelerator({"a": accelerator_tensor}))
+            self.assertFalse(_is_any_accelerator([cpu_tensor, "not a tensor"]))
+        with _mock_accelerator(None):
+            self.assertFalse(_is_any_accelerator([accelerator_tensor]))
+
+    @patch(
+        "torchft.process_group.accelerator_events_cross_processes", return_value=True
+    )
+    @patch("torchft.process_group.record_event")
+    @patch("torchft.process_group.torch.accelerator.current_stream")
+    def test_baby_run_func_streams_accelerator_tensors(
+        self, current_stream: Mock, record_event: Mock, _crosses: Mock
+    ) -> None:
+        stream = current_stream.return_value
+        accelerator_tensor = MagicMock(spec=torch.Tensor)
+        accelerator_tensor.device = torch.device(_PRIVATEUSE1)
+
+        pg = ProcessGroupBabyGloo()
+        pipe = Mock()
+        pg._pipe = pipe
+
+        def last_func_call() -> tuple[object, ...]:
+            calls = [c.args[0] for c in pipe.send.call_args_list]
+            return [c for c in calls if c[0] == "func"][-1]
+
+        with _mock_accelerator(_PRIVATEUSE1):
+            accelerator_work = pg._run_func("allreduce", [accelerator_tensor])
+
+        (_, _, func, _, _, stream_device, stream_id, event) = last_func_call()
+        self.assertEqual(func, "allreduce")
+        self.assertIs(stream_device, stream.device)
+        self.assertIs(stream_id, stream.stream_id)
+        self.assertIs(event, record_event.return_value)
+        self.assertIs(cast(Any, accelerator_work)._stream, stream)
+
+        # CPU tensors don't set up any stream dependencies.
+        record_event.reset_mock()
+        with _mock_accelerator(_PRIVATEUSE1):
+            cpu_work = pg._run_func("allreduce", [torch.zeros(1)])
+        (*_, stream_device, stream_id, event) = last_func_call()
+        self.assertIsNone(stream_device)
+        self.assertIsNone(stream_id)
+        self.assertIsNone(event)
+        record_event.assert_not_called()
+        self.assertIsNone(cast(Any, cpu_work)._stream)
+
+    @patch(
+        "torchft.process_group.accelerator_events_cross_processes", return_value=False
+    )
+    @patch("torchft.process_group.record_event")
+    def test_baby_run_func_skips_events_that_cannot_be_pickled(
+        self, record_event: Mock, _crosses: Mock
+    ) -> None:
+        # The event goes through a pipe to the worker. An accelerator whose
+        # events have no reducer (e.g. the generic torch.Event) must not put one
+        # in the message, or pipe.send raises.
+        accelerator_tensor = MagicMock(spec=torch.Tensor)
+        accelerator_tensor.device = torch.device(_PRIVATEUSE1)
+        pg = ProcessGroupBabyGloo()
+        pipe = Mock()
+        pg._pipe = pipe
+
+        with _mock_accelerator(_PRIVATEUSE1):
+            work = pg._run_func("allreduce", [accelerator_tensor])
+
+        sent = [c.args[0] for c in pipe.send.call_args_list if c.args[0][0] == "func"]
+        (*_, stream_device, stream_id, event) = sent[-1]
+        self.assertIsNone(stream_device)
+        self.assertIsNone(stream_id)
+        self.assertIsNone(event)
+        record_event.assert_not_called()
+        self.assertIsNone(cast(Any, work)._stream)
 
 
 class ProcessGroupTest(TestCase):

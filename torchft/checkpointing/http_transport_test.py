@@ -8,17 +8,28 @@ import urllib.error
 from datetime import timedelta
 from typing import Dict
 from unittest import skipUnless, TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 from parameterized import parameterized
-from torchft.checkpointing.http_transport import HTTPTransport
+from torchft.checkpointing.http_transport import _to_cpu, HTTPTransport
 from torchft.checkpointing.http_transport_bench import main as bench_main
 from torchft.checkpointing.transport import CheckpointTransport
 from torchft.checkpointing.transport_test import (
     assertStateDictEqual,
     run_multi_recovery_test,
 )
+
+# The PrivateUse1 backend's current name: "privateuseone", or e.g. "neuron"
+# once an out-of-tree backend such as torch-neuronx has renamed it.
+_PRIVATEUSE1: str = torch._C._get_privateuse1_backend_name()
+
+
+def _accelerator_or_cpu() -> torch.device:
+    accelerator = torch.accelerator.current_accelerator()
+    if torch.accelerator.is_available() and accelerator is not None:
+        return accelerator
+    return torch.device("cpu")
 
 
 class TestHTTPTransport(TestCase):
@@ -32,10 +43,12 @@ class TestHTTPTransport(TestCase):
         expected: Dict[str, object] = {
             "state": "dict",
             "tensor": torch.rand(5, 2),
-            "cuda": torch.rand(
-                2, 3, device="cuda" if torch.cuda.is_available() else "cpu"
-            ),
+            "accelerator": torch.rand(2, 3, device=_accelerator_or_cpu()),
         }
+        # Staging copies run on the transport's own stream, so finish writing
+        # the tensors first, as the Manager does before every reconfigure.
+        if torch.accelerator.is_available():
+            torch.accelerator.synchronize()
         state_dict_fn = MagicMock()
         state_dict_fn.return_value = expected
         server = HTTPTransport(
@@ -121,9 +134,9 @@ class TestHTTPTransport(TestCase):
 
         run_multi_recovery_test(self, init, device=device)
 
-    @skipUnless(torch.cuda.is_available(), "CUDA is not available")
-    def test_multi_http_transport_cuda(self) -> None:
-        device = torch.device("cuda")
+    @skipUnless(torch.accelerator.is_available(), "no accelerator is available")
+    def test_multi_http_transport_accelerator(self) -> None:
+        device = _accelerator_or_cpu()
 
         def init(rank: int, world_size: int) -> CheckpointTransport[Dict[str, object]]:
             return HTTPTransport(
@@ -132,6 +145,43 @@ class TestHTTPTransport(TestCase):
             )
 
         run_multi_recovery_test(self, init, device=device)
+
+    def test_to_cpu_stages_any_non_cpu_tensor(self) -> None:
+        # A tensor on an arbitrary (e.g. out-of-tree) accelerator must be
+        # staged to CPU; TorchFT must not need to know the device type.
+        staged = torch.rand(2, 3)
+        accelerator_tensor = MagicMock(spec=torch.Tensor)
+        accelerator_tensor.device = torch.device(_PRIVATEUSE1)
+        accelerator_tensor.cpu.return_value = staged
+        cpu_tensor = torch.rand(2)
+
+        out = _to_cpu([accelerator_tensor, cpu_tensor, "not a tensor"], False)
+
+        accelerator_tensor.cpu.assert_called_once_with()
+        self.assertIs(out[0], staged)
+        self.assertIs(out[1], cpu_tensor)
+        self.assertEqual(out[2], "not a tensor")
+
+    def test_no_staging_stream_when_streams_cannot_synchronize(self) -> None:
+        # e.g. MPS: Stream.synchronize raises, so staging uses the current stream.
+        with patch(
+            "torchft.checkpointing.http_transport.synchronizable_stream",
+            return_value=None,
+        ):
+            server = HTTPTransport(timeout=timedelta(seconds=10), num_chunks=0)
+        self.assertIsNone(server._stream)
+        expected: Dict[str, object] = {"tensor": torch.rand(5, 2)}
+        server.send_checkpoint(
+            dst_ranks=[], step=1, state_dict=expected, timeout=timedelta(seconds=10)
+        )
+        out = server.recv_checkpoint(
+            src_rank=0,
+            metadata=server.metadata(),
+            step=1,
+            timeout=timedelta(seconds=10),
+        )
+        assertStateDictEqual(self, out, expected)
+        server.shutdown()
 
     def test_benchmark(self) -> None:
         bench_main(
