@@ -202,8 +202,10 @@ class TestAcceleratorEventsCrossProcesses(TestCase):
             self.assertFalse(accelerator_events_cross_processes())
 
     def test_generic_event_cannot_be_pickled(self) -> None:
-        # No device module: record_event falls back to torch.Event, which
-        # torch.multiprocessing cannot pickle.
+        # No device module: record_event falls back to a plain torch.Event,
+        # which torch.multiprocessing cannot pickle: torch 2.14 has no reducer
+        # for it (TypeError), and newer torch pickles only interprocess events
+        # (RuntimeError).
         with _mock_accelerator("test_accel"):
             self.assertFalse(accelerator_events_cross_processes())
         from multiprocessing.reduction import ForkingPickler
@@ -214,7 +216,7 @@ class TestAcceleratorEventsCrossProcesses(TestCase):
             event = torch.Event()
         except RuntimeError:
             self.skipTest("cannot create a torch.Event here")
-        with self.assertRaises(TypeError):
+        with self.assertRaises((TypeError, RuntimeError)):
             ForkingPickler.dumps(event)
 
     def test_no_accelerator(self) -> None:

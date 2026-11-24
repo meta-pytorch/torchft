@@ -112,8 +112,10 @@ def accelerator_events_cross_processes() -> bool:
     Whether the current accelerator's events can be sent to another process.
 
     An event crosses a process boundary only if ``torch.multiprocessing`` has
-    a reducer for its type. In torch 2.14 only ``torch.cuda.Event`` has one;
-    the generic :class:`torch.Event` cannot be pickled.
+    a reducer for its type. In torch 2.14 only ``torch.cuda.Event`` has one.
+    Newer torch also registers a reducer for the generic :class:`torch.Event`,
+    but it pickles only interprocess events, and :func:`record_event` creates
+    a plain one, so the generic event never counts.
     """
     device_type = current_accelerator_type()
     if device_type is None:
@@ -127,7 +129,10 @@ def _events_cross_processes(device_type: str) -> bool:
 
     import torch.multiprocessing  # noqa: F401  registers torch's reducers
 
-    return _event_type(device_type) in ForkingPickler(io.BytesIO()).dispatch_table
+    event_type = _event_type(device_type)
+    if event_type is torch.Event:
+        return False
+    return event_type in ForkingPickler(io.BytesIO()).dispatch_table
 
 
 def synchronizable_stream() -> Optional[torch.Stream]:
