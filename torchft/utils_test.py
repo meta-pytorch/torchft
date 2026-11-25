@@ -141,8 +141,10 @@ class TestStreamContext(TestCase):
 
     def test_falls_back_to_generic_stream_context(self) -> None:
         # torch.Stream is itself a context manager; use it when the device
-        # module has no stream() helper.
-        stream = torch.Stream()
+        # module has no stream() helper. A stand-in, because torch.Stream()
+        # needs a usable device: on a CUDA build of torch without a GPU (for
+        # example upstream's CPU nightly leg) it raises a driver error.
+        stream = MagicMock(spec=torch.Stream)
         with _mock_accelerator("test_accel", SimpleNamespace()):
             self.assertIs(get_stream_context(stream), stream)
 
