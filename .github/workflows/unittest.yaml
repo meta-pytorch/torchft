@@ -12,28 +12,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runs-on: "linux.2xlarge"
+          - runs-on: "mt-l-x86iavx512-8-64"
             gpu-arch-type: "cpu"
             gpu-arch-version: ""
             torch-version: "nightly"
             python-version: "3.12"
-          - runs-on: "linux.2xlarge"
+          - runs-on: "mt-l-x86iavx512-8-64"
             gpu-arch-type: "cpu"
             gpu-arch-version: ""
             torch-version: "stable"
             python-version: "3.14"
-          - runs-on: "linux.2xlarge"
+          - runs-on: "mt-l-x86iavx512-8-64"
             gpu-arch-type: "cpu"
             gpu-arch-version: ""
             torch-version: "stable"
             python-version: "3.15"
-          - runs-on: "linux.g5.12xlarge.nvidia.gpu"
+          - runs-on: "mt-l-x86aavx2-45-167-a10g-4"
             gpu-arch-type: "cuda"
             gpu-arch-version: "12.4"
             torch-version: "nightly"
             python-version: "3.12"
 
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     with:
       timeout: 120
       runner: ${{ matrix.runs-on }}
