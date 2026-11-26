@@ -4,7 +4,37 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Optional
+
 import torch
+
+
+def accelerator_replicas_skip_reason(min_devices: int = 2) -> Optional[str]:
+    """
+    Why a test that runs replicas on accelerator devices in one process can't
+    run here, or None if it can.
+
+    The replicas need a TorchFT process group for device tensors that works
+    between threads of one process: ProcessGroupBabyNCCL, for CUDA only (Gloo
+    takes CPU and CUDA tensors, and NCCL runs in a subprocess per group).
+
+    Args:
+        min_devices: the number of accelerator devices the test needs
+    """
+    # is_available(), not current_accelerator() is None: a CUDA build of torch
+    # names CUDA as its accelerator even with no GPU.
+    if not torch.accelerator.is_available():
+        return "no accelerator is available"
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    if accelerator.type != "cuda":
+        return (
+            f"no TorchFT process group for {accelerator.type} tensors between "
+            "replicas in one process (ProcessGroupBabyNCCL is CUDA only)"
+        )
+    if torch.accelerator.device_count() < min_devices:
+        return f"needs {min_devices} {accelerator.type} devices"
+    return None
 
 
 def any_nan(ts: list[torch.Tensor]) -> bool:

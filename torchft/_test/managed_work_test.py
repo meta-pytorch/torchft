@@ -38,19 +38,27 @@ class SimpleWork(Work):
 
 
 class TestManagedWork(unittest.TestCase):
+    def _device(self, name: str) -> torch.device:
+        """The test's device: the CPU, or the current accelerator (CUDA, Neuron, ...)."""
+        if name == "cpu":
+            return torch.device("cpu")
+        # is_available(), not current_accelerator() is None: a CUDA build of
+        # torch names CUDA as its accelerator even with no GPU.
+        if not torch.accelerator.is_available():
+            self.skipTest("no accelerator is available")
+        accelerator = torch.accelerator.current_accelerator()
+        assert accelerator is not None
+        return accelerator
+
     @parameterized.parameterized.expand(
         [
-            ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            ("cpu",),
+            ("accelerator",),
         ]
     )
-    def test_callbacks_execute_after_wait(
-        self, name: str, device: torch.device
-    ) -> None:
+    def test_callbacks_execute_after_wait(self, name: str) -> None:
         """Test that callbacks are only executed after wait() is called."""
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        device = self._device(name)
 
         # Create a tensor to work with
         tensor: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)
@@ -97,17 +105,13 @@ class TestManagedWork(unittest.TestCase):
 
     @parameterized.parameterized.expand(
         [
-            ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            ("cpu",),
+            ("accelerator",),
         ]
     )
-    def test_multiple_callbacks_execute_in_order(
-        self, name: str, device: torch.device
-    ) -> None:
+    def test_multiple_callbacks_execute_in_order(self, name: str) -> None:
         """Test that multiple callbacks are executed in the order they were added."""
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        device = self._device(name)
 
         # Create a tensor to work with
         tensor: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)
@@ -167,15 +171,13 @@ class TestManagedWork(unittest.TestCase):
 
     @parameterized.parameterized.expand(
         [
-            ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            ("cpu",),
+            ("accelerator",),
         ]
     )
-    def test_future_then_api(self, name: str, device: torch.device) -> None:
+    def test_future_then_api(self, name: str) -> None:
         """Test that the future's then API works correctly with ManagedWork."""
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        device = self._device(name)
 
         # Create a tensor to work with
         tensor: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)
@@ -222,13 +224,11 @@ class TestManagedWork(unittest.TestCase):
 
     @parameterized.parameterized.expand(
         [
-            ("cpu", torch.device("cpu")),
-            ("cuda", torch.device("cuda:0")),
+            ("cpu",),
+            ("accelerator",),
         ]
     )
-    def test_callbacks_changing_return_types(
-        self, name: str, device: torch.device
-    ) -> None:
+    def test_callbacks_changing_return_types(self, name: str) -> None:
         """
         Test that callbacks can change return types and that tensors are modified in-place.
         This test demonstrates:
@@ -236,9 +236,7 @@ class TestManagedWork(unittest.TestCase):
         2. Using Future.value() instead of nonlocal
         3. Verifying tensors are modified in-place for both approaches
         """
-        # Skip if CUDA is requested but not available
-        if device.type == "cuda" and not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+        device = self._device(name)
 
         # Create tensors to work with
         tensor1: torch.Tensor = torch.ones(1, dtype=torch.float32, device=device)

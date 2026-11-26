@@ -19,6 +19,7 @@ import torch
 from parameterized import parameterized
 from torch import nn, optim
 from torchft._test.diloco_trainer import DiLoCoTrainer, MultiModel
+from torchft._test_utils import accelerator_replicas_skip_reason
 from torchft._torchft import LighthouseServer
 from torchft.local_sgd import DiLoCo
 from torchft.manager_integ_test import EventInjector, EventInjectorEvent, Runner
@@ -289,7 +290,7 @@ def mock_diloco_train_loop(
 class DiLoCoMockedUpdateTest(TestCase):
     @parameterized.expand(
         [
-            # Format: (use_cuda, n_fragments, fragment_sync_delay, fragment_update_alpha)
+            # Format: (use_accelerator, n_fragments, fragment_sync_delay, fragment_update_alpha)
             (False, 2, 0, 0),  # 2 fragments, no delay, 0% mixing
             (False, 2, 0, 0.5),  # 2 fragments, no delay, 50% mixing
             (False, 2, 0, 1),  # 2 fragments, no delay, 100% mixing
@@ -300,7 +301,7 @@ class DiLoCoMockedUpdateTest(TestCase):
     )
     def test_diloco_mocked_updates(
         self,
-        use_cuda: bool,
+        use_accelerator: bool,
         n_fragments: int,
         fragment_sync_delay: int,
         fragment_update_alpha: float,
@@ -312,9 +313,8 @@ class DiLoCoMockedUpdateTest(TestCase):
         - fragment_sync_delay: Delay between preparing and syncing fragments (0 or 1)
         - fragment_update_alpha: Controls mixing of local and global parameters (0.0, 0.5, or 1.0)
         """
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+        if use_accelerator and (reason := accelerator_replicas_skip_reason(2)):
+            self.skipTest(reason)
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -339,7 +339,7 @@ class DiLoCoMockedUpdateTest(TestCase):
                     lighthouse_address=lighthouse.address(),
                     event_injector=event_injector,
                     train_loop=mock_diloco_train_loop,
-                    use_cuda=use_cuda,
+                    use_accelerator=use_accelerator,
                     train_loop_args={
                         "quorum_barrier": quorum_barrier,
                         "n_fragments": n_fragments,
@@ -379,13 +379,13 @@ class DiLoCoMockedUpdateTest(TestCase):
 
     @parameterized.expand(
         [
-            # Format: (use_cuda, n_fragments, fragment_sync_delay, fragment_update_alpha)
+            # Format: (use_accelerator, n_fragments, fragment_sync_delay, fragment_update_alpha)
             (False, 2, 0, 0),  # 2 fragments, no delay, 0% mixing
         ]
     )
     def test_diloco_mocked_failure_recovery(
         self,
-        use_cuda: bool,
+        use_accelerator: bool,
         n_fragments: int,
         fragment_sync_delay: int,
         fragment_update_alpha: float,
@@ -395,9 +395,8 @@ class DiLoCoMockedUpdateTest(TestCase):
         One replica is set to fail at step 2, and the test verifies that
         the system recovers and parameters are correctly synchronized after recovery.
         """
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+        if use_accelerator and (reason := accelerator_replicas_skip_reason(2)):
+            self.skipTest(reason)
         if sys.platform == "darwin":
             self.skipTest("not reliable on mac")
 
@@ -425,7 +424,7 @@ class DiLoCoMockedUpdateTest(TestCase):
                     lighthouse_address=lighthouse.address(),
                     event_injector=event_injector,
                     train_loop=mock_diloco_train_loop,
-                    use_cuda=use_cuda,
+                    use_accelerator=use_accelerator,
                     train_loop_args={
                         "n_fragments": n_fragments,
                         "model_state_dict": model_state_dict,
