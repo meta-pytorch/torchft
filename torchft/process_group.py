@@ -70,7 +70,14 @@ from torch.utils._pytree import tree_any
 # We import these for backwards compatibility
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
-from torchft.utils import get_stream_context, record_event, synchronize
+from torchft.utils import (
+    accelerator_events_cross_processes,
+    current_accelerator_type,
+    get_stream_context,
+    is_accelerator_tensor,
+    record_event,
+    synchronize,
+)
 from torchft.work import _DummyWork
 
 if TYPE_CHECKING:
@@ -451,10 +458,9 @@ class ProcessGroup(BaseProcessGroup):
             return self
 
         devices = ["cpu"]
-        if torch.cuda.is_available():
-            devices.append("cuda")
-        elif torch.xpu.is_available():
-            devices.append("xpu")
+        accelerator = current_accelerator_type()
+        if accelerator is not None and accelerator not in devices:
+            devices.append(accelerator)
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
 
         return group_name
@@ -618,10 +624,9 @@ class ProcessGroupWrapper(ProcessGroup):
             else:
                 backend = None
                 try:
-                    if torch.cuda.is_available():
-                        backend = pg._get_backend(torch.device("cuda"))
-                    elif torch.xpu.is_available():
-                        backend = pg._get_backend(torch.device("xpu"))
+                    accelerator = current_accelerator_type()
+                    if accelerator is not None:
+                        backend = pg._get_backend(torch.device(accelerator))
                 except RuntimeError:
                     backend = None
                 if backend is not None and hasattr(backend, "abort"):
@@ -791,13 +796,10 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
         )
-        if torch.cuda.is_available():
+        accelerator = current_accelerator_type()
+        if accelerator is not None and accelerator != "cpu":
             pg._register_backend(
-                torch.device("cuda"), ProcessGroup.BackendType.GLOO, backend_class
-            )
-        if torch.xpu.is_available():
-            pg._register_backend(
-                torch.device("xpu"), ProcessGroup.BackendType.GLOO, backend_class
+                torch.device(accelerator), ProcessGroup.BackendType.GLOO, backend_class
             )
         return pg
 
@@ -892,7 +894,7 @@ class _WorkAcceleratorTimeout(Work):
         with context_timeout(callback, timeout):
             yield
 
-        # Cancel work if the cuda stream doesn't complete
+        # Cancel work if the accelerator stream doesn't complete
         stream_timeout(callback, timeout)
 
     def get_future(self) -> torch.futures.Future[object]:
@@ -1450,22 +1452,14 @@ class _BabyWork(Work):
         self._pg._del(self._op_id)
 
 
-def _is_any_cuda(obj: object) -> bool:
+def _is_any_accelerator(obj: object) -> bool:
     """
-    Returns true if any of the tensors in the object are CUDA tensors.
+    Returns true if any of the tensors in the object are on the current
+    accelerator (as reported by ``torch.accelerator``).
 
     Supports lists, tuples, dicts, and tensors.
     """
-    return tree_any(lambda obj: isinstance(obj, torch.Tensor) and obj.is_cuda, obj)
-
-
-def _is_any_xpu(obj: object) -> bool:
-    """
-    Returns true if any of the tensors in the object are XPU tensors.
-
-    Supports lists, tuples, dicts, and tensors.
-    """
-    return tree_any(lambda obj: isinstance(obj, torch.Tensor) and obj.is_xpu, obj)
+    return tree_any(is_accelerator_tensor, obj)
 
 
 @dataclass
@@ -1668,7 +1662,7 @@ class ProcessGroupBaby(ProcessGroup):
                                 dict[str, object],
                                 int,
                                 int,
-                                Optional[Union[torch.cuda.Event, torch.xpu.Event]],
+                                Optional[Any],
                             ],
                             op[1:],
                         )
@@ -1688,7 +1682,7 @@ class ProcessGroupBaby(ProcessGroup):
                         stream = None
 
                     with get_stream_context(stream):
-                        # Make the stream wait on the cuda event to make sure we
+                        # Make the stream wait on the event to make sure we
                         # don't start the operation until the tensor is ready.
                         if event is not None:
                             event.wait()
@@ -1771,7 +1765,7 @@ class ProcessGroupBaby(ProcessGroup):
                         int,
                         str,
                         object,
-                        Optional[Union[torch.cuda.Event, torch.xpu.Event]],
+                        Optional[Any],
                     ],
                     cmd,
                 )
@@ -1806,7 +1800,7 @@ class ProcessGroupBaby(ProcessGroup):
 
         assert self._pipe is not None
         op_id, event = cast(
-            Tuple[int, Optional[Union[torch.cuda.Event, torch.xpu.Event]]],
+            Tuple[int, Optional[Any]],
             self._pipe.recv(timeout or self._timeout),
         )
         assert op_id == op_id
@@ -1827,7 +1821,13 @@ class ProcessGroupBaby(ProcessGroup):
         pipe = self._pipe
         assert pipe is not None
 
-        is_accelerator = _is_any_cuda(args) or _is_any_xpu(args)
+        # The event goes to the worker process through the pipe, so the stream
+        # dependency is set up only when the accelerator's events can be
+        # pickled (CUDA today). Otherwise the call runs without one, as it did
+        # before for devices other than CUDA.
+        is_accelerator = (
+            _is_any_accelerator(args) and accelerator_events_cross_processes()
+        )
 
         stream_device = (
             torch.accelerator.current_stream().device if is_accelerator else None

@@ -47,7 +47,7 @@ from torchft.checkpointing import CheckpointTransport, HTTPTransport
 from torchft.checkpointing._rwlock import RWLock
 from torchft.futures import future_timeout
 from torchft.process_group import ProcessGroup, ReconfigureOptions
-from torchft.utils import get_stream_context, synchronize
+from torchft.utils import current_accelerator_type, get_stream_context, synchronize
 from torchft.work import _DummyWork
 
 IS_TRITON_AVAILABLE = True
@@ -1357,12 +1357,13 @@ class _ManagedWork(dist._Work):
     def synchronize(self) -> None:
         self._assert_same_stream()
 
-        if torch.cuda.is_available():
+        # The default c10d ``Work.block_current_stream()`` blocks the stream
+        # with a CUDA spin kernel, so only CUDA blocks the stream here. Other
+        # accelerators and CPU only set up the future callback chain, whose
+        # callbacks wait on the work in the stream context.
+        if current_accelerator_type() == "cuda":
             self.block_current_stream()
-        elif torch.xpu.is_available():
-            self._set_future_callback()
         else:
-            # No stream dependencies need to be set
             self._set_future_callback()
 
     def get_future(

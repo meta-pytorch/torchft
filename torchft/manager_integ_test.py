@@ -36,6 +36,7 @@ import torch.distributed as dist
 from parameterized import parameterized
 from torch import nn, optim
 from torch._dynamo.utils import timed
+from torchft._test_utils import accelerator_replicas_skip_reason
 from torchft._torchft import LighthouseServer
 from torchft.ddp import DistributedDataParallel
 from torchft.local_sgd import DiLoCo, LocalSGD
@@ -200,7 +201,7 @@ class Runner:
     event_injector: EventInjector
     train_loop: TrainLoop[object]
 
-    use_cuda: bool = False
+    use_accelerator: bool = False
     world_size: int = 1
     attempts: int = 3
     manager_args: Dict[str, Any] = field(default_factory=dict)
@@ -219,13 +220,15 @@ class Runner:
         ) as executor:
             futures = []
             for rank in range(self.world_size):
-                if self.use_cuda:
-                    num_cuda_devices = torch.cuda.device_count()
-                    assert num_cuda_devices >= self.num_replicas
+                if self.use_accelerator:
+                    accelerator = torch.accelerator.current_accelerator()
+                    assert accelerator is not None
+                    num_devices = torch.accelerator.device_count()
+                    assert num_devices >= self.num_replicas
                     device_index = (
-                        num_cuda_devices // self.num_replicas
+                        num_devices // self.num_replicas
                     ) * self.replica_id + rank
-                    device = torch.device(f"cuda:{device_index}")
+                    device = torch.device(accelerator.type, device_index)
                 else:
                     device = torch.device("cpu")
 
@@ -601,14 +604,13 @@ class ManagerIntegTest(TestCase):
 
     @parameterized.expand(
         [
-            (True,),  # Test with CUDA
-            (False,),  # Test without CUDA (CPU)
+            (True,),  # Test on the current accelerator
+            (False,),  # Test on the CPU
         ]
     )
-    def test_manager_allreduce(self, use_cuda: bool) -> None:
-        # Skip the test if use_cuda is True and there are not enough GPUs
-        if use_cuda and torch.cuda.device_count() < 2:
-            self.skipTest("Not enough GPUs for CUDA test")
+    def test_manager_allreduce(self, use_accelerator: bool) -> None:
+        if use_accelerator and (reason := accelerator_replicas_skip_reason(2)):
+            self.skipTest(reason)
 
         # manager supports allreduce but we found an issue where the future callback is getting called
         # before the allreduce is complete. This test is to ensure that the callback has stream synchronization
@@ -628,7 +630,7 @@ class ManagerIntegTest(TestCase):
                     lighthouse_address=lighthouse.address(),
                     event_injector=event_injector,
                     train_loop=all_reduce_callback,
-                    use_cuda=use_cuda,
+                    use_accelerator=use_accelerator,
                 )
                 futures.append(executor.submit(runner.run_replica))
 
@@ -663,7 +665,7 @@ class ManagerIntegTest(TestCase):
             for replica_id in range(num_replicas):
                 event_injector = EventInjector()
                 runner = Runner(
-                    use_cuda=True,
+                    use_accelerator=True,
                     replica_id=replica_id,
                     num_replicas=num_replicas,
                     lighthouse_address=lighthouse.address(),
@@ -702,7 +704,7 @@ class ManagerIntegTest(TestCase):
         with ThreadPoolExecutor(max_workers=num_replicas) as executor:
             for replica_id, event_injector in zip(range(num_replicas), event_injectors):
                 runner = Runner(
-                    use_cuda=True,
+                    use_accelerator=True,
                     replica_id=replica_id,
                     num_replicas=num_replicas,
                     lighthouse_address=lighthouse.address(),
