@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import os
 import pickle
 import time
 from contextlib import contextmanager
@@ -195,12 +196,40 @@ class PGTransport(CheckpointTransport[T]):
         self._timeout = timeout
         self._device = device
         self._state_dict = state_dict
+        # Live receive target for the chunked receiver: when set (see
+        # set_live_state_dict), each received chunk is D2D-copied into these
+        # live tensors as it arrives instead of staging the whole state in
+        # device buffers. Kept in a separate slot from ``_state_dict`` because
+        # the two paths have different semantics (inplace recv vs. live apply).
+        self._live_state_dict: Optional[Callable[[], object]] = None
 
     def metadata(self) -> str:
         return "<n/a>"
 
     def disallow_checkpoint(self) -> None:
         pass
+
+    def set_live_state_dict(self, state_dict: Callable[[], object]) -> None:
+        """
+        Provide a live receive target so each received chunk is copied into the
+        live tensors as soon as it arrives (see ``_drain_chunk``).
+
+        The returned tree must be structurally identical to the state dict the
+        sender exports (same KeyPaths). This is optional: when it is not set,
+        received chunks are returned as fresh device buffers and the caller
+        copies them into the live tensors during apply.
+        """
+        self._live_state_dict = state_dict
+
+    @staticmethod
+    def _recv_chunk_bytes() -> int:
+        """Chunk size for the batched receiver (bounded by 1MB..16GB)."""
+        chunk_bytes = int(os.environ.get("TORCHFT_RECV_CHUNK_BYTES", str(1000 * 1024 * 1024)))
+        if not (1024 * 1024) <= chunk_bytes <= (16 * 1024 * 1024 * 1024):
+            raise ValueError(
+                f"TORCHFT_RECV_CHUNK_BYTES must be in [1MB, 16GB], got {chunk_bytes}"
+            )
+        return chunk_bytes
 
     def send_checkpoint(
         self,
@@ -242,6 +271,51 @@ class PGTransport(CheckpointTransport[T]):
             for w in work:
                 w.wait(wait_timeout)
 
+    def _drain_chunk(
+        self,
+        works: list[Work],
+        chunk: list[tuple],
+        bufs: list[torch.Tensor],
+        results: list[object],
+        paths: list[KeyPath],
+        live_leaves: dict[KeyPath, object],
+        timeout: timedelta,
+    ) -> None:
+        for w in works:
+            w.wait(timeout)
+        for (pos, m, is_dt, spec), t in zip(chunk, bufs, strict=True):
+            base = torch.as_strided(
+                t.view(m.dtype),
+                size=m.shape,
+                stride=m.stride,
+                storage_offset=m.storage_offset,
+            )
+            target = live_leaves.get(paths[pos])
+            if isinstance(target, torch.Tensor):
+                local = target.to_local() if isinstance(target, DTensor) else target
+                assert base.shape == local.shape, (
+                    f"live tensor shape mismatch at {paths[pos]}: "
+                    f"received {tuple(base.shape)}, live {tuple(local.shape)}"
+                )
+                assert base.dtype == local.dtype, (
+                    f"live tensor dtype mismatch at {paths[pos]}: "
+                    f"received {base.dtype}, live {local.dtype}"
+                )
+                local.copy_(base)
+                # Return the live leaf itself (a DTensor stays a DTensor) so the
+                # recovered tree keeps the exact structure the sender exported,
+                # matching the transport contract for the non-live path.
+                results[pos] = target
+                # The D2D copy above is async; keep this chunk's storage from
+                # being reused until the copy has drained on the current stream.
+                # Only relevant on an accelerator (CPU copies are synchronous).
+                if t.device.type != "cpu":
+                    t.record_stream(torch.accelerator.current_stream())
+            else:
+                results[pos] = (
+                    DTensor(base, spec, requires_grad=False) if is_dt else base
+                )
+
     def recv_checkpoint(
         self,
         src_rank: int,
@@ -252,10 +326,14 @@ class PGTransport(CheckpointTransport[T]):
         """Receive a checkpoint, using the constructor timeout if timeout is None."""
         wait_timeout: timedelta = self._timeout if timeout is None else timeout
 
-        state_dict = self._state_dict() if self._state_dict else {}
-        state_dict_leaves, _ = tree_flatten_with_path(state_dict)
-
-        dst_tensors: dict[KeyPath, object] = dict(state_dict_leaves)
+        # If a live state_dict was injected (see set_live_state_dict), each
+        # chunk is copied into those live tensors as it arrives instead of
+        # staging the whole state in device buffers. The live tree must be
+        # structurally identical to the tree the sending manager exported.
+        live_target = self._live_state_dict() if self._live_state_dict else None
+        live_leaves: dict[KeyPath, object] = (
+            dict(tree_flatten_with_path(live_target)[0]) if live_target is not None else {}
+        )
 
         len_t = torch.zeros(1, dtype=torch.int64, device=self._device)
         self._pg.recv([len_t], src_rank, tag=1).wait(wait_timeout)
@@ -269,55 +347,78 @@ class PGTransport(CheckpointTransport[T]):
         meta: _StateDictMeta = pickle.loads(buf.cpu().numpy().tobytes())
         assert meta.step == step
 
-        i: int = 0
-        works: list[Work] = []
+        # Batch-receive straight into freshly allocated device buffers: post
+        # all irecvs for a chunk in one tight loop (a P2P send only completes
+        # once its matching irecv is posted, so dense posting lets the sender
+        # run at fabric bandwidth), then wait for the recvs and rebuild the
+        # tensors. Chunks are bounded by TORCHFT_RECV_CHUNK_BYTES (default
+        # 1GB) so the peak device footprint is ~2 chunks instead of the whole
+        # state, and a lookahead chunk is posted before the previous one is
+        # waited so the sender never stalls across chunk boundaries. Buffers
+        # stay on device (no .cpu() D2H round-trip); when live tensors are
+        # available they are D2D-copied per chunk (freeing each buffer right
+        # after), otherwise the caller copies them into the live tensors with a
+        # fast D2D copy during apply. Inplace recv into live training tensors
+        # is NOT used: some backends reject receiving into allocator-unsafe
+        # (live) storage, so fresh buffers (alloc-serial) are the safe fast
+        # path.
+        chunk_bytes = PGTransport._recv_chunk_bytes()
+        results: list[object] = [None] * len(meta.paths)
+        tensor_metas: list[tuple] = []  # (pos, m, is_dt, spec) in tag order
+        for pos, v in enumerate(meta.non_tensor_leaves):
+            if isinstance(v, _DTensorMeta):
+                tensor_metas.append((pos, v.local, True, v.spec))
+            elif isinstance(v, _TensorMeta):
+                tensor_metas.append((pos, v, False, None))
+            else:
+                results[pos] = v
 
-        def recv(path: KeyPath, v: _TensorMeta) -> torch.Tensor:
-            nonlocal i
+        chunks: list[list[tuple]] = []
+        cur: list[tuple] = []
+        cur_bytes = 0
+        for item in tensor_metas:
+            b = item[1].nbytes
+            if cur and cur_bytes + b > chunk_bytes:
+                chunks.append(cur)
+                cur = []
+                cur_bytes = 0
+            cur.append(item)
+            cur_bytes += b
+        if cur:
+            chunks.append(cur)
 
-            inplace = dst_tensors.get(path)
-            if (
-                isinstance(inplace, torch.Tensor)
-                and inplace.device.type == self._device.type
-            ):
-                if isinstance(inplace, DTensor):
-                    inplace = inplace._local_tensor
-                t = _cast_tensor(inplace, torch.uint8)
-                assert t.nbytes == v.nbytes, (
-                    "inplace tensor storage must be the same size"
+        prev_works: list[Work] = []
+        prev_bufs: list[torch.Tensor] = []
+        prev_chunk: list[tuple] = []
+        seq = 0
+        for chunk in chunks:
+            bufs: list[torch.Tensor] = []
+            works: list[Work] = []
+            for pos, m, is_dt, spec in chunk:
+                t = torch.empty(m.nbytes, dtype=torch.uint8, device=self._device)
+                bufs.append(t)
+                works.append(self._pg.recv([t], src_rank, tag=3 + seq))
+                seq += 1
+            if prev_works:
+                self._drain_chunk(
+                    prev_works,
+                    prev_chunk,
+                    prev_bufs,
+                    results,
+                    meta.paths,
+                    live_leaves,
+                    wait_timeout,
                 )
-            else:
-                t = torch.empty(v.nbytes, dtype=torch.uint8, device=self._device)
-
-            work = self._pg.recv([t], src_rank, tag=3 + i)
-            i += 1
-
-            if inplace is None:
-                # if not inplace we need to copy it to CPU to avoid OOMing
-                work.wait(wait_timeout)
-                t = t.cpu()
-            else:
-                works.append(work)
-
-            return torch.as_strided(
-                t.view(v.dtype),
-                size=v.shape,
-                stride=v.stride,
-                storage_offset=v.storage_offset,
+            prev_works, prev_bufs, prev_chunk = works, bufs, chunk
+        if prev_works:
+            self._drain_chunk(
+                prev_works,
+                prev_chunk,
+                prev_bufs,
+                results,
+                meta.paths,
+                live_leaves,
+                wait_timeout,
             )
 
-        values = []
-        for path, v in zip(meta.paths, meta.non_tensor_leaves):
-            if isinstance(v, _TensorMeta):
-                values.append(recv(path, v))
-            elif isinstance(v, _DTensorMeta):
-                tensor = recv(path, v.local)
-                values.append(DTensor(tensor, v.spec, requires_grad=False))
-            else:
-                # pyrefly: ignore [bad-argument-type]
-                values.append(v)
-
-        for work in works:
-            work.wait(wait_timeout)
-
-        return tree_unflatten(values, meta.treespec)
+        return tree_unflatten(results, meta.treespec)
